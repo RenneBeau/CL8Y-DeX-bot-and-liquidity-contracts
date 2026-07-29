@@ -53,6 +53,6 @@ inside `allocation_tolerance_bps`. Only then is the reference price updated.
 ## Trust Assumptions
 
 - Admin and keeper keys must be separately controlled.
-- Mainnet deployments require a manipulation-resistant price configuration.
+- Each vault reads price from its single registered CL8Y pair.
 - Keeper-provided swap parameters remain bounded by deadline, spread, token,
   pair, and post-allocation checks.
