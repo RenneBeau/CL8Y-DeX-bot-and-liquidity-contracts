@@ -24,9 +24,9 @@ Use `SOAK_ROUNDS=100 make local-soak` for an extended run.
 
 The E2E suite covers proxy and vault authorization, the governance-assigned
 CL8Y discount, absence of DEX LP custody, first and subsequent share mints,
-donation-safe pricing, proportional balanced withdrawals, single-token deposit
-and withdrawal settlement, the 5% trigger, wrong-direction rollback, unchanged
-share supply during rebalances, and zero protocol-fee accounting.
+donation-safe pricing, pro-rata withdrawals at the vault ratio, single-token
+deposit and withdrawal settlement, the 5% trigger, wrong-direction rollback,
+unchanged share supply during rebalances, and zero protocol-fee accounting.
 
 The soak suite alternates price shocks and vault inventory rebalances. Every
 round verifies exact offer-token spending, unchanged bot LP supply, and the

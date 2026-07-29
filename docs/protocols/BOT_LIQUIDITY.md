@@ -29,11 +29,11 @@ then mints shares. No shares are minted before settlement.
 
 ## Withdrawals
 
-Claims use vault balances and total supply before shares are burned. Balanced
-withdrawals transfer both claims. Token-0-only and token-1-only withdrawals
-require a swap spending exactly the user's unwanted-token claim. The final
-payout uses the actual wanted-token vault balance increase and enforces the
-user's minimum output.
+Claims use vault balances and total supply before shares are burned. Pro-rata
+withdrawals transfer both claims at the vault's current A/B ratio. Token-0-only
+and token-1-only withdrawals require a swap spending exactly the user's
+unwanted-token claim. The final payout uses the actual wanted-token vault
+balance increase and enforces the user's minimum output.
 
 ## Inflation And Donation Protection
 

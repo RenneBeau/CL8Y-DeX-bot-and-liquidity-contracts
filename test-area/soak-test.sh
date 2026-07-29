@@ -13,7 +13,7 @@ fi
 
 if [ "$(token_supply "$LIQUIDITY_ADDRESS")" = "0" ]; then
     POOL=$(query_pool)
-    balanced_deposit test1 \
+    proportional_deposit test1 \
         "$(( $(jq -r '.assets[0].amount' <<<"$POOL") / 100 ))" \
         "$(( $(jq -r '.assets[1].amount' <<<"$POOL") / 100 ))"
 fi

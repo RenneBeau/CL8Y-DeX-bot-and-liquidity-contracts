@@ -26,8 +26,8 @@ portfolio after a configurable pool-price movement. The default trigger is 5%.
 
 `contracts/bot-liquidity` manages users and issues the transferable CW20 bot LP
 token for one vault. It sends deposits into the vault, mints shares after the
-deposit settles, burns shares on withdrawal, and supports withdrawals as both
-tokens, token A only, or token B only.
+deposit settles, and burns shares on withdrawal. Users can receive their share
+at the vault's current A/B ratio, as token A only, or as token B only.
 
 The first mint permanently locks 1,000 smallest share units. Direct token
 donations are included in pre-deposit NAV and cannot be captured by the next

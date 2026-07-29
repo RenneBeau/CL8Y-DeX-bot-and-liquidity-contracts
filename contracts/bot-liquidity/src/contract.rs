@@ -199,11 +199,11 @@ fn execute_withdraw(
         .addr_validate(recipient.as_deref().unwrap_or(info.sender.as_str()))?;
     burn_shares(deps.branch(), env.clone(), info.clone(), shares)?;
     match output {
-        WithdrawalType::Balanced { min_assets } => {
+        WithdrawalType::ProRata { min_assets } => {
             if claims[0] < min_assets[0] || claims[1] < min_assets[1] {
                 return Err(ContractError::MinimumNotMet);
             }
-            let mut response = Response::new().add_attribute("action", "withdraw_balanced");
+            let mut response = Response::new().add_attribute("action", "withdraw_pro_rata");
             for (token, amount) in config.asset_tokens.iter().zip(claims) {
                 if !amount.is_zero() {
                     response =

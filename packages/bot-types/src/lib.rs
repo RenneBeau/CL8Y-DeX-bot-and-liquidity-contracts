@@ -93,7 +93,7 @@ pub struct RebalanceStatusResponse {
 
 #[cw_serde]
 pub enum WithdrawalType {
-    Balanced {
+    ProRata {
         min_assets: [Uint128; 2],
     },
     Token0 {

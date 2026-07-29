@@ -39,7 +39,7 @@ RESERVE_0=$(jq -r '.assets[0].amount' <<<"$POOL")
 RESERVE_1=$(jq -r '.assets[1].amount' <<<"$POOL")
 DEPOSIT_0=$((RESERVE_0 / 100))
 DEPOSIT_1=$((RESERVE_1 / 100))
-balanced_deposit test1 "$DEPOSIT_0" "$DEPOSIT_1"
+proportional_deposit test1 "$DEPOSIT_0" "$DEPOSIT_1"
 USER_SHARES=$(cw20_balance "$LIQUIDITY_ADDRESS" "$TEST_ADDRESS")
 SUPPLY=$(token_supply "$LIQUIDITY_ADDRESS")
 if [ "$USER_SHARES" -le 0 ] || [ $((SUPPLY - USER_SHARES)) -ne 1000 ]; then
@@ -54,7 +54,7 @@ ATTACKER_0=$((RESERVE_0 / 200))
 ATTACKER_1=$((RESERVE_1 / 200))
 cw20_transfer "$EMBER_ADDRESS" "$ATTACKER_ADDRESS" "$ATTACKER_0"
 cw20_transfer "$CORAL_ADDRESS" "$ATTACKER_ADDRESS" "$ATTACKER_1"
-balanced_deposit attacker "$ATTACKER_0" "$ATTACKER_1"
+proportional_deposit attacker "$ATTACKER_0" "$ATTACKER_1"
 ATTACKER_SHARES=$(cw20_balance "$LIQUIDITY_ADDRESS" "$ATTACKER_ADDRESS")
 if [ "$ATTACKER_SHARES" -le 0 ]; then
     echo "ERROR: second user received no bot LP shares" >&2
@@ -72,15 +72,15 @@ SINGLE_DEPOSIT=$(jq -nc --arg token "$EMBER_ADDRESS" --arg amount "$SINGLE_INPUT
       swap:{offer_token:$token,amount:$swap,min_return:"1",max_spread:"0.10",deadline:$deadline}}}')
 execute_wait "$LIQUIDITY_ADDRESS" "$SINGLE_DEPOSIT"
 
-echo "[6/10] Verifying proportional balanced withdrawal"
+echo "[6/10] Verifying withdrawal at the vault's current A/B ratio"
 ATTACKER_WITHDRAW=$((ATTACKER_SHARES / 2))
 ATTACKER_EMBER_BEFORE=$(cw20_balance "$EMBER_ADDRESS" "$ATTACKER_ADDRESS")
 ATTACKER_CORAL_BEFORE=$(cw20_balance "$CORAL_ADDRESS" "$ATTACKER_ADDRESS")
 DEADLINE=$(($(date +%s) + 600))
-BALANCED_WITHDRAW=$(jq -nc --arg shares "$ATTACKER_WITHDRAW" --argjson deadline "$DEADLINE" '
+PRO_RATA_WITHDRAW=$(jq -nc --arg shares "$ATTACKER_WITHDRAW" --argjson deadline "$DEADLINE" '
     {withdraw:{shares:$shares,recipient:null,deadline:$deadline,
-      output:{balanced:{min_assets:["1","1"]}}}}')
-execute_wait_from attacker "$LIQUIDITY_ADDRESS" "$BALANCED_WITHDRAW"
+      output:{pro_rata:{min_assets:["1","1"]}}}}')
+execute_wait_from attacker "$LIQUIDITY_ADDRESS" "$PRO_RATA_WITHDRAW"
 test "$(cw20_balance "$EMBER_ADDRESS" "$ATTACKER_ADDRESS")" -gt "$ATTACKER_EMBER_BEFORE"
 test "$(cw20_balance "$CORAL_ADDRESS" "$ATTACKER_ADDRESS")" -gt "$ATTACKER_CORAL_BEFORE"
 

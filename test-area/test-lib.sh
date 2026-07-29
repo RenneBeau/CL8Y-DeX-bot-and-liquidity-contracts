@@ -125,7 +125,7 @@ provision_attacker() {
     printf '%s\n' "$attacker_address"
 }
 
-balanced_deposit() {
+proportional_deposit() {
     local signer="$1"
     local amount_0="$2"
     local amount_1="$3"

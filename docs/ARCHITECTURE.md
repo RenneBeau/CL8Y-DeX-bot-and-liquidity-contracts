@@ -52,10 +52,10 @@ Claims are calculated before burning:
 claim_i = floor(vault_balance_i * shares / total_supply_before_burn)
 ```
 
-Balanced withdrawals transfer both claims directly. Single-token withdrawals
-swap exactly the unwanted claim and pay the wanted claim plus the actual vault
-balance increase produced by the swap. Existing users do not absorb another
-user's withdrawal swap cost.
+Pro-rata withdrawals transfer both claims at the vault's current token ratio.
+Single-token withdrawals swap exactly the unwanted claim and pay the wanted
+claim plus the actual vault balance increase produced by the swap. Existing
+users do not absorb another user's withdrawal swap cost.
 
 ## Share Accounting
 
