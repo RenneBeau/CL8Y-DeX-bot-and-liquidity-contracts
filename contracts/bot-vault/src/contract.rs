@@ -1,0 +1,569 @@
+use bot_types::{
+    RebalanceStatusResponse, SwapParams, SwapProxyHookMsg, VaultBalancesResponse,
+    VaultConfigResponse, VaultExecuteMsg, VaultPriceResponse, VaultQueryMsg,
+};
+use cl8y_dex::{AssetInfo, ObserveResponse, PairInfo, PairQueryMsg, PoolResponse};
+use cosmwasm_std::{
+    entry_point, to_json_binary, Addr, Binary, Decimal, Deps, DepsMut, Env, MessageInfo, Reply,
+    Response, StdError, StdResult, SubMsg, Uint128, Uint256, WasmMsg,
+};
+use cw2::set_contract_version;
+use cw20::{BalanceResponse, Cw20ExecuteMsg, Cw20QueryMsg, TokenInfoResponse};
+
+use crate::error::ContractError;
+use crate::msg::InstantiateMsg;
+use crate::state::{Config, CONFIG, PENDING_REBALANCE_ALLOCATION};
+
+const CONTRACT_NAME: &str = "crates.io:cl8y-bot-vault";
+const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
+const DEFAULT_REBALANCE_THRESHOLD_BPS: u16 = 500;
+const DEFAULT_ALLOCATION_TOLERANCE_BPS: u16 = 100;
+const MAX_SPREAD: Decimal = Decimal::percent(10);
+const REBALANCE_REPLY_ID: u64 = 1;
+
+#[entry_point]
+pub fn instantiate(
+    deps: DepsMut,
+    env: Env,
+    _info: MessageInfo,
+    msg: InstantiateMsg,
+) -> Result<Response, ContractError> {
+    set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
+    let pair = deps.api.addr_validate(&msg.pair)?;
+    let pair_info: PairInfo = deps
+        .querier
+        .query_wasm_smart(&pair, &PairQueryMsg::Pair {})?;
+    if pair_info.contract_addr != pair {
+        return Err(ContractError::InvalidPair);
+    }
+    let [asset_0, asset_1] = pair_info.asset_infos;
+    let asset_tokens = [
+        token_addr(deps.as_ref(), asset_0)?,
+        token_addr(deps.as_ref(), asset_1)?,
+    ];
+    if asset_tokens[0] == asset_tokens[1] {
+        return Err(ContractError::InvalidPair);
+    }
+    let token_0: TokenInfoResponse = deps
+        .querier
+        .query_wasm_smart(&asset_tokens[0], &Cw20QueryMsg::TokenInfo {})?;
+    let token_1: TokenInfoResponse = deps
+        .querier
+        .query_wasm_smart(&asset_tokens[1], &Cw20QueryMsg::TokenInfo {})?;
+    if token_0.decimals != token_1.decimals {
+        return Err(ContractError::DecimalMismatch);
+    }
+    let pool: PoolResponse = deps
+        .querier
+        .query_wasm_smart(&pair, &PairQueryMsg::Pool {})?;
+    let reference_price = spot_price(&pool)?;
+    let rebalance_threshold_bps = msg
+        .rebalance_threshold_bps
+        .unwrap_or(DEFAULT_REBALANCE_THRESHOLD_BPS);
+    let allocation_tolerance_bps = msg
+        .allocation_tolerance_bps
+        .unwrap_or(DEFAULT_ALLOCATION_TOLERANCE_BPS);
+    validate_threshold(rebalance_threshold_bps)?;
+    validate_threshold(allocation_tolerance_bps)?;
+    CONFIG.save(
+        deps.storage,
+        &Config {
+            admin: deps.api.addr_validate(&msg.admin)?,
+            keeper: deps.api.addr_validate(&msg.keeper)?,
+            liquidity_contract: None,
+            proxy: deps.api.addr_validate(&msg.proxy)?,
+            pair,
+            asset_tokens,
+            decimals: token_0.decimals,
+            twap_window_seconds: msg.twap_window_seconds,
+            rebalance_threshold_bps,
+            allocation_tolerance_bps,
+            reference_price,
+        },
+    )?;
+    Ok(Response::new()
+        .add_attribute("action", "instantiate")
+        .add_attribute("vault", env.contract.address))
+}
+
+#[entry_point]
+pub fn execute(
+    deps: DepsMut,
+    env: Env,
+    info: MessageInfo,
+    msg: VaultExecuteMsg,
+) -> Result<Response, ContractError> {
+    match msg {
+        VaultExecuteMsg::SetLiquidityContract { liquidity_contract } => {
+            execute_set_liquidity(deps, info, liquidity_contract)
+        }
+        VaultExecuteMsg::LiquiditySwap { params } => {
+            execute_liquidity_swap(deps, env, info, params)
+        }
+        VaultExecuteMsg::TransferTo {
+            token,
+            amount,
+            recipient,
+        } => execute_transfer(deps, info, token, amount, recipient),
+        VaultExecuteMsg::FinalizeLiquidityOperation {} => execute_finalize(deps, info),
+        VaultExecuteMsg::Rebalance { params } => execute_rebalance(deps, env, info, params),
+        VaultExecuteMsg::SyncReference {} => execute_sync_reference(deps, env, info),
+        VaultExecuteMsg::UpdateKeeper { keeper } => execute_update_keeper(deps, info, keeper),
+        VaultExecuteMsg::UpdateThresholds {
+            rebalance_threshold_bps,
+            allocation_tolerance_bps,
+        } => execute_update_thresholds(
+            deps,
+            info,
+            rebalance_threshold_bps,
+            allocation_tolerance_bps,
+        ),
+        VaultExecuteMsg::TransferAdmin { admin } => execute_transfer_admin(deps, info, admin),
+    }
+}
+
+fn execute_set_liquidity(
+    deps: DepsMut,
+    info: MessageInfo,
+    liquidity_contract: String,
+) -> Result<Response, ContractError> {
+    let mut config = CONFIG.load(deps.storage)?;
+    assert_admin(&config, &info.sender)?;
+    if config.liquidity_contract.is_some() {
+        return Err(ContractError::LiquidityAlreadyConfigured);
+    }
+    config.liquidity_contract = Some(deps.api.addr_validate(&liquidity_contract)?);
+    CONFIG.save(deps.storage, &config)?;
+    Ok(Response::new()
+        .add_attribute("action", "set_liquidity_contract")
+        .add_attribute("liquidity_contract", liquidity_contract))
+}
+
+fn execute_liquidity_swap(
+    deps: DepsMut,
+    env: Env,
+    info: MessageInfo,
+    params: SwapParams,
+) -> Result<Response, ContractError> {
+    let config = CONFIG.load(deps.storage)?;
+    assert_liquidity(&config, &info.sender)?;
+    validate_swap(deps.as_ref(), &env, &config, &params)?;
+    Ok(Response::new()
+        .add_message(proxy_swap_message(&config, params.clone())?)
+        .add_attribute("action", "liquidity_swap")
+        .add_attribute("offer_token", params.offer_token)
+        .add_attribute("amount", params.amount))
+}
+
+fn execute_transfer(
+    deps: DepsMut,
+    info: MessageInfo,
+    token: String,
+    amount: Uint128,
+    recipient: String,
+) -> Result<Response, ContractError> {
+    let config = CONFIG.load(deps.storage)?;
+    assert_liquidity(&config, &info.sender)?;
+    let token = deps.api.addr_validate(&token)?;
+    if !config.asset_tokens.contains(&token) {
+        return Err(ContractError::UnsupportedToken);
+    }
+    if amount.is_zero() {
+        return Err(ContractError::ZeroAmount);
+    }
+    let recipient = deps.api.addr_validate(&recipient)?;
+    Ok(Response::new()
+        .add_message(WasmMsg::Execute {
+            contract_addr: token.to_string(),
+            msg: to_json_binary(&Cw20ExecuteMsg::Transfer {
+                recipient: recipient.to_string(),
+                amount,
+            })?,
+            funds: vec![],
+        })
+        .add_attribute("action", "transfer_to")
+        .add_attribute("recipient", recipient))
+}
+
+fn execute_finalize(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractError> {
+    let config = CONFIG.load(deps.storage)?;
+    assert_liquidity(&config, &info.sender)?;
+    Ok(Response::new().add_attribute("action", "finalize_liquidity_operation"))
+}
+
+fn execute_rebalance(
+    deps: DepsMut,
+    env: Env,
+    info: MessageInfo,
+    params: SwapParams,
+) -> Result<Response, ContractError> {
+    let config = CONFIG.load(deps.storage)?;
+    if info.sender != config.keeper {
+        return Err(ContractError::Unauthorized);
+    }
+    if PENDING_REBALANCE_ALLOCATION
+        .may_load(deps.storage)?
+        .is_some()
+    {
+        return Err(ContractError::RebalancePending);
+    }
+    let status = rebalance_status(deps.as_ref(), &env, &config)?;
+    if !status.should_rebalance {
+        return Err(ContractError::RebalanceNotRequired);
+    }
+    validate_swap(deps.as_ref(), &env, &config, &params)?;
+    PENDING_REBALANCE_ALLOCATION.save(deps.storage, &status.allocation_deviation_bps)?;
+    Ok(Response::new()
+        .add_submessage(SubMsg::reply_on_success(
+            proxy_swap_message(&config, params)?,
+            REBALANCE_REPLY_ID,
+        ))
+        .add_attribute("action", "rebalance"))
+}
+
+fn execute_sync_reference(
+    deps: DepsMut,
+    env: Env,
+    info: MessageInfo,
+) -> Result<Response, ContractError> {
+    let mut config = CONFIG.load(deps.storage)?;
+    if info.sender != config.keeper {
+        return Err(ContractError::Unauthorized);
+    }
+    let status = rebalance_status(deps.as_ref(), &env, &config)?;
+    if !status.should_rebalance {
+        return Err(ContractError::RebalanceNotRequired);
+    }
+    if status.allocation_deviation_bps > config.allocation_tolerance_bps {
+        return Err(ContractError::AllocationOutsideTolerance);
+    }
+    config.reference_price = status.current_price;
+    CONFIG.save(deps.storage, &config)?;
+    Ok(Response::new().add_attribute("action", "sync_reference"))
+}
+
+#[entry_point]
+pub fn reply(deps: DepsMut, env: Env, reply: Reply) -> Result<Response, ContractError> {
+    if reply.id != REBALANCE_REPLY_ID {
+        return Err(ContractError::UnknownReply);
+    }
+    let previous = PENDING_REBALANCE_ALLOCATION
+        .may_load(deps.storage)?
+        .ok_or(ContractError::MissingPendingRebalance)?;
+    let mut config = CONFIG.load(deps.storage)?;
+    let pool: PoolResponse = deps
+        .querier
+        .query_wasm_smart(&config.pair, &PairQueryMsg::Pool {})?;
+    let current = allocation_deviation(deps.as_ref(), &env.contract.address, &config, &pool)?;
+    if current >= previous && current > config.allocation_tolerance_bps {
+        return Err(ContractError::AllocationDidNotImprove);
+    }
+    config.reference_price = query_price(deps.as_ref(), &env, &config)?;
+    CONFIG.save(deps.storage, &config)?;
+    PENDING_REBALANCE_ALLOCATION.remove(deps.storage);
+    Ok(Response::new()
+        .add_attribute("action", "complete_rebalance")
+        .add_attribute("allocation_deviation_bps", current.to_string()))
+}
+
+fn execute_update_keeper(
+    deps: DepsMut,
+    info: MessageInfo,
+    keeper: String,
+) -> Result<Response, ContractError> {
+    let mut config = CONFIG.load(deps.storage)?;
+    assert_admin(&config, &info.sender)?;
+    config.keeper = deps.api.addr_validate(&keeper)?;
+    CONFIG.save(deps.storage, &config)?;
+    Ok(Response::new().add_attribute("action", "update_keeper"))
+}
+
+fn execute_update_thresholds(
+    deps: DepsMut,
+    info: MessageInfo,
+    rebalance: Option<u16>,
+    allocation: Option<u16>,
+) -> Result<Response, ContractError> {
+    let mut config = CONFIG.load(deps.storage)?;
+    assert_admin(&config, &info.sender)?;
+    if let Some(value) = rebalance {
+        validate_threshold(value)?;
+        config.rebalance_threshold_bps = value;
+    }
+    if let Some(value) = allocation {
+        validate_threshold(value)?;
+        config.allocation_tolerance_bps = value;
+    }
+    CONFIG.save(deps.storage, &config)?;
+    Ok(Response::new().add_attribute("action", "update_thresholds"))
+}
+
+fn execute_transfer_admin(
+    deps: DepsMut,
+    info: MessageInfo,
+    admin: String,
+) -> Result<Response, ContractError> {
+    let mut config = CONFIG.load(deps.storage)?;
+    assert_admin(&config, &info.sender)?;
+    config.admin = deps.api.addr_validate(&admin)?;
+    CONFIG.save(deps.storage, &config)?;
+    Ok(Response::new().add_attribute("action", "transfer_admin"))
+}
+
+#[entry_point]
+pub fn query(deps: Deps, env: Env, msg: VaultQueryMsg) -> StdResult<Binary> {
+    let config = CONFIG.load(deps.storage)?;
+    match msg {
+        VaultQueryMsg::Config {} => to_json_binary(&VaultConfigResponse {
+            admin: config.admin.to_string(),
+            keeper: config.keeper.to_string(),
+            liquidity_contract: config.liquidity_contract.map(|addr| addr.to_string()),
+            proxy: config.proxy.to_string(),
+            pair: config.pair.to_string(),
+            asset_tokens: config.asset_tokens.map(|addr| addr.to_string()),
+            decimals: config.decimals,
+            twap_window_seconds: config.twap_window_seconds,
+            rebalance_threshold_bps: config.rebalance_threshold_bps,
+            allocation_tolerance_bps: config.allocation_tolerance_bps,
+        }),
+        VaultQueryMsg::Balances {} => to_json_binary(&VaultBalancesResponse {
+            balances: balances(deps, &env.contract.address, &config)?,
+        }),
+        VaultQueryMsg::Price {} => to_json_binary(&VaultPriceResponse {
+            token1_per_token0: query_price(deps, &env, &config)?,
+        }),
+        VaultQueryMsg::RebalanceStatus {} => {
+            to_json_binary(&rebalance_status(deps, &env, &config)?)
+        }
+    }
+}
+
+fn rebalance_status(deps: Deps, env: &Env, config: &Config) -> StdResult<RebalanceStatusResponse> {
+    let current_price = query_price(deps, env, config)?;
+    let pool: PoolResponse = deps
+        .querier
+        .query_wasm_smart(&config.pair, &PairQueryMsg::Pool {})?;
+    let allocation_deviation_bps =
+        allocation_deviation(deps, &env.contract.address, config, &pool)?;
+    let price_deviation_bps = relative_deviation(current_price, config.reference_price)?;
+    Ok(RebalanceStatusResponse {
+        should_rebalance: price_deviation_bps >= config.rebalance_threshold_bps,
+        price_deviation_bps,
+        allocation_deviation_bps,
+        reference_price: config.reference_price,
+        current_price,
+    })
+}
+
+fn query_price(deps: Deps, _env: &Env, config: &Config) -> StdResult<Decimal> {
+    if config.twap_window_seconds == 0 {
+        let pool: PoolResponse = deps
+            .querier
+            .query_wasm_smart(&config.pair, &PairQueryMsg::Pool {})?;
+        return spot_price(&pool).map_err(|error| StdError::generic_err(error.to_string()));
+    }
+    let response: ObserveResponse = deps.querier.query_wasm_smart(
+        &config.pair,
+        &PairQueryMsg::Observe {
+            seconds_ago: vec![0, config.twap_window_seconds],
+        },
+    )?;
+    if response.price_a_cumulatives.len() != 2
+        || response.price_a_cumulatives[0] <= response.price_a_cumulatives[1]
+    {
+        return Err(StdError::generic_err("empty TWAP history"));
+    }
+    let difference = response.price_a_cumulatives[0] - response.price_a_cumulatives[1];
+    let atomics = difference.checked_div(Uint128::from(config.twap_window_seconds))?;
+    Decimal::from_atomics(atomics, 18).map_err(|error| StdError::generic_err(error.to_string()))
+}
+
+fn allocation_deviation(
+    deps: Deps,
+    vault: &Addr,
+    config: &Config,
+    pool: &PoolResponse,
+) -> StdResult<u16> {
+    let holdings = balances(deps, vault, config)?;
+    if holdings[0].is_zero() && holdings[1].is_zero() {
+        return Ok(0);
+    }
+    if holdings[0].is_zero() || holdings[1].is_zero() {
+        return Ok(10_000);
+    }
+    let expected = Uint256::from(pool.assets[1].amount) * Uint256::from(holdings[0]);
+    let actual = Uint256::from(holdings[1]) * Uint256::from(pool.assets[0].amount);
+    ratio_deviation(actual, expected)
+}
+
+fn relative_deviation(current: Decimal, reference: Decimal) -> StdResult<u16> {
+    ratio_deviation(
+        Uint256::from(current.atomics()),
+        Uint256::from(reference.atomics()),
+    )
+}
+
+fn ratio_deviation(actual: Uint256, expected: Uint256) -> StdResult<u16> {
+    if expected.is_zero() {
+        return Err(StdError::generic_err("empty reference"));
+    }
+    let difference = if actual >= expected {
+        actual - expected
+    } else {
+        expected - actual
+    };
+    let value = (difference * Uint256::from(10_000u16) / expected).min(Uint256::from(10_000u16));
+    value
+        .to_string()
+        .parse()
+        .map_err(|_| StdError::generic_err("deviation overflow"))
+}
+
+fn balances(deps: Deps, vault: &Addr, config: &Config) -> StdResult<[Uint128; 2]> {
+    Ok([
+        cw20_balance(deps, &config.asset_tokens[0], vault)?,
+        cw20_balance(deps, &config.asset_tokens[1], vault)?,
+    ])
+}
+
+fn cw20_balance(deps: Deps, token: &Addr, account: &Addr) -> StdResult<Uint128> {
+    let response: BalanceResponse = deps.querier.query_wasm_smart(
+        token,
+        &Cw20QueryMsg::Balance {
+            address: account.to_string(),
+        },
+    )?;
+    Ok(response.balance)
+}
+
+fn proxy_swap_message(config: &Config, params: SwapParams) -> StdResult<WasmMsg> {
+    let hook = SwapProxyHookMsg::Swap {
+        pair: config.pair.to_string(),
+        min_return: params.min_return,
+        max_spread: params.max_spread,
+        deadline: params.deadline,
+    };
+    Ok(WasmMsg::Execute {
+        contract_addr: params.offer_token,
+        msg: to_json_binary(&Cw20ExecuteMsg::Send {
+            contract: config.proxy.to_string(),
+            amount: params.amount,
+            msg: to_json_binary(&hook)?,
+        })?,
+        funds: vec![],
+    })
+}
+
+fn validate_swap(
+    deps: Deps,
+    env: &Env,
+    config: &Config,
+    params: &SwapParams,
+) -> Result<(), ContractError> {
+    let token = deps.api.addr_validate(&params.offer_token)?;
+    if !config.asset_tokens.contains(&token) {
+        return Err(ContractError::UnsupportedToken);
+    }
+    if params.amount.is_zero() {
+        return Err(ContractError::ZeroAmount);
+    }
+    if params.deadline < env.block.time.seconds() {
+        return Err(ContractError::Expired);
+    }
+    if params.max_spread > MAX_SPREAD {
+        return Err(ContractError::ExcessiveSpread);
+    }
+    Ok(())
+}
+
+fn spot_price(pool: &PoolResponse) -> Result<Decimal, ContractError> {
+    if pool.assets[0].amount.is_zero() || pool.assets[1].amount.is_zero() {
+        return Err(ContractError::EmptyPrice);
+    }
+    Ok(Decimal::from_ratio(
+        pool.assets[1].amount,
+        pool.assets[0].amount,
+    ))
+}
+
+fn token_addr(deps: Deps, info: AssetInfo) -> Result<Addr, ContractError> {
+    match info {
+        AssetInfo::Token { contract_addr } => Ok(deps.api.addr_validate(&contract_addr)?),
+        AssetInfo::NativeToken { .. } => Err(ContractError::InvalidPair),
+    }
+}
+
+fn assert_admin(config: &Config, sender: &Addr) -> Result<(), ContractError> {
+    if sender != config.admin {
+        return Err(ContractError::Unauthorized);
+    }
+    Ok(())
+}
+
+fn assert_liquidity(config: &Config, sender: &Addr) -> Result<(), ContractError> {
+    let liquidity = config
+        .liquidity_contract
+        .as_ref()
+        .ok_or(ContractError::LiquidityNotConfigured)?;
+    if sender != liquidity {
+        return Err(ContractError::Unauthorized);
+    }
+    Ok(())
+}
+
+fn validate_threshold(value: u16) -> Result<(), ContractError> {
+    if value == 0 || value > 10_000 {
+        return Err(ContractError::InvalidThreshold);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cl8y_dex::Asset;
+
+    #[test]
+    fn ratio_deviation_uses_reference_basis() {
+        assert_eq!(
+            ratio_deviation(Uint256::from(45u8), Uint256::from(55u8)).unwrap(),
+            1_818
+        );
+        assert_eq!(
+            ratio_deviation(Uint256::from(95u8), Uint256::from(100u8)).unwrap(),
+            500
+        );
+    }
+
+    #[test]
+    fn spot_price_is_token1_per_token0() {
+        let pool = PoolResponse {
+            assets: [
+                Asset {
+                    info: AssetInfo::Token {
+                        contract_addr: "token0".to_string(),
+                    },
+                    amount: Uint128::new(200),
+                },
+                Asset {
+                    info: AssetInfo::Token {
+                        contract_addr: "token1".to_string(),
+                    },
+                    amount: Uint128::new(100),
+                },
+            ],
+            total_share: Uint128::one(),
+        };
+        assert_eq!(spot_price(&pool).unwrap(), Decimal::percent(50));
+    }
+
+    #[test]
+    fn thresholds_are_bounded() {
+        assert_eq!(validate_threshold(0), Err(ContractError::InvalidThreshold));
+        assert!(validate_threshold(500).is_ok());
+        assert_eq!(
+            validate_threshold(10_001),
+            Err(ContractError::InvalidThreshold)
+        );
+    }
+}

@@ -1,0 +1,25 @@
+.PHONY: test local-setup local-test local-e2e local-soak local-all local-stop local-reset
+
+test:
+	cargo test --workspace
+
+local-setup:
+	./test-area/setup.sh
+
+local-test:
+	./test-area/integration-test.sh
+
+local-e2e:
+	./test-area/run-e2e.sh
+
+local-soak:
+	./test-area/run-soak.sh
+
+local-all:
+	./test-area/run-all.sh
+
+local-stop:
+	./test-area/stop.sh
+
+local-reset:
+	./test-area/reset.sh

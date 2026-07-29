@@ -1,0 +1,9 @@
+[package]
+name = "bot-types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+cosmwasm-schema.workspace = true
+cosmwasm-std.workspace = true

@@ -1,0 +1,106 @@
+# Protocol Architecture
+
+The protocol separates fee access, asset custody, and user ownership into
+three contracts. There is one shared swap proxy, one vault per trading pair,
+and one bot-liquidity CW20 contract per vault.
+
+```text
+User
+  | deposit / withdraw
+  v
+Bot Liquidity CW20 (one per bot)
+  | transfers and commands
+  v
+Bot Vault (one per pair)
+  | CW20 send
+  v
+Shared Swap Proxy
+  | discounted CW20 send
+  v
+CL8Y Pair
+  | output sent directly to vault
+  v
+Bot Vault
+```
+
+## Asset Boundaries
+
+- The vault is the only contract that accounts for user token A and token B.
+- The proxy holds CL8Y for its fee tier but does not retain routed swap funds.
+- The liquidity contract holds share accounting, not underlying user assets.
+- The protocol never calls CL8Y `provide_liquidity` or `withdraw_liquidity`.
+- The protocol never mints or holds CL8Y DEX LP tokens.
+- Every pair has a distinct vault and a distinct fungible bot LP token.
+
+## Deposit Settlement
+
+1. A user grants the bot-liquidity contract CW20 allowances.
+2. The user submits exact maximum token amounts, a deadline, `min_shares`, and
+   an optional swap plan.
+3. CW20 `transfer_from` messages move funds directly to the assigned vault.
+4. If needed, the vault routes only the deposited offer amount through the
+   shared proxy.
+5. A reply queries settled vault balances and mints shares from the increase in
+   NAV measured at one pre-operation price snapshot.
+6. The transaction reverts atomically if allocation, deadline, or minimum-share
+   checks fail.
+
+## Withdrawal Settlement
+
+Claims are calculated before burning:
+
+```text
+claim_i = floor(vault_balance_i * shares / total_supply_before_burn)
+```
+
+Balanced withdrawals transfer both claims directly. Single-token withdrawals
+swap exactly the unwanted claim and pay the wanted claim plus the actual vault
+balance increase produced by the swap. Existing users do not absorb another
+user's withdrawal swap cost.
+
+## Share Accounting
+
+Token assets must have equal decimals. NAV is denominated in token 0:
+
+```text
+NAV = token0_balance + token1_balance / token1_per_token0_price
+```
+
+For an established vault:
+
+```text
+minted_shares = floor(deposit_value * total_supply / pre_deposit_NAV)
+```
+
+The first mint permanently locks 1,000 smallest share units. Any assets donated
+before the first deposit also receive permanently locked shares. Later direct
+donations are included in pre-deposit NAV and benefit existing shareholders,
+not the next depositor.
+
+## Rebalancing
+
+The vault records a reference token1-per-token0 pool price. A keeper may submit
+a constrained swap after the configured price-movement threshold is reached,
+5% by default. The vault requires the post-swap token allocation to improve or
+remain within its configured tolerance before recording a new reference.
+
+Local tests use spot mode (`twap_window_seconds = 0`). Economic deployments
+should use CL8Y's TWAP with a sufficiently long window, normally at least 1,800
+seconds, and independent oracle validation for economically significant pools.
+
+## CL8Y Discount
+
+The shared proxy holds CL8Y and is the effective trader seen by CL8Y pairs.
+CL8Y contracts cannot self-register. Fee-registry governance must execute:
+
+```json
+{
+  "register_wallet": {
+    "wallet": "<SWAP_PROXY>",
+    "tier_id": 5
+  }
+}
+```
+
+Standard tiers continue checking the proxy's CL8Y balance during discount
+queries. Pair-side discount values may remain cached for up to 300 seconds.

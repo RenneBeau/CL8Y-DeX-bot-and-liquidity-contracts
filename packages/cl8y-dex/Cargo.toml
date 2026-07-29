@@ -1,0 +1,9 @@
+[package]
+name = "cl8y-dex"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+cosmwasm-schema.workspace = true
+cosmwasm-std.workspace = true
