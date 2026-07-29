@@ -4,9 +4,9 @@ Source: `contracts/bot-vault`
 
 ## Purpose
 
-Each bot vault isolates one pair's token inventory. It recognizes exactly two
-ordered CW20 assets and one CL8Y pair. It does not issue shares and does not
-hold or manage CL8Y DEX LP positions.
+Each bot vault stores one bot's pooled token inventory. It recognizes exactly
+two ordered CW20 assets and one CL8Y pair, executes the bot's portfolio trades,
+and sends proportional assets to users through its liquidity contract.
 
 ## Roles
 

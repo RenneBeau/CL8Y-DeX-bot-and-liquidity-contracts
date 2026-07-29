@@ -12,8 +12,8 @@ vault's token A and token B inventory.
 
 The contract delegates standard transfer, send, burn, allowance, delegated
 transfer, marketing, and CW20 query behavior to `cw20-base`. Only the contract
-itself is configured as minter. Each vault receives a different liquidity-token
-instance, so shares from unrelated pairs can never be mixed.
+itself is configured as minter. Each vault receives its own liquidity-token
+instance, keeping every bot's shares tied to that bot's portfolio.
 
 ## Deposits
 
@@ -50,8 +50,8 @@ user's minimum output.
 - Share minting occurs only after settled balance and allocation checks.
 - Withdrawal claims are proportional to pre-burn supply.
 - A single-token withdrawal swaps only that owner's proportional claim.
-- No protocol fee is deducted in the current implementation.
-- The contract never calls CL8Y liquidity-provision functions.
+- The current test implementation mints and redeems shares without an
+  additional protocol charge.
 
 ## Supported Assets
 

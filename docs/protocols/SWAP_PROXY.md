@@ -4,9 +4,9 @@ Source: `contracts/swap-proxy`
 
 ## Purpose
 
-The proxy allows many isolated bot vaults to share one CL8Y fee registration.
-It holds the protocol's CL8Y balance and forwards approved vault swaps to the
-vault's immutable CL8Y pair.
+The proxy gives many isolated bot vaults access to one CL8Y fee registration.
+It holds the protocol's CL8Y balance, connects every approved vault to its
+assigned pair, and returns each trade's output to the requesting vault.
 
 ## Registration
 
@@ -43,7 +43,7 @@ execution or method to withdraw vault asset tokens.
 - Only a route's two tokens can be offered.
 - Swap output always returns to the route's vault.
 - The exact received amount is forwarded in the same transaction.
-- User accounting and bot LP supply never exist in this contract.
+- User accounting and bot LP supply remain in each bot's liquidity contract.
 
 ## Trust Assumptions
 

@@ -1,37 +1,38 @@
-# CL8Y Inventory Bot Contracts
+# CL8Y DeX Bot And Liquidity Contracts
 
-This workspace contains a clean three-contract architecture for token inventory
-bots using CL8Y DEX as a swap venue. The bot never provides DEX liquidity and
-never holds CL8Y DEX LP tokens.
+This project lets users pool two CW20 tokens in an automated trading bot. Each
+bot keeps its token A and token B portfolio in an isolated vault, rebalances the
+portfolio when the market moves, and gives depositors transferable bot LP
+tokens representing their share of the vault. A shared swap proxy holds CL8Y so
+all approved bot vaults can benefit from the proxy's assigned CL8Y fee tier.
 
 ## Contracts
 
 ### Shared swap proxy
 
-`contracts/swap-proxy` holds CL8Y for one governance-assigned fee tier. It
-supports multiple registered vault/pair routes, accepts swaps only from the
-vault assigned to that pair, forwards the exact received CW20 amount to CL8Y,
-and sends output directly back to that vault.
+`contracts/swap-proxy` connects approved bot vaults to their CL8Y trading pools.
+It holds the CL8Y balance used for one governance-assigned fee tier and shares
+that discount across every registered vault. Swap output returns directly to
+the vault that requested the trade.
 
 ### Bot vault
 
-`contracts/bot-vault` is instantiated once per bot/pair. It holds only the
-pair's token A and token B for accounting purposes. Its assigned liquidity
-contract controls user deposits and withdrawals; its keeper can perform a
-constrained inventory rebalance after a configurable pool-price movement. The
-default trigger is 5%.
+`contracts/bot-vault` is the portfolio account for one bot and one token pair.
+It stores the users' combined token A and token B inventory. Its liquidity
+contract handles deposits and withdrawals, while its keeper rebalances the
+portfolio after a configurable pool-price movement. The default trigger is 5%.
 
 ### Bot liquidity token
 
-`contracts/bot-liquidity` is instantiated once per vault and implements that
-bot's transferable CW20 ownership token. Deposits are pulled directly into the
-assigned vault. Shares are minted only in a reply after transfers and any swap
-settle. Withdrawals burn shares against proportional vault balances and support
-balanced, token-A-only, or token-B-only output.
+`contracts/bot-liquidity` manages users and issues the transferable CW20 bot LP
+token for one vault. It sends deposits into the vault, mints shares after the
+deposit settles, burns shares on withdrawal, and supports withdrawals as both
+tokens, token A only, or token B only.
 
 The first mint permanently locks 1,000 smallest share units. Direct token
 donations are included in pre-deposit NAV and cannot be captured by the next
-depositor. This version charges no protocol fee.
+depositor. Deposits, withdrawals, and rebalances currently use a zero protocol
+charge.
 
 ## Price Source
 

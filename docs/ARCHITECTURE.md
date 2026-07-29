@@ -25,12 +25,11 @@ Bot Vault
 
 ## Asset Boundaries
 
-- The vault is the only contract that accounts for user token A and token B.
-- The proxy holds CL8Y for its fee tier but does not retain routed swap funds.
-- The liquidity contract holds share accounting, not underlying user assets.
-- The protocol never calls CL8Y `provide_liquidity` or `withdraw_liquidity`.
-- The protocol never mints or holds CL8Y DEX LP tokens.
+- The vault stores and accounts for user token A and token B.
+- The proxy holds CL8Y for its fee tier and routes vault swaps.
+- The liquidity contract manages deposits, withdrawals, and bot LP shares.
 - Every pair has a distinct vault and a distinct fungible bot LP token.
+- CL8Y pools provide swap execution and market pricing for each bot.
 
 ## Deposit Settlement
 
