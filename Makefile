@@ -1,7 +1,10 @@
-.PHONY: test local-setup local-test local-e2e local-soak local-all local-stop local-reset
+.PHONY: test test-keeper local-setup local-test local-e2e local-soak local-all local-stop local-reset
 
 test:
 	cargo test --workspace
+
+test-keeper:
+	python3 -m unittest discover -s examples/keeper -p 'test_*.py'
 
 local-setup:
 	./test-area/setup.sh

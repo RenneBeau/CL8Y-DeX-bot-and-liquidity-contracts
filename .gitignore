@@ -2,3 +2,5 @@
 /artifacts/
 /test-area/.cache/
 /test-area/.env
+__pycache__/
+*.pyc

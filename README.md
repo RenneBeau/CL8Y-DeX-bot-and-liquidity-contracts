@@ -67,3 +67,4 @@ See `test-area/README.md` for the LocalTerra lifecycle.
 - [Bot liquidity token protocol](docs/protocols/BOT_LIQUIDITY.md)
 - [Verification report](docs/TEST_RESULTS.md)
 - [Security notice](SECURITY.md)
+- [Keeper example](examples/keeper/README.md)
