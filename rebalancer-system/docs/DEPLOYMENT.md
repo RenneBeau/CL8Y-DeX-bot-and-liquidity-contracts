@@ -112,7 +112,7 @@ Repeat these steps for every new pair.
   "keeper": "<KEEPER_WALLET>",
   "proxy": "<PROXY_ADDRESS>",
   "pair": "<PAIR_ADDRESS>",
-  "twap_window_seconds": 1800,
+  "twap_window_seconds": 60,
   "rebalance_threshold_bps": 500,
   "allocation_tolerance_bps": 500
 }
@@ -130,6 +130,8 @@ Settings:
 - `allocation_tolerance_bps: 500` allows a 5% ratio deviation.
 - `twap_window_seconds: 0` is unsafe spot mode for deterministic local tests only.
 - A nonzero TWAP window reads CL8Y cumulative observations over that period.
+- `60` is a short-term starting point, not a universal safe value. Benchmark
+  30-300 seconds against the pair's liquidity, block time, and volatility.
 
 Record `VAULT_ADDRESS`.
 

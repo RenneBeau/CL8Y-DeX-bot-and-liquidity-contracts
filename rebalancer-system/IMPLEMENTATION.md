@@ -36,7 +36,8 @@ single-token withdrawal, route the unwanted side through the vault and proxy.
 4. Assign a dedicated keeper to the vault.
 5. Have CL8Y governance register the proxy for the intended fee tier.
 6. Fund the proxy with the tier's required CL8Y balance.
-7. Use a nonzero TWAP window and independently validate the pool's oracle safety.
+7. Benchmark a short nonzero TWAP window, such as 30-300 seconds, and
+   independently validate the pool's liquidity and oracle safety.
 
 Detailed messages and commands are in [the deployment guide](docs/DEPLOYMENT.md)
 and [protocol specifications](docs/protocols/).

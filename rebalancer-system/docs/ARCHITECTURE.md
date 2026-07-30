@@ -86,9 +86,11 @@ a constrained swap after the configured price-movement threshold is reached,
 5% by default. The vault requires the post-swap token allocation to improve or
 remain within its configured tolerance before recording a new reference.
 
-Local tests use spot mode (`twap_window_seconds = 0`). Economic deployments
-should use CL8Y's TWAP with a sufficiently long window, normally at least 1,800
-seconds, and independent oracle validation for economically significant pools.
+Local tests use spot mode (`twap_window_seconds = 0`). For a short-term swing
+strategy, a 30-300 second CL8Y TWAP is a reasonable range to benchmark. Shorter
+windows react faster but cost less to manipulate; longer windows are safer but
+can miss profitable movement. Economically significant pools still require
+liquidity checks and independent oracle validation.
 
 ## CL8Y Discount
 

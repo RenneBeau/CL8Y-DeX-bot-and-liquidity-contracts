@@ -12,7 +12,8 @@ Key deployment requirements:
 
 - Use multisig control for proxy and vault administration.
 - Use separate, constrained keeper keys.
-- Configure a nonzero TWAP window for economic deployments.
+- Configure and benchmark a nonzero TWAP window appropriate to the strategy;
+  shorter reaction windows require stronger liquidity and manipulation checks.
 - Verify CL8Y pair code and fee-registry addresses before registration.
 - Test every new pair and token implementation independently.
 - Do not use fee-on-transfer or rebasing CW20 tokens.

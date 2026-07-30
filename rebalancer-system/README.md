@@ -24,8 +24,10 @@ rebalances currently use a zero protocol charge.
 ## Price And Fee Tier
 
 Vaults support CL8Y arithmetic TWAP through `twap_window_seconds`. LocalTerra
-uses `0` for spot-price testing; an economic deployment should normally use at
-least 1,800 seconds and independent oracle validation.
+uses `0` for spot-price testing. A short-term strategy can start by testing a
+30-300 second window so meaningful swings trigger quickly without relying on a
+single-block price. The final value must be chosen from pair liquidity, block
+time, volatility, and manipulation-cost measurements.
 
 The proxy cannot self-register with CL8Y. Fee-registry governance must register
 the deployed proxy and the proxy must hold the selected tier's minimum CL8Y
