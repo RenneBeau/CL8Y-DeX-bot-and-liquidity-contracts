@@ -109,7 +109,8 @@ pool_swap "$EMBER_ADDRESS" "$((RESERVE_0 * 4 / 100))"
 STATUS=$(query_vault_status)
 jq -e '.should_rebalance == true and .price_deviation_bps >= 500' <<<"$STATUS" >/dev/null
 VAULT_BALANCES=$(query_vault_balances)
-REBALANCE_AMOUNT=$(( $(jq -r '.[1]' <<<"$VAULT_BALANCES") * 4 / 100 ))
+POOL=$(query_pool)
+REBALANCE_AMOUNT=$(calculate_rebalance_amount "$CORAL_ADDRESS" "$POOL" "$VAULT_BALANCES")
 WRONG=$(vault_rebalance_message "$EMBER_ADDRESS" "$REBALANCE_AMOUNT")
 expect_execute_failure test1 "$VAULT_ADDRESS" "$WRONG"
 SHARES_BEFORE=$(token_supply "$LIQUIDITY_ADDRESS")

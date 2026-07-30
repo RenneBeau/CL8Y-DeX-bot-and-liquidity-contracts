@@ -1,7 +1,7 @@
 # Experimental Grid Contract System
 
 This directory is an independent Cargo workspace for the proposed CL8Y grid
-system. It is intentionally separate from the production rebalance contracts
+system. It is intentionally separate from the rebalancer contracts
 while its execution costs, onboarding flow, and multi-bot accounting are being
 evaluated.
 
@@ -25,7 +25,9 @@ indexer. The contract verifies each report against the standard pair's current
 escrow, order metadata, and CL8Y rounding arithmetic before crediting output. A
 keeper receives a capped reimbursement only after a valid reconciliation.
 Users cancel a bot's active orders before burning internal bot LP shares for a
-pro-rata withdrawal. Other bots' balances and shares are never included.
+pro-rata withdrawal. Other bots' logical balances and shares are never included.
+Physical CW20 custody is pooled in one manager, so a compromised keeper/indexer
+can threaten global solvency within the accepted rounding envelope.
 Cancellation processes a bounded page at a time; owners repeat it until the
 reported `remaining_orders` reaches zero.
 CW20 deposits are allocated automatically: token A is divided by the number of
@@ -49,7 +51,8 @@ bounds.
 Every bot prepays a separate LUNC gas credit. The keeper pays transaction fees
 and receives a fixed reimbursement only after useful reconciliation. Owners can
 recover excess gas credit, while active bots must retain the emergency reserve.
-The onboarding and up-front funding tradeoff remains tracked in GitHub issue #1.
+The onboarding and up-front funding tradeoff remains tracked in
+[GitHub issue #1](https://github.com/RenneBeau/CL8Y-DeX-bot-and-liquidity-contracts/issues/1).
 
 Run its tests independently:
 

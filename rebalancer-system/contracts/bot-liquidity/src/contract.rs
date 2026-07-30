@@ -319,10 +319,7 @@ fn complete_deposit(mut deps: DepsMut, env: Env) -> Result<Response, ContractErr
         )?;
         deposit_value - LOCKED_INITIAL_SHARES
     } else {
-        if pre_nav.is_zero() {
-            return Err(ContractError::InvalidDepositSettlement);
-        }
-        deposit_value.multiply_ratio(pre_supply, pre_nav)
+        proportional_deposit_shares(pre_balances, post_balances, pre_supply)?
     };
     if user_shares.is_zero() {
         return Err(ContractError::ZeroShares);
@@ -529,6 +526,25 @@ fn nav(balances: [Uint128; 2], price: Decimal) -> Result<Uint128, ContractError>
         .map_err(|_| ContractError::Std(StdError::generic_err("NAV overflow")))
 }
 
+fn proportional_deposit_shares(
+    pre_balances: [Uint128; 2],
+    post_balances: [Uint128; 2],
+    supply: Uint128,
+) -> Result<Uint128, ContractError> {
+    if pre_balances[0].is_zero() || pre_balances[1].is_zero() {
+        return Err(ContractError::InvalidDepositSettlement);
+    }
+    let added_0 = post_balances[0]
+        .checked_sub(pre_balances[0])
+        .map_err(|_| ContractError::InvalidDepositSettlement)?;
+    let added_1 = post_balances[1]
+        .checked_sub(pre_balances[1])
+        .map_err(|_| ContractError::InvalidDepositSettlement)?;
+    Ok(added_0
+        .multiply_ratio(supply, pre_balances[0])
+        .min(added_1.multiply_ratio(supply, pre_balances[1])))
+}
+
 fn vault_transfer(
     config: &Config,
     token: &Addr,
@@ -616,6 +632,19 @@ mod tests {
         assert_eq!(
             nav([Uint128::one(), Uint128::one()], Decimal::zero()).unwrap_err(),
             ContractError::InvalidVault
+        );
+    }
+
+    #[test]
+    fn established_deposit_uses_minimum_proportional_contribution() {
+        assert_eq!(
+            proportional_deposit_shares(
+                [Uint128::new(100), Uint128::new(200)],
+                [Uint128::new(110), Uint128::new(260)],
+                Uint128::new(1_000),
+            )
+            .unwrap(),
+            Uint128::new(100)
         );
     }
 }

@@ -22,9 +22,10 @@ threshold and timing rules pass, then trade through the proxy.
 
 ## 4. Implement Share Accounting
 
-Implement `contracts/bot-liquidity` with NAV-based minting and pro-rata burning.
-Include pre-existing balances in NAV, lock minimum liquidity on the first mint,
-and settle asynchronous CW20 transfers through replies before minting. For a
+Implement `contracts/bot-liquidity` with initial NAV valuation, minimum-ratio
+minting for established vaults, and pro-rata burning. Include pre-existing
+balances, lock minimum liquidity on the first mint, and settle asynchronous
+CW20 transfers through replies before minting. For a
 single-token withdrawal, route the unwanted side through the vault and proxy.
 
 ## 5. Configure A Deployment

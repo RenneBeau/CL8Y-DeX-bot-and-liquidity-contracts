@@ -26,18 +26,25 @@ const CONTRACT_NAME: &str = "crates.io:cl8y-grid-manager-experimental";
 const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const FIRST_REPLY_ID: u64 = 1;
 const MAX_ADJUST_STEPS: u32 = 64;
+const MAX_GRID_COUNT: u32 = 100;
+const MAX_ORDERS_PER_RECONCILE: u32 = 100;
+const MAX_ACTIVE_ORDERS_PER_BOT: u32 = 500;
 
 #[entry_point]
 pub fn instantiate(
     deps: DepsMut,
     _env: Env,
-    _info: MessageInfo,
+    info: MessageInfo,
     msg: InstantiateMsg,
 ) -> Result<Response, ContractError> {
+    assert_no_funds(&info)?;
     if msg.gas_denom.trim().is_empty()
         || msg.max_grid_count < 2
+        || msg.max_grid_count > MAX_GRID_COUNT
         || msg.max_orders_per_reconcile == 0
+        || msg.max_orders_per_reconcile > MAX_ORDERS_PER_RECONCILE
         || msg.max_active_orders_per_bot < msg.max_grid_count
+        || msg.max_active_orders_per_bot > MAX_ACTIVE_ORDERS_PER_BOT
         || msg.keeper_reward.is_zero()
     {
         return Err(ContractError::InvalidGrid);
@@ -161,6 +168,16 @@ fn execute_create_bot(
         return Err(ContractError::InvalidGrid);
     }
     let prices = grid_prices(lower_price, upper_price, grid_count)?;
+    let minimum_price = Decimal::from_atomics(Uint128::new(1_000_000_000), 18)
+        .map_err(|_| ContractError::InvalidGrid)?;
+    let maximum_price = Decimal::from_ratio(1_000_000_000u128, 1u128);
+    if prices
+        .iter()
+        .any(|price| *price < minimum_price || *price > maximum_price)
+        || prices.windows(2).any(|window| window[0] == window[1])
+    {
+        return Err(ContractError::InvalidGrid);
+    }
     let sides: Vec<Option<LimitOrderSide>> = prices
         .iter()
         .map(|price| {
@@ -405,6 +422,9 @@ fn execute_reconcile(
     let mut placements: Vec<(LimitOrderSide, u32, Uint128)> = vec![];
     let mut parked_claims = vec![];
     for report in &reports {
+        if deps.api.addr_validate(&report.pair)? != bot.pair {
+            return Err(ContractError::InvalidFillReport);
+        }
         if !seen.insert(report.order_id) {
             return Err(ContractError::InvalidFillReport);
         }
@@ -487,13 +507,10 @@ fn execute_reconcile(
         .add_attribute("action", "reconcile_grid")
         .add_attribute("bot_id", bot_id.to_string())
         .add_attribute("changed_orders", reports.len().to_string());
-    response = add_pair_batches(
-        response,
-        &bot.pair,
-        &[],
-        &parked_claims,
-        bot.pair_batch_limit,
-    )?;
+    if !parked_claims.is_empty() {
+        let pair_batch_limit = query_pair_batch_limit(deps.as_ref(), &bot.pair)?;
+        response = add_pair_batches(response, &bot.pair, &[], &parked_claims, pair_batch_limit)?;
+    }
     for (side, rung, amount) in placements {
         let latest = BOTS.load(deps.storage, bot_id)?;
         response = add_placement(
@@ -564,12 +581,13 @@ fn execute_cancel_all(
         .checked_sub(processed_orders)
         .ok_or(ContractError::InvalidOrder)?;
     BOTS.save(deps.storage, bot_id, &bot)?;
+    let pair_batch_limit = query_pair_batch_limit(deps.as_ref(), &bot.pair)?;
     Ok(add_pair_batches(
         Response::new(),
         &bot.pair,
         &cancel_ids,
         &[],
-        bot.pair_batch_limit,
+        pair_batch_limit,
     )?
     .add_attribute("action", "cancel_grid_orders")
     .add_attribute("bot_id", bot_id.to_string())
@@ -710,7 +728,7 @@ fn add_placement(
         },
     )?;
     let hook = PairCw20HookMsg::PlaceLimitOrderBatch { side, orders };
-    Ok(response.add_submessage(SubMsg::reply_on_success(
+    Ok(response.add_submessage(SubMsg::reply_always(
         WasmMsg::Execute {
             contract_addr: bot.asset_tokens[token_index].to_string(),
             msg: to_json_binary(&Cw20ExecuteMsg::Send {
@@ -729,7 +747,13 @@ pub fn reply(deps: DepsMut, env: Env, reply: Reply) -> Result<Response, Contract
     let plan = PLACEMENTS
         .may_load(deps.storage, reply.id)?
         .ok_or(ContractError::UnknownReply)?;
-    let result = reply.result.into_result().map_err(StdError::generic_err)?;
+    let result = match reply.result.into_result() {
+        Ok(result) => result,
+        Err(error) if plan.rungs.len() == 1 => {
+            return restore_single_placement(deps, reply.id, &plan, error)
+        }
+        Err(error) => return Err(StdError::generic_err(error).into()),
+    };
     let ids: Vec<u64> = result
         .events
         .iter()
@@ -738,6 +762,14 @@ pub fn reply(deps: DepsMut, env: Env, reply: Reply) -> Result<Response, Contract
         .map(|attribute| attribute.value.parse::<u64>())
         .collect::<Result<_, _>>()
         .map_err(|_| ContractError::InvalidPlacementReply)?;
+    if ids.is_empty() && plan.rungs.len() == 1 {
+        return restore_single_placement(
+            deps,
+            reply.id,
+            &plan,
+            "pair skipped the placement".to_string(),
+        );
+    }
     if ids.len() != plan.rungs.len() {
         return Err(ContractError::InvalidPlacementReply);
     }
@@ -775,6 +807,40 @@ pub fn reply(deps: DepsMut, env: Env, reply: Reply) -> Result<Response, Contract
     Ok(Response::new()
         .add_attribute("action", "record_grid_orders")
         .add_attribute("bot_id", plan.bot_id.to_string()))
+}
+
+fn restore_single_placement(
+    deps: DepsMut,
+    reply_id: u64,
+    plan: &PlacementPlan,
+    reason: String,
+) -> Result<Response, ContractError> {
+    let amount = *plan
+        .gross_amounts
+        .first()
+        .ok_or(ContractError::InvalidPlacementReply)?;
+    BOTS.update(
+        deps.storage,
+        plan.bot_id,
+        |bot| -> Result<_, ContractError> {
+            let mut bot = bot.ok_or_else(|| StdError::not_found("bot"))?;
+            let token_index = match plan.side {
+                LimitOrderSide::Ask => 0,
+                LimitOrderSide::Bid => 1,
+            };
+            bot.free_balances[token_index] = bot.free_balances[token_index].checked_add(amount)?;
+            bot.active_orders = bot
+                .active_orders
+                .checked_sub(1)
+                .ok_or(ContractError::InvalidOrder)?;
+            Ok(bot)
+        },
+    )?;
+    PLACEMENTS.remove(deps.storage, reply_id);
+    Ok(Response::new()
+        .add_attribute("action", "defer_grid_placement")
+        .add_attribute("bot_id", plan.bot_id.to_string())
+        .add_attribute("reason", reason))
 }
 
 #[entry_point]
@@ -971,6 +1037,13 @@ fn add_pair_batches(
     Ok(response)
 }
 
+fn query_pair_batch_limit(deps: Deps, pair: &Addr) -> StdResult<u32> {
+    let config: LimitOrderConfigResponse = deps
+        .querier
+        .query_wasm_smart(pair, &PairQueryMsg::LimitOrderConfig {})?;
+    Ok(config.max_batch_rungs.max(1))
+}
+
 fn validate_order(
     manager: &Addr,
     order_id: u64,
@@ -1025,7 +1098,7 @@ fn validate_indexed_report(
 mod tests {
     use super::*;
     use cosmwasm_std::testing::{mock_dependencies, mock_env, mock_info};
-    use cosmwasm_std::{coin, from_json, ContractResult, SystemResult, WasmQuery};
+    use cosmwasm_std::{coin, from_json, ContractResult, SubMsgResult, SystemResult, WasmQuery};
 
     fn instantiate_default(deps: DepsMut) {
         instantiate(
@@ -1186,6 +1259,77 @@ mod tests {
                 Some(LimitOrderSide::Ask),
             ]
         );
+    }
+
+    #[test]
+    fn rejects_prices_outside_standard_pair_bounds() {
+        let mut deps = mock_dependencies();
+        install_pair_querier(&mut deps);
+        instantiate_default(deps.as_mut());
+        let error = execute(
+            deps.as_mut(),
+            mock_env(),
+            mock_info("alice", &[coin(200, "uluna")]),
+            ExecuteMsg::CreateBot {
+                pair: "pair".into(),
+                lower_price: Decimal::zero(),
+                upper_price: Decimal::from_ratio(3u128, 1u128),
+                grid_count: 5,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error, ContractError::InvalidGrid);
+    }
+
+    #[test]
+    fn failed_single_opposite_placement_returns_free_balance() {
+        let mut deps = mock_dependencies();
+        BOTS.save(
+            deps.as_mut().storage,
+            1,
+            &Bot {
+                owner: Addr::unchecked("alice"),
+                pair: Addr::unchecked("pair"),
+                asset_tokens: [Addr::unchecked("token_a"), Addr::unchecked("token_b")],
+                lower_price: Decimal::one(),
+                upper_price: Decimal::percent(300),
+                grid_count: 5,
+                reference_price: Decimal::percent(200),
+                free_balances: [Uint128::zero(), Uint128::zero()],
+                total_shares: Uint128::new(1_000),
+                gas_credit: Uint128::new(200),
+                active_orders: 1,
+                pair_batch_limit: 20,
+            },
+        )
+        .unwrap();
+        PLACEMENTS
+            .save(
+                deps.as_mut().storage,
+                7,
+                &PlacementPlan {
+                    bot_id: 1,
+                    side: LimitOrderSide::Bid,
+                    rungs: vec![1],
+                    gross_amounts: vec![Uint128::new(25)],
+                },
+            )
+            .unwrap();
+
+        let response = reply(
+            deps.as_mut(),
+            mock_env(),
+            Reply {
+                id: 7,
+                result: SubMsgResult::Err("book walk exhausted".into()),
+            },
+        )
+        .unwrap();
+        let bot = BOTS.load(&deps.storage, 1).unwrap();
+        assert_eq!(bot.free_balances, [Uint128::zero(), Uint128::new(25)]);
+        assert_eq!(bot.active_orders, 0);
+        assert!(!PLACEMENTS.has(&deps.storage, 7));
+        assert_eq!(response.attributes[0].value, "defer_grid_placement");
     }
 
     #[test]
@@ -1399,6 +1543,7 @@ mod tests {
             mock_info("keeper", &[]),
             1,
             vec![OrderFillReport {
+                pair: "pair".into(),
                 order_id: 77,
                 input_amount: Uint128::one(),
                 output_amount: Uint128::one(),

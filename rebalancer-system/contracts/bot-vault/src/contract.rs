@@ -2,7 +2,10 @@ use bot_types::{
     RebalanceStatusResponse, SwapParams, SwapProxyHookMsg, VaultBalancesResponse,
     VaultConfigResponse, VaultExecuteMsg, VaultPriceResponse, VaultQueryMsg,
 };
-use cl8y_dex::{AssetInfo, ObserveResponse, PairInfo, PairQueryMsg, PoolResponse};
+use cl8y_dex::{
+    Asset, AssetInfo, HybridSimulationResponse, HybridSwapParams, ObserveResponse, PairInfo,
+    PairQueryMsg, PoolResponse,
+};
 use cosmwasm_std::{
     entry_point, to_json_binary, Addr, Binary, Decimal, Deps, DepsMut, Env, MessageInfo, Reply,
     Response, StdError, StdResult, SubMsg, Uint128, Uint256, WasmMsg,
@@ -19,6 +22,9 @@ const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const DEFAULT_REBALANCE_THRESHOLD_BPS: u16 = 500;
 const DEFAULT_ALLOCATION_TOLERANCE_BPS: u16 = 100;
 const MAX_SPREAD: Decimal = Decimal::percent(10);
+const MAX_KEEPER_SPREAD: Decimal = Decimal::percent(5);
+const MAX_KEEPER_SLIPPAGE_BPS: u128 = 200;
+const MAX_ALLOCATION_TOLERANCE_BPS: u16 = 2_000;
 const REBALANCE_REPLY_ID: u64 = 1;
 
 #[entry_point]
@@ -56,7 +62,7 @@ pub fn instantiate(
     let pool: PoolResponse = deps
         .querier
         .query_wasm_smart(&pair, &PairQueryMsg::Pool {})?;
-    let reference_price = spot_price(&pool)?;
+    let spot_reference = spot_price(&pool)?;
     let rebalance_threshold_bps = msg
         .rebalance_threshold_bps
         .unwrap_or(DEFAULT_REBALANCE_THRESHOLD_BPS);
@@ -64,23 +70,22 @@ pub fn instantiate(
         .allocation_tolerance_bps
         .unwrap_or(DEFAULT_ALLOCATION_TOLERANCE_BPS);
     validate_threshold(rebalance_threshold_bps)?;
-    validate_threshold(allocation_tolerance_bps)?;
-    CONFIG.save(
-        deps.storage,
-        &Config {
-            admin: deps.api.addr_validate(&msg.admin)?,
-            keeper: deps.api.addr_validate(&msg.keeper)?,
-            liquidity_contract: None,
-            proxy: deps.api.addr_validate(&msg.proxy)?,
-            pair,
-            asset_tokens,
-            decimals: token_0.decimals,
-            twap_window_seconds: msg.twap_window_seconds,
-            rebalance_threshold_bps,
-            allocation_tolerance_bps,
-            reference_price,
-        },
-    )?;
+    validate_allocation_tolerance(allocation_tolerance_bps)?;
+    let mut config = Config {
+        admin: deps.api.addr_validate(&msg.admin)?,
+        keeper: deps.api.addr_validate(&msg.keeper)?,
+        liquidity_contract: None,
+        proxy: deps.api.addr_validate(&msg.proxy)?,
+        pair,
+        asset_tokens,
+        decimals: token_0.decimals,
+        twap_window_seconds: msg.twap_window_seconds,
+        rebalance_threshold_bps,
+        allocation_tolerance_bps,
+        reference_price: spot_reference,
+    };
+    config.reference_price = query_price(deps.as_ref(), &env, &config)?;
+    CONFIG.save(deps.storage, &config)?;
     Ok(Response::new()
         .add_attribute("action", "instantiate")
         .add_attribute("vault", env.contract.address))
@@ -211,7 +216,7 @@ fn execute_rebalance(
     if !status.should_rebalance {
         return Err(ContractError::RebalanceNotRequired);
     }
-    validate_swap(deps.as_ref(), &env, &config, &params)?;
+    validate_rebalance_swap(deps.as_ref(), &env, &config, &params)?;
     PENDING_REBALANCE_ALLOCATION.save(deps.storage, &status.allocation_deviation_bps)?;
     Ok(Response::new()
         .add_submessage(SubMsg::reply_on_success(
@@ -247,7 +252,7 @@ pub fn reply(deps: DepsMut, env: Env, reply: Reply) -> Result<Response, Contract
     if reply.id != REBALANCE_REPLY_ID {
         return Err(ContractError::UnknownReply);
     }
-    let previous = PENDING_REBALANCE_ALLOCATION
+    PENDING_REBALANCE_ALLOCATION
         .may_load(deps.storage)?
         .ok_or(ContractError::MissingPendingRebalance)?;
     let mut config = CONFIG.load(deps.storage)?;
@@ -255,7 +260,7 @@ pub fn reply(deps: DepsMut, env: Env, reply: Reply) -> Result<Response, Contract
         .querier
         .query_wasm_smart(&config.pair, &PairQueryMsg::Pool {})?;
     let current = allocation_deviation(deps.as_ref(), &env.contract.address, &config, &pool)?;
-    if current >= previous && current > config.allocation_tolerance_bps {
+    if current > config.allocation_tolerance_bps {
         return Err(ContractError::AllocationDidNotImprove);
     }
     config.reference_price = query_price(deps.as_ref(), &env, &config)?;
@@ -291,7 +296,7 @@ fn execute_update_thresholds(
         config.rebalance_threshold_bps = value;
     }
     if let Some(value) = allocation {
-        validate_threshold(value)?;
+        validate_allocation_tolerance(value)?;
         config.allocation_tolerance_bps = value;
     }
     CONFIG.save(deps.storage, &config)?;
@@ -476,6 +481,63 @@ fn validate_swap(
     Ok(())
 }
 
+fn validate_rebalance_swap(
+    deps: Deps,
+    env: &Env,
+    config: &Config,
+    params: &SwapParams,
+) -> Result<(), ContractError> {
+    validate_swap(deps, env, config, params)?;
+    if params.max_spread > MAX_KEEPER_SPREAD || params.min_return.is_zero() {
+        return Err(ContractError::InvalidRebalanceSwap);
+    }
+    let pool: PoolResponse = deps
+        .querier
+        .query_wasm_smart(&config.pair, &PairQueryMsg::Pool {})?;
+    let holdings = balances(deps, &env.contract.address, config)?;
+    let actual = Uint256::from(holdings[1]) * Uint256::from(pool.assets[0].amount);
+    let expected = Uint256::from(holdings[0]) * Uint256::from(pool.assets[1].amount);
+    let (offer_index, denominator, difference) = if actual > expected {
+        (1usize, pool.assets[0].amount, actual - expected)
+    } else if expected > actual {
+        (0usize, pool.assets[1].amount, expected - actual)
+    } else {
+        return Err(ContractError::InvalidRebalanceSwap);
+    };
+    if params.offer_token != config.asset_tokens[offer_index] {
+        return Err(ContractError::InvalidRebalanceSwap);
+    }
+    let maximum = difference / Uint256::from(denominator) / Uint256::from(2u8);
+    let maximum: Uint128 = maximum
+        .try_into()
+        .map_err(|_| StdError::generic_err("rebalance amount overflow"))?;
+    if params.amount > maximum {
+        return Err(ContractError::InvalidRebalanceSwap);
+    }
+    let simulation: HybridSimulationResponse = deps.querier.query_wasm_smart(
+        &config.pair,
+        &PairQueryMsg::HybridSimulation {
+            offer_asset: Asset {
+                info: AssetInfo::Token {
+                    contract_addr: params.offer_token.clone(),
+                },
+                amount: params.amount,
+            },
+            hybrid: HybridSwapParams::pool_only(params.amount),
+            trader: Some(config.proxy.to_string()),
+            sender: None,
+            belief_price: None,
+        },
+    )?;
+    let required_return = simulation
+        .return_amount
+        .multiply_ratio(10_000u128 - MAX_KEEPER_SLIPPAGE_BPS, 10_000u128);
+    if params.min_return < required_return {
+        return Err(ContractError::InvalidRebalanceSwap);
+    }
+    Ok(())
+}
+
 fn spot_price(pool: &PoolResponse) -> Result<Decimal, ContractError> {
     if pool.assets[0].amount.is_zero() || pool.assets[1].amount.is_zero() {
         return Err(ContractError::EmptyPrice);
@@ -518,10 +580,18 @@ fn validate_threshold(value: u16) -> Result<(), ContractError> {
     Ok(())
 }
 
+fn validate_allocation_tolerance(value: u16) -> Result<(), ContractError> {
+    if value == 0 || value > MAX_ALLOCATION_TOLERANCE_BPS {
+        return Err(ContractError::InvalidThreshold);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use cl8y_dex::Asset;
+    use cosmwasm_std::testing::{mock_dependencies, mock_info};
 
     #[test]
     fn ratio_deviation_uses_reference_basis() {
@@ -565,5 +635,38 @@ mod tests {
             validate_threshold(10_001),
             Err(ContractError::InvalidThreshold)
         );
+    }
+
+    #[test]
+    fn threshold_updates_apply_the_correct_bounds() {
+        let mut deps = mock_dependencies();
+        CONFIG
+            .save(
+                deps.as_mut().storage,
+                &Config {
+                    admin: Addr::unchecked("admin"),
+                    keeper: Addr::unchecked("keeper"),
+                    liquidity_contract: None,
+                    proxy: Addr::unchecked("proxy"),
+                    pair: Addr::unchecked("pair"),
+                    asset_tokens: [Addr::unchecked("token0"), Addr::unchecked("token1")],
+                    decimals: 6,
+                    twap_window_seconds: 0,
+                    rebalance_threshold_bps: 500,
+                    allocation_tolerance_bps: 500,
+                    reference_price: Decimal::one(),
+                },
+            )
+            .unwrap();
+        execute_update_thresholds(deps.as_mut(), mock_info("admin", &[]), Some(5_000), None)
+            .unwrap();
+        assert_eq!(
+            CONFIG.load(&deps.storage).unwrap().rebalance_threshold_bps,
+            5_000
+        );
+        let error =
+            execute_update_thresholds(deps.as_mut(), mock_info("admin", &[]), None, Some(2_001))
+                .unwrap_err();
+        assert_eq!(error, ContractError::InvalidThreshold);
     }
 }

@@ -4,8 +4,9 @@ This repository contains unaudited financial smart-contract software. Do not
 deploy it with economic assets without an independent audit and a mainnet
 oracle/TWAP review.
 
-Please report vulnerabilities privately to the repository owner rather than
-opening a public issue with exploit details.
+Please report vulnerabilities privately through
+[GitHub's private vulnerability reporting](https://github.com/RenneBeau/CL8Y-DeX-bot-and-liquidity-contracts/security/advisories/new)
+rather than opening a public issue with exploit details.
 
 Key deployment requirements:
 

@@ -127,6 +127,7 @@ The indexer supplies one aggregate per changed order. The keeper sends:
   "reconcile": {
     "bot_id": 1,
     "reports": [{
+      "pair": "<CL8Y_PAIR>",
       "order_id": 77,
       "input_amount": "100",
       "output_amount": "200",

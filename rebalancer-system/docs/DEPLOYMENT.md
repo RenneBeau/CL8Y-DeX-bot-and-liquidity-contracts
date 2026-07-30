@@ -112,7 +112,7 @@ Repeat these steps for every new pair.
   "keeper": "<KEEPER_WALLET>",
   "proxy": "<PROXY_ADDRESS>",
   "pair": "<PAIR_ADDRESS>",
-  "twap_window_seconds": 0,
+  "twap_window_seconds": 1800,
   "rebalance_threshold_bps": 500,
   "allocation_tolerance_bps": 500
 }
@@ -128,7 +128,7 @@ Settings:
 
 - `rebalance_threshold_bps: 500` means a 5% price movement.
 - `allocation_tolerance_bps: 500` allows a 5% ratio deviation.
-- `twap_window_seconds: 0` reads the current CL8Y pair price.
+- `twap_window_seconds: 0` is unsafe spot mode for deterministic local tests only.
 - A nonzero TWAP window reads CL8Y cumulative observations over that period.
 
 Record `VAULT_ADDRESS`.

@@ -31,8 +31,8 @@ make local-all
 
 See [the verification report](docs/TEST_RESULTS.md) for the tested scenarios and
 [the LocalTerra test guide](test-area/README.md) for the complete local workflow.
-The grid system is experimental and requires an independent audit before an
-economic deployment.
+All contracts are unaudited and require an independent security review before
+an economic deployment. The grid system additionally remains experimental.
 
 ## Repository Guides
 

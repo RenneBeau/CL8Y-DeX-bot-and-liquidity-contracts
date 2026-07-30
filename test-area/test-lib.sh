@@ -105,9 +105,42 @@ vault_rebalance_message() {
     local offer_token="$1"
     local amount="$2"
     local deadline="${3:-$(($(date +%s) + 600))}"
-    jq -nc --arg token "$offer_token" --arg amount "$amount" --argjson deadline "$deadline" '
-      {rebalance:{params:{offer_token:$token,amount:$amount,min_return:"1",
-        max_spread:"0.10",deadline:$deadline}}}'
+    local query quoted_return min_return
+    query=$(jq -nc --arg token "$offer_token" --arg amount "$amount" \
+        --arg trader "$PROXY_ADDRESS" '
+      {hybrid_simulation:{offer_asset:{info:{token:{contract_addr:$token}},amount:$amount},
+        hybrid:{pool_input:$amount,book_input:"0",max_maker_fills:1,book_start_hint:null},
+        trader:$trader,sender:null,belief_price:null}}')
+    quoted_return=$(terrad_query wasm contract-state smart "$PAIR_ADDRESS" "$query" \
+        | jq -r '.data.return_amount')
+    min_return=$((quoted_return * 98 / 100))
+    jq -nc --arg token "$offer_token" --arg amount "$amount" --arg min "$min_return" \
+        --argjson deadline "$deadline" '
+      {rebalance:{params:{offer_token:$token,amount:$amount,min_return:$min,
+        max_spread:"0.05",deadline:$deadline}}}'
+}
+
+calculate_rebalance_amount() {
+    local offer_token="$1"
+    local pool="$2"
+    local vault_balances="$3"
+    python3 -c '
+import json, sys
+token, token0, token1, pool_raw, balances_raw = sys.argv[1:]
+pool = json.loads(pool_raw)
+balances = list(map(int, json.loads(balances_raw)))
+reserves = [int(asset["amount"]) for asset in pool["assets"]]
+cross = balances[1] * reserves[0] - balances[0] * reserves[1]
+if cross > 0 and token == token1:
+    amount = cross // (2 * reserves[0])
+elif cross < 0 and token == token0:
+    amount = (-cross) // (2 * reserves[1])
+else:
+    raise SystemExit("offer token does not correct the vault ratio")
+if amount <= 0:
+    raise SystemExit("rebalance amount rounded to zero")
+print(amount)
+' "$offer_token" "$EMBER_ADDRESS" "$CORAL_ADDRESS" "$pool" "$vault_balances"
 }
 
 provision_attacker() {

@@ -39,8 +39,8 @@ Bot Vault
 3. CW20 `transfer_from` messages move funds directly to the assigned vault.
 4. If needed, the vault routes only the deposited offer amount through the
    shared proxy.
-5. A reply queries settled vault balances and mints shares from the increase in
-   NAV measured at one pre-operation price snapshot.
+5. A reply queries settled vault balances and mints established-vault shares
+   from the smaller proportional contribution across both assets.
 6. The transaction reverts atomically if allocation, deadline, or minimum-share
    checks fail.
 
@@ -65,15 +65,18 @@ Token assets must have equal decimals. NAV is denominated in token 0:
 NAV = token0_balance + token1_balance / token1_per_token0_price
 ```
 
-For an established vault:
+For an established vault, each asset implies a share amount and the smaller is
+minted:
 
 ```text
-minted_shares = floor(deposit_value * total_supply / pre_deposit_NAV)
+shares_0 = floor(added_token0 * total_supply / pre_token0)
+shares_1 = floor(added_token1 * total_supply / pre_token1)
+minted_shares = min(shares_0, shares_1)
 ```
 
 The first mint permanently locks 1,000 smallest share units. Any assets donated
 before the first deposit also receive permanently locked shares. Later direct
-donations are included in pre-deposit NAV and benefit existing shareholders,
+donations are included in pre-deposit balances and benefit existing shareholders,
 not the next depositor.
 
 ## Rebalancing

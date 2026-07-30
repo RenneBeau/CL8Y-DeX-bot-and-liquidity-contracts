@@ -6,10 +6,10 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=cl8ykeeper
-WorkingDirectory=/opt/CL8Y-DeX-bot-and-liquidity-contracts
+WorkingDirectory=/opt/CL8Y-DeX-bot-and-liquidity-contracts/rebalancer-system
 EnvironmentFile=/etc/cl8y-keeper/config.env
 Environment=KEEPER_BROADCAST=1
-ExecStart=/usr/bin/python3 /opt/CL8Y-DeX-bot-and-liquidity-contracts/examples/keeper/keeper.py --broadcast
+ExecStart=/usr/bin/python3 /opt/CL8Y-DeX-bot-and-liquidity-contracts/rebalancer-system/examples/keeper/keeper.py --broadcast
 Restart=always
 RestartSec=10
 NoNewPrivileges=true

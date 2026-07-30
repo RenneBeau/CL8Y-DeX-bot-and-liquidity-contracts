@@ -73,6 +73,7 @@ Delivery envelope:
   "bot_id": 42,
   "through_height": 12345678,
   "reports": [{
+    "pair": "<CL8Y_PAIR>",
     "order_id": 77,
     "input_amount": "100",
     "output_amount": "200",
@@ -81,7 +82,8 @@ Delivery envelope:
 }
 ```
 
-Only `bot_id` and `reports` are included in the on-chain message.
+Only `bot_id` and `reports` are included in the on-chain message. Each report's
+`pair` must equal the bot's configured pair.
 
 ## Keeper Delivery
 
@@ -139,4 +141,6 @@ Alert on:
 Use authenticated transport between indexer and keeper, least-privilege service
 accounts, durable backups, and independent reconciliation of raw events against
 pair state. The contract validates escrow and rounding bounds, but exact output
-within those bounds ultimately depends on this trusted event history.
+and fill count within those bounds ultimately depend on this trusted event
+history. Because physical token custody is pooled, incorrect trusted reports can
+affect global manager solvency.

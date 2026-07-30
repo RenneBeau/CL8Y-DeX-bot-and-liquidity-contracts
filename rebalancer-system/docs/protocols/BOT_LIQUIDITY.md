@@ -23,9 +23,10 @@ swap can spend only the offer token and amount included in that deposit, which
 prevents a depositor from rebalancing incumbent assets for personal benefit.
 
 The contract stores one pending operation and uses a reply after all nested
-messages settle. It measures actual vault balance changes, checks final
-allocation, calculates deposit NAV from one pre-operation price snapshot, and
-then mints shares. No shares are minted before settlement.
+messages settle. It measures actual vault balance changes and checks final
+allocation. The first mint uses a price snapshot; established-vault mints use
+the smaller proportional contribution across both assets. No shares are minted
+before settlement.
 
 ## Withdrawals
 
@@ -40,7 +41,7 @@ balance increase and enforces the user's minimum output.
 - The initial depositor must satisfy `minimum_initial_deposit`.
 - At least 1,000 smallest share units are permanently locked.
 - Pre-first-deposit donations receive permanently locked shares.
-- Existing vault donations are included in pre-deposit NAV.
+- Existing vault donations are included in pre-deposit balances.
 - Deposits that round to zero shares revert.
 - User-provided `min_shares` protects against adverse settlement.
 

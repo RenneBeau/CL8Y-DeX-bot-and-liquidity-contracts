@@ -16,17 +16,19 @@ reserves and a current price strictly inside the requested bounds.
 
 Use arithmetic spacing between the lower and upper prices. Divide token0 across
 ask rungs and token1 across bid rungs. Keep integer remainders in the bot's free
-balance. Record each returned pair-local order ID with its side, price, original
-input, and remaining input.
+balance. Record each returned pair-local order ID with its side, price, and
+remaining input.
 
 ## 4. Reconcile Indexed Fills
 
 Run one archive-capable indexer for all supported pairs. Aggregate exact
 `limit_order_fill` events by order into `input_amount`, `output_amount`, and
-`fill_count`. One dedicated keeper submits those reports. The contract verifies
+`fill_count`. Every report also includes its pair address. One dedicated keeper
+submits those reports. The contract verifies
 keeper authority, order ownership, side, remaining escrow, consumed input, and
 CL8Y aggregate rounding bounds before crediting output and placing the opposite
-order.
+order. If a single opposite placement fails or is skipped, reconciliation still
+commits and its output returns to the bot's free balance for later allocation.
 
 This trust boundary is required because unchanged standard pairs remove
 completed orders and contracts cannot query historical transaction events.

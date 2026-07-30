@@ -49,10 +49,13 @@ created with at least `minimum_gas_reserve + keeper_reward` in `gas_denom`.
 - The configured CL8Y factory returns the same pair for its two assets.
 - Both assets are distinct CW20 contracts.
 - Both CW20s use the same decimals.
+- Both assets are reviewed exact-transfer CW20 implementations; fee-on-transfer,
+  rebasing, and tokens that can fabricate receive amounts are unsupported.
 - Pool assets match pair assets in the same token0/token1 order.
 - Both pool reserves are nonzero.
 - `grid_count` is within the manager and pair batch-rung limits.
 - The current token1-per-token0 price lies strictly inside the bounds.
+- Every generated rung is within the standard pair's price bounds and distinct.
 - At least one initial bid and one initial ask rung exist.
 
 The current prototype uses arithmetic price spacing including both bounds.
@@ -135,6 +138,7 @@ One `reconcile` transaction contains reports for one bot only:
   "reconcile": {
     "bot_id": 1,
     "reports": [{
+      "pair": "<CL8Y_PAIR>",
       "order_id": 77,
       "input_amount": "100",
       "output_amount": "200",
@@ -148,6 +152,7 @@ The contract verifies:
 
 - Caller equals the configured keeper.
 - Report count is nonzero and bounded.
+- Every report names the bot's configured pair.
 - Every order ID is unique and belongs to the specified bot.
 - Pair-reported owner, side, price, and remaining escrow match recorded state.
 - Reported input equals the exact escrow decrease.
@@ -163,8 +168,13 @@ indexed_floor <= aggregate_floor
 aggregate_floor - indexed_floor < fill_count
 ```
 
-The indexer's exact output remains trusted because several valid per-fill
+The indexer's exact output and fill count remain trusted because several valid per-fill
 decompositions can share the same aggregate escrow decrease.
+
+All bots share the manager's physical CW20 custody. A compromised keeper or
+indexer can over-credit within the accepted aggregate rounding envelope and
+therefore threaten other bots' solvency. Bot isolation is logical, not a
+cryptographic replacement for trustworthy event history.
 
 ## Opposite Orders
 
@@ -175,6 +185,8 @@ After a valid partial fill:
 - Ask output creates a bid one rung lower.
 - Bid output creates an ask one rung higher.
 - Only the filled output amount funds the opposite order.
+- If the pair rejects or skips a single opposite placement, settlement remains
+  committed and the output returns to the bot's free balance.
 
 Multiple indexed fills are aggregated into one opposite placement, keeping the
 on-chain report and transaction size bounded.

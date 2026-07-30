@@ -31,15 +31,19 @@ for ROUND in $(seq 1 "$ROUNDS"); do
         SHOCK_TOKEN="$EMBER_ADDRESS"
         SHOCK_AMOUNT=$((RESERVE_0 * 4 / 100))
         REBALANCE_TOKEN="$CORAL_ADDRESS"
-        REBALANCE_AMOUNT=$((BALANCE_1 * 4 / 100))
+        REBALANCE_AMOUNT=0
     else
         SHOCK_TOKEN="$CORAL_ADDRESS"
         SHOCK_AMOUNT=$((RESERVE_1 * 4 / 100))
         REBALANCE_TOKEN="$EMBER_ADDRESS"
-        REBALANCE_AMOUNT=$((BALANCE_0 * 4 / 100))
+        REBALANCE_AMOUNT=0
     fi
     pool_swap "$SHOCK_TOKEN" "$SHOCK_AMOUNT"
     jq -e '.should_rebalance == true' <<<"$(query_vault_status)" >/dev/null
+    POOL=$(query_pool)
+    VAULT_BALANCES=$(query_vault_balances)
+    REBALANCE_AMOUNT=$(calculate_rebalance_amount \
+        "$REBALANCE_TOKEN" "$POOL" "$VAULT_BALANCES")
     BEFORE=$(cw20_balance "$REBALANCE_TOKEN" "$VAULT_ADDRESS")
     SHARES_BEFORE=$(token_supply "$LIQUIDITY_ADDRESS")
     execute_wait "$VAULT_ADDRESS" \

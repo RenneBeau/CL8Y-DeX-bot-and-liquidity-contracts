@@ -1,6 +1,6 @@
 # CL8Y Portfolio Rebalancer
 
-This Cargo workspace contains the production-oriented rebalancing system. Each
+This Cargo workspace contains the portfolio rebalancing system. Each
 bot keeps one CW20 token pair in an isolated vault and gives depositors
 transferable CW20 LP shares. A shared swap proxy holds CL8Y so approved vaults
 can use the proxy's governance-assigned fee tier.
@@ -16,7 +16,9 @@ can use the proxy's governance-assigned fee tier.
 - `examples/keeper`: reference off-chain keeper and service configuration.
 
 The first liquidity mint permanently locks 1,000 smallest share units. Direct
-token donations are included in pre-deposit NAV. Deposits, withdrawals, and
+token donations are included in pre-deposit balances. Established-vault shares
+use the minimum proportional contribution across both assets, preventing an
+oracle price from diluting incumbents. Deposits, withdrawals, and
 rebalances currently use a zero protocol charge.
 
 ## Price And Fee Tier
@@ -28,6 +30,9 @@ least 1,800 seconds and independent oracle validation.
 The proxy cannot self-register with CL8Y. Fee-registry governance must register
 the deployed proxy and the proxy must hold the selected tier's minimum CL8Y
 balance.
+
+The contracts are unaudited. Do not deploy them with economic assets before an
+independent contract and oracle review.
 
 ## Verify
 

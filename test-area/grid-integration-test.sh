@@ -72,10 +72,12 @@ print(max(1, int(value)))
 
 reconcile_last_fill() {
     local bot_id="$1"
+    local pair="$2"
     local message
     message=$(jq -nc --argjson bot_id "$bot_id" --argjson order_id "$LAST_ASK_ID" \
+        --arg pair "$pair" \
         --arg input "$LAST_FILL_INPUT" --arg output "$LAST_FILL_OUTPUT" \
-        '{reconcile:{bot_id:$bot_id,reports:[{order_id:$order_id,
+        '{reconcile:{bot_id:$bot_id,reports:[{pair:$pair,order_id:$order_id,
           input_amount:$input,output_amount:$output,fill_count:1}]}}')
     execute_grid_from gridkeeper "$message"
 }
@@ -140,7 +142,7 @@ echo "[grid 4/10] Partially filling one CL8Y ask"
 fill_first_grid_ask "$PAIR_ADDRESS" "$CORAL_ADDRESS" "$BOT_1"
 
 echo "[grid 5/10] Reconciling exact output into only the opposite portion"
-RESULT=$(reconcile_last_fill "$BOT_1")
+RESULT=$(reconcile_last_fill "$BOT_1" "$PAIR_ADDRESS")
 test "$(tx_event_value "$RESULT" changed_orders)" = "1"
 test "$(tx_event_value "$RESULT" keeper_reward)" = "30000000"
 ORDERS_AFTER=$(query_grid "{\"orders\":{\"bot_id\":$BOT_1}}")
@@ -220,8 +222,9 @@ BOT_3_BIDS_BEFORE=$(query_grid "{\"orders\":{\"bot_id\":$BOT_3}}" \
 echo "[grid 9/10] Filling and reconciling the second pair with the same keeper"
 fill_first_grid_ask "$SECOND_PAIR_ADDRESS" "$EMBER_ADDRESS" "$BOT_3"
 RECONCILE_2=$(jq -nc --argjson bot_id "$BOT_3" --argjson order_id "$LAST_ASK_ID" \
+    --arg pair "$SECOND_PAIR_ADDRESS" \
     --arg input "$LAST_FILL_INPUT" --arg output "$LAST_FILL_OUTPUT" \
-    '{reconcile:{bot_id:$bot_id,reports:[{order_id:$order_id,
+    '{reconcile:{bot_id:$bot_id,reports:[{pair:$pair,order_id:$order_id,
       input_amount:$input,output_amount:$output,fill_count:1}]}}')
 expect_execute_failure attacker "$GRID_ADDRESS" "$RECONCILE_2"
 RESULT=$(execute_grid_from gridkeeper "$RECONCILE_2")

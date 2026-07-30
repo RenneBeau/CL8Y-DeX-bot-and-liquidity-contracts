@@ -35,11 +35,14 @@ two configured assets. There is no generic token withdrawal method.
 
 Price is token1 per token0. With a nonzero TWAP window, the vault computes price
 from CL8Y cumulative observations. A keeper swap is permitted only when price
-has moved at least `rebalance_threshold_bps` from the stored reference.
+has moved at least `rebalance_threshold_bps` from the stored reference. The
+vault enforces the correcting token direction, caps the amount at half the
+ratio excess, and requires a minimum return within 2% of the current CL8Y
+simulation.
 
 After execution, the reply compares vault holdings with the current ordered
-pool reserve ratio. The transaction reverts unless allocation improved or is
-inside `allocation_tolerance_bps`. Only then is the reference price updated.
+pool reserve ratio. The transaction reverts unless allocation is inside
+`allocation_tolerance_bps`. Only then is the reference price updated.
 
 ## Invariants
 

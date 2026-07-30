@@ -29,6 +29,8 @@ pub enum ContractError {
     RebalanceNotRequired,
     #[error("vault allocation did not improve")]
     AllocationDidNotImprove,
+    #[error("keeper swap is not safely bounded")]
+    InvalidRebalanceSwap,
     #[error("vault allocation exceeds configured tolerance")]
     AllocationOutsideTolerance,
     #[error("another rebalance is pending")]

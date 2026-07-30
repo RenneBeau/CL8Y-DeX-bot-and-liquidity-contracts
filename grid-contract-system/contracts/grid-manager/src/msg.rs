@@ -74,6 +74,8 @@ pub struct LimitOrderPlacementItem {
 
 #[cw_serde]
 pub struct OrderFillReport {
+    /// Pair address whose local order ID is being reported.
+    pub pair: String,
     pub order_id: u64,
     /// Aggregate escrow consumed since the previous reconciliation.
     pub input_amount: Uint128,

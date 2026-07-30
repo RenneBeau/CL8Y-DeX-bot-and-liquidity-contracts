@@ -1,12 +1,15 @@
 .PHONY: test clippy optimize test-keeper local-setup local-test local-grid local-e2e local-soak local-all local-stop local-reset
 
 test:
-	cargo test --manifest-path rebalancer-system/Cargo.toml
-	cargo test --manifest-path grid-contract-system/Cargo.toml
+	cargo fmt --manifest-path rebalancer-system/Cargo.toml --all -- --check
+	cargo test --locked --manifest-path rebalancer-system/Cargo.toml
+	cargo fmt --manifest-path grid-contract-system/Cargo.toml --all -- --check
+	cargo test --locked --manifest-path grid-contract-system/Cargo.toml
+	python3 -m unittest discover -s rebalancer-system/examples/keeper -p 'test_*.py'
 
 clippy:
-	cargo clippy --manifest-path rebalancer-system/Cargo.toml --all-targets -- -D warnings
-	cargo clippy --manifest-path grid-contract-system/Cargo.toml --all-targets -- -D warnings
+	cargo clippy --locked --manifest-path rebalancer-system/Cargo.toml --all-targets -- -D warnings
+	cargo clippy --locked --manifest-path grid-contract-system/Cargo.toml --all-targets -- -D warnings
 
 optimize:
 	docker run --rm -v "$(CURDIR)/rebalancer-system:/code" --mount type=volume,source=cl8y_bot_target_cache,target=/code/target --mount type=volume,source=registry_cache,target=/usr/local/cargo/registry cosmwasm/workspace-optimizer:0.16.1
