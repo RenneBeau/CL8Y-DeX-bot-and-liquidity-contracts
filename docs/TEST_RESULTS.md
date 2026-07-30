@@ -1,6 +1,6 @@
 # Verification Report
 
-Date: 2026-07-29
+Date: 2026-07-30
 
 Environment:
 
@@ -10,6 +10,7 @@ Environment:
 - EMBER/CORAL minimal test pool
 - Protocol fee: disabled
 - Vault price source: spot mode for deterministic local testing
+- Persistent CL8Y limit-order settlement extension enabled
 
 ## Rust Verification
 
@@ -19,6 +20,8 @@ Commands:
 cargo fmt --all -- --check
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
+cargo test --manifest-path grid-contract-system/Cargo.toml
+cargo clippy --manifest-path grid-contract-system/Cargo.toml --all-targets -- -D warnings
 ```
 
 Result: PASS
@@ -28,6 +31,9 @@ Result: PASS
 - Swap proxy unit tests: 2 passed
 - Documentation tests: passed
 - Strict Clippy: passed with no warnings
+- Grid manager unit tests: 6 passed
+- Patched CL8Y pair unit tests: 45 passed
+- CL8Y cumulative maker-output integration test: passed
 
 ## Optimized Wasm
 
@@ -45,6 +51,7 @@ Latest verified checksums:
 730ac20674a19bdee45b2ee559c6fa08d13f5d306e1823b4a0bfa16459c8d7ad  cl8y_bot_liquidity.wasm
 4456a87a38edf2573373aab53dc73074d9674604d6cabc8eb16963459a027f0d  cl8y_bot_vault.wasm
 1b822e77d3c268886187c6cea72700ea8276d818e964704f730534f1a4fe2dd4  cl8y_swap_proxy.wasm
+239879b00bb1413921adfbcbed3eda0393b662c004c0bc1ce0dc5da72c956690  cl8y_grid_manager.wasm
 ```
 
 ## Signed LocalTerra E2E
@@ -70,6 +77,14 @@ Verified scenarios:
    rebalance without changing bot LP supply.
 9. Zero DEX LP balances in vault and liquidity contracts; unchanged proxy CL8Y.
 10. Zero deposit and unauthorized CL8Y-withdrawal failure paths.
+11. Two independently owned grid bots with isolated balances, shares, orders,
+    and prepaid gas credits.
+12. Automatic sell-A and sell-B allocation using each side's rung count.
+13. Real partial CL8Y ask fill, exact cumulative-output reconciliation, and an
+    opposite bid containing only the filled portion.
+14. Unchanged second-bot state after the first bot's fill and reconciliation.
+15. Active-order withdrawal rejection, bounded cancellation, settlement, and
+    complete bot-share withdrawal.
 
 ## Extended Soak
 

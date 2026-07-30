@@ -1,4 +1,6 @@
 /target/
+/grid-contract-system/target/
+/grid-contract-system/artifacts/
 /artifacts/
 /test-area/.cache/
 /test-area/.env

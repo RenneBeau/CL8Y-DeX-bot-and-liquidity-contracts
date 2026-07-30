@@ -4,6 +4,9 @@ The harness pins CL8Y DEX revision
 `fad801117fe54420d7529da04e485d67d511ef2c`, starts its official LocalTerra
 image, deploys the minimal EMBER/CORAL DEX, and then deploys the shared proxy,
 one isolated bot vault, and its CW20 bot-liquidity contract.
+The harness applies the grid system's persistent limit-order settlement patch
+to the pinned CL8Y pair and also deploys the experimental multi-user grid
+manager.
 
 The managed CL8Y checkout is under `test-area/.cache/` and is not committed.
 Contracts are built with `cosmwasm/workspace-optimizer:0.16.1` for Terra Classic
@@ -13,6 +16,7 @@ VM compatibility. LCD/RPC use `1317`/`26657`; optional gRPC is remapped to
 ```sh
 make local-setup  # start LocalTerra and deploy DEX plus clean bot system
 make local-test   # run tests against the current deployment
+make local-grid   # run signed grid order and isolation scenarios
 make local-e2e    # redeploy bot contracts, then run signed E2E scenarios
 make local-soak   # redeploy and run 25 inventory-rebalance rounds
 make local-all    # one deploy followed by E2E and soak suites

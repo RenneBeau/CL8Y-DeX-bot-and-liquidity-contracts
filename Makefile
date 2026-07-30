@@ -1,4 +1,4 @@
-.PHONY: test test-keeper local-setup local-test local-e2e local-soak local-all local-stop local-reset
+.PHONY: test test-keeper local-setup local-test local-grid local-e2e local-soak local-all local-stop local-reset
 
 test:
 	cargo test --workspace
@@ -11,6 +11,9 @@ local-setup:
 
 local-test:
 	./test-area/integration-test.sh
+
+local-grid:
+	./test-area/grid-integration-test.sh
 
 local-e2e:
 	./test-area/run-e2e.sh

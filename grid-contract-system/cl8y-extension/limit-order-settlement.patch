@@ -1,0 +1,174 @@
+diff --git a/smartcontracts/contracts/pair/src/contract.rs b/smartcontracts/contracts/pair/src/contract.rs
+index ec23cd6..a55fab0 100644
+--- a/smartcontracts/contracts/pair/src/contract.rs
++++ b/smartcontracts/contracts/pair/src/contract.rs
+@@ -29,2 +29,2 @@ use crate::state::{
+-    ORDER_NEXT_ID, PAIR_INFO, PAUSED, PENDING_ESCROW_TOKEN0, PENDING_ESCROW_TOKEN1, RESERVES,
+-    TOTAL_LP_SUPPLY,
++    ORDERS, ORDER_NEXT_ID, PAIR_INFO, PAUSED, PENDING_ESCROW_TOKEN0, PENDING_ESCROW_TOKEN1,
++    RESERVES, TOTAL_LP_SUPPLY,
+@@ -2163,0 +2164,3 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
++        QueryMsg::LimitOrderSettlement { order_id } => {
++            to_json_binary(&query_limit_order_settlement(deps, order_id)?)
++        }
+@@ -2211,0 +2215,41 @@ fn query_limit_order(deps: Deps, order_id: u64) -> StdResult<LimitOrderResponse>
++fn query_limit_order_settlement(
++    deps: Deps,
++    order_id: u64,
++) -> StdResult<dex_common::pair::LimitOrderSettlementResponse> {
++    use dex_common::pair::{LimitOrderSettlementResponse, LimitOrderSettlementStatus};
++
++    let settlement = crate::state::LIMIT_ORDER_SETTLEMENTS.load(deps.storage, order_id)?;
++    let open = ORDERS.may_load(deps.storage, order_id)?;
++    let parked = EXPIRED_LIMIT_CLAIMS.may_load(deps.storage, order_id)?;
++    let (remaining, claimable_refund, status) = if let Some(order) = open {
++        (
++            order.remaining,
++            Uint128::zero(),
++            LimitOrderSettlementStatus::Open,
++        )
++    } else if let Some(refund) = parked {
++        (
++            refund.remaining,
++            refund.remaining,
++            LimitOrderSettlementStatus::Parked,
++        )
++    } else {
++        (
++            Uint128::zero(),
++            Uint128::zero(),
++            LimitOrderSettlementStatus::Filled,
++        )
++    };
++    Ok(LimitOrderSettlementResponse {
++        order_id,
++        owner: settlement.owner,
++        side: settlement.side,
++        price: settlement.price,
++        initial_remaining: settlement.initial_remaining,
++        remaining,
++        cumulative_output: settlement.cumulative_output,
++        status,
++        claimable_refund,
++    })
++}
++
+diff --git a/smartcontracts/contracts/pair/src/limit_placement.rs b/smartcontracts/contracts/pair/src/limit_placement.rs
+index 8d1b357..6d9fd1e 100644
+--- a/smartcontracts/contracts/pair/src/limit_placement.rs
++++ b/smartcontracts/contracts/pair/src/limit_placement.rs
+@@ -13,2 +13,2 @@ use crate::state::{
+-    LimitOrderConfig, FEE_CONFIG, LIMIT_ORDER_CONFIG, PAIR_INFO, PENDING_ESCROW_TOKEN0,
+-    PENDING_ESCROW_TOKEN1,
++    LimitOrderConfig, LimitOrderSettlement, FEE_CONFIG, LIMIT_ORDER_CONFIG,
++    LIMIT_ORDER_SETTLEMENTS, PAIR_INFO, PENDING_ESCROW_TOKEN0, PENDING_ESCROW_TOKEN1,
+@@ -221,0 +222,11 @@ pub fn execute_place_limit_orders_batch(
++                LIMIT_ORDER_SETTLEMENTS.save(
++                    deps.storage,
++                    outcome.id,
++                    &LimitOrderSettlement {
++                        owner: owner.clone(),
++                        price: plan.item.price,
++                        side: side.clone(),
++                        initial_remaining: remaining_for_book,
++                        cumulative_output: Uint128::zero(),
++                    },
++                )?;
+diff --git a/smartcontracts/contracts/pair/src/orderbook.rs b/smartcontracts/contracts/pair/src/orderbook.rs
+index fa22e01..3718766 100644
+--- a/smartcontracts/contracts/pair/src/orderbook.rs
++++ b/smartcontracts/contracts/pair/src/orderbook.rs
+@@ -43,2 +43,3 @@ use crate::state::{
+-    ExpiredLimitRefund, LimitOrder, EXPIRED_LIMIT_CLAIMS, HEAD_ASK, HEAD_BID, ORDERS,
+-    ORDER_NEXT_ID, PENDING_ESCROW_TOKEN0, PENDING_ESCROW_TOKEN1,
++    ExpiredLimitRefund, LimitOrder, EXPIRED_LIMIT_CLAIMS, HEAD_ASK, HEAD_BID,
++    LIMIT_ORDER_SETTLEMENTS, ORDERS, ORDER_NEXT_ID, PENDING_ESCROW_TOKEN0,
++    PENDING_ESCROW_TOKEN1,
+@@ -59,0 +61,12 @@ fn try_mul_floor(amount: Uint128, factor: Decimal) -> Option<Uint128> {
++fn record_maker_output(
++    storage: &mut dyn Storage,
++    order_id: u64,
++    output: Uint128,
++) -> Result<(), ContractError> {
++    if let Some(mut settlement) = LIMIT_ORDER_SETTLEMENTS.may_load(storage, order_id)? {
++        settlement.cumulative_output = settlement.cumulative_output.checked_add(output)?;
++        LIMIT_ORDER_SETTLEMENTS.save(storage, order_id, &settlement)?;
++    }
++    Ok(())
++}
++
+@@ -1559,0 +1573,2 @@ pub fn match_bids(
++        record_maker_output(storage, oid, fill)?;
++
+@@ -1753,0 +1769,2 @@ pub fn match_asks(
++        record_maker_output(storage, oid, cost)?;
++
+diff --git a/smartcontracts/contracts/pair/src/state.rs b/smartcontracts/contracts/pair/src/state.rs
+index b417d96..2b0726f 100644
+--- a/smartcontracts/contracts/pair/src/state.rs
++++ b/smartcontracts/contracts/pair/src/state.rs
+@@ -70,0 +71,2 @@ pub const ORDERS: Map<u64, LimitOrder> = Map::new("limit_orders");
++/// Persistent exact maker output used by contracts that own multiple logical positions.
++pub const LIMIT_ORDER_SETTLEMENTS: Map<u64, LimitOrderSettlement> = Map::new("limit_settle");
+@@ -113,0 +116,9 @@ pub struct LimitOrder {
++
++#[cw_serde]
++pub struct LimitOrderSettlement {
++    pub owner: Addr,
++    pub price: Decimal,
++    pub side: LimitOrderSide,
++    pub initial_remaining: Uint128,
++    pub cumulative_output: Uint128,
++}
+diff --git a/smartcontracts/packages/dex-common/src/pair.rs b/smartcontracts/packages/dex-common/src/pair.rs
+index 65a8394..9232f62 100644
+--- a/smartcontracts/packages/dex-common/src/pair.rs
++++ b/smartcontracts/packages/dex-common/src/pair.rs
+@@ -149,0 +150,24 @@ pub struct LimitOrderResponse {
++/// Persistent maker settlement data retained after an order leaves the book.
++#[cw_serde]
++pub enum LimitOrderSettlementStatus {
++    Open,
++    Filled,
++    Parked,
++}
++
++#[cw_serde]
++pub struct LimitOrderSettlementResponse {
++    pub order_id: u64,
++    pub owner: Addr,
++    pub side: LimitOrderSide,
++    pub price: Decimal,
++    /// Escrow after the maker placement fee was deducted.
++    pub initial_remaining: Uint128,
++    /// Current open escrow, or the parked refundable amount.
++    pub remaining: Uint128,
++    /// Exact maker output accumulated across every fill.
++    pub cumulative_output: Uint128,
++    pub status: LimitOrderSettlementStatus,
++    pub claimable_refund: Uint128,
++}
++
+@@ -344,0 +369,3 @@ pub enum QueryMsg {
++    /// Persistent exact maker settlement, including completed and parked orders.
++    #[returns(LimitOrderSettlementResponse)]
++    LimitOrderSettlement { order_id: u64 },
+diff --git a/smartcontracts/tests/src/limit_order_tests.rs b/smartcontracts/tests/src/limit_order_tests.rs
+index b114327..25864ab 100644
+--- a/smartcontracts/tests/src/limit_order_tests.rs
++++ b/smartcontracts/tests/src/limit_order_tests.rs
+@@ -16 +16,2 @@ use dex_common::pair::{
+-    LimitOrderSide, PausedResponse, QueryMsg, MAX_EXPIRED_PARKS_PER_SWAP,
++    LimitOrderSettlementResponse, LimitOrderSettlementStatus, LimitOrderSide, PausedResponse,
++    QueryMsg, MAX_EXPIRED_PARKS_PER_SWAP,
+@@ -427,0 +429,10 @@ fn bid_and_hybrid_swap_partially_fills_book() {
++    let settlement: LimitOrderSettlementResponse = app
++        .wrap()
++        .query_wasm_smart(
++            env.pair.to_string(),
++            &QueryMsg::LimitOrderSettlement { order_id },
++        )
++        .unwrap();
++    assert_eq!(settlement.status, LimitOrderSettlementStatus::Open);
++    assert_eq!(settlement.remaining, lo.remaining);
++    assert_eq!(settlement.cumulative_output, swap_in);

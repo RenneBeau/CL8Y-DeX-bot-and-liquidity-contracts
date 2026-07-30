@@ -36,6 +36,13 @@ docker run --rm \
     --mount type=volume,source=registry_cache,target=/usr/local/cargo/registry \
     cosmwasm/workspace-optimizer:0.16.1
 
+echo "Building the isolated grid-manager Wasm artifact..."
+docker run --rm \
+    -v "$PROJECT_ROOT/grid-contract-system:/code" \
+    --mount type=volume,source=cl8y_grid_target_cache,target=/code/target \
+    --mount type=volume,source=registry_cache,target=/usr/local/cargo/registry \
+    cosmwasm/workspace-optimizer:0.16.1
+
 CONTAINER=$(localterra_container)
 store_contract() {
     local artifact="$1"
@@ -49,6 +56,11 @@ store_contract() {
 PROXY_CODE_ID=$(store_contract cl8y_swap_proxy)
 VAULT_CODE_ID=$(store_contract cl8y_bot_vault)
 LIQUIDITY_CODE_ID=$(store_contract cl8y_bot_liquidity)
+docker cp "$PROJECT_ROOT/grid-contract-system/artifacts/cl8y_grid_manager.wasm" \
+    "$CONTAINER:/tmp/cl8y_grid_manager.wasm"
+TX_HASH=$(terrad_tx wasm store /tmp/cl8y_grid_manager.wasm | jq -r '.txhash')
+TX_RESULT=$(wait_tx "$TX_HASH")
+GRID_CODE_ID=$(tx_event_value "$TX_RESULT" code_id)
 
 instantiate_contract() {
     local code_id="$1"
@@ -77,6 +89,13 @@ LIQUIDITY_INIT=$(jq -nc --arg vault "$VAULT_ADDRESS" \
       symbol:"ECBOTLP",decimals:6,minimum_initial_deposit:"100000",marketing:null}')
 LIQUIDITY_ADDRESS=$(instantiate_contract "$LIQUIDITY_CODE_ID" "$LIQUIDITY_INIT" ember-coral-bot-liquidity)
 
+GRID_INIT=$(jq -nc --arg admin "$TEST_ADDRESS" --arg keeper "$TEST_ADDRESS" \
+    --arg factory "$VITE_FACTORY_ADDRESS" \
+    '{admin:$admin,keeper:$keeper,factory:$factory,gas_denom:"uluna",
+      keeper_reward:"30000000",minimum_gas_reserve:"30000000",max_grid_count:20,
+      max_orders_per_reconcile:20,max_active_orders_per_bot:100}')
+GRID_ADDRESS=$(instantiate_contract "$GRID_CODE_ID" "$GRID_INIT" cl8y-grid-manager)
+
 SET_LIQUIDITY=$(jq -nc --arg address "$LIQUIDITY_ADDRESS" \
     '{set_liquidity_contract:{liquidity_contract:$address}}')
 TX_HASH=$(terrad_tx wasm execute "$VAULT_ADDRESS" "$SET_LIQUIDITY" | jq -r '.txhash')
@@ -97,6 +116,15 @@ REGISTER_PROXY=$(jq -nc --arg wallet "$PROXY_ADDRESS" \
 TX_HASH=$(terrad_tx wasm execute "$FEE_REGISTRY_ADDRESS" "$REGISTER_PROXY" | jq -r '.txhash')
 wait_tx "$TX_HASH" >/dev/null
 
+FUND_GRID=$(jq -nc --arg recipient "$GRID_ADDRESS" --arg amount "$CL8Y_FUND" \
+    '{transfer:{recipient:$recipient,amount:$amount}}')
+TX_HASH=$(terrad_tx wasm execute "$CL8Y_ADDRESS" "$FUND_GRID" | jq -r '.txhash')
+wait_tx "$TX_HASH" >/dev/null
+REGISTER_GRID=$(jq -nc --arg wallet "$GRID_ADDRESS" \
+    '{register_wallet:{wallet:$wallet,tier_id:5}}')
+TX_HASH=$(terrad_tx wasm execute "$FEE_REGISTRY_ADDRESS" "$REGISTER_GRID" | jq -r '.txhash')
+wait_tx "$TX_HASH" >/dev/null
+
 cat > "$LOCAL_ENV" <<ENVEOF
 CL8Y_DEX_DIR=$DEX_DIR
 PAIR_ADDRESS=$PAIR_ADDRESS
@@ -107,9 +135,13 @@ FEE_REGISTRY_ADDRESS=$FEE_REGISTRY_ADDRESS
 PROXY_ADDRESS=$PROXY_ADDRESS
 VAULT_ADDRESS=$VAULT_ADDRESS
 LIQUIDITY_ADDRESS=$LIQUIDITY_ADDRESS
+GRID_CODE_ID=$GRID_CODE_ID
+GRID_ADDRESS=$GRID_ADDRESS
+FACTORY_ADDRESS=$VITE_FACTORY_ADDRESS
 TEST_ADDRESS=$TEST_ADDRESS
 ENVEOF
 
 echo "Swap proxy: $PROXY_ADDRESS"
 echo "Bot vault: $VAULT_ADDRESS"
 echo "Bot liquidity token: $LIQUIDITY_ADDRESS"
+echo "Grid manager: $GRID_ADDRESS"
