@@ -114,7 +114,11 @@ Repeat these steps for every new pair.
   "pair": "<PAIR_ADDRESS>",
   "twap_window_seconds": 60,
   "rebalance_threshold_bps": 500,
-  "allocation_tolerance_bps": 500
+  "allocation_tolerance_bps": 500,
+  "max_trade_bps": 2500,
+  "max_execution_deviation_bps": 500,
+  "quote_slippage_bps": 200,
+  "max_spread": "0.05"
 }
 ```
 
@@ -128,8 +132,9 @@ Settings:
 
 - `rebalance_threshold_bps: 500` means a 5% price movement.
 - `allocation_tolerance_bps: 500` allows a 5% ratio deviation.
-- `twap_window_seconds: 0` is unsafe spot mode for deterministic local tests only.
-- A nonzero TWAP window reads CL8Y cumulative observations over that period.
+- `twap_window_seconds` must be nonzero and reads CL8Y cumulative observations.
+- Hard maxima are 50% of the offered balance per trade, 10% TWAP execution
+  deviation, 5% quote slippage, and 10% CL8Y spread.
 - `60` is a short-term starting point, not a universal safe value. Benchmark
   30-300 seconds against the pair's liquidity, block time, and volatility.
 

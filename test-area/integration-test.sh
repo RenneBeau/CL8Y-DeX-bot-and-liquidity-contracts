@@ -106,21 +106,26 @@ echo "[8/10] Verifying 5% price trigger and constrained inventory rebalance"
 POOL=$(query_pool)
 RESERVE_0=$(jq -r '.assets[0].amount' <<<"$POOL")
 pool_swap "$EMBER_ADDRESS" "$((RESERVE_0 * 4 / 100))"
+sleep 2
 STATUS=$(query_vault_status)
 jq -e '.should_rebalance == true and .price_deviation_bps >= 500' <<<"$STATUS" >/dev/null
-VAULT_BALANCES=$(query_vault_balances)
-POOL=$(query_pool)
-REBALANCE_AMOUNT=$(calculate_rebalance_amount "$CORAL_ADDRESS" "$POOL" "$VAULT_BALANCES")
-WRONG=$(vault_rebalance_message "$EMBER_ADDRESS" "$REBALANCE_AMOUNT")
-expect_execute_failure test1 "$VAULT_ADDRESS" "$WRONG"
+PLAN=$(query_vault_plan)
+REBALANCE_TOKEN=$(jq -r '.offer_token' <<<"$PLAN")
+REBALANCE_AMOUNT=$(jq -r '.amount' <<<"$PLAN")
+PRE_DEVIATION=$(jq -r '.allocation_deviation_bps' <<<"$PLAN")
+expect_execute_failure attacker "$VAULT_ADDRESS" "$(vault_rebalance_message)"
 SHARES_BEFORE=$(token_supply "$LIQUIDITY_ADDRESS")
-CORAL_BEFORE=$(cw20_balance "$CORAL_ADDRESS" "$VAULT_ADDRESS")
-CORRECT=$(vault_rebalance_message "$CORAL_ADDRESS" "$REBALANCE_AMOUNT")
+CORAL_BEFORE=$(cw20_balance "$REBALANCE_TOKEN" "$VAULT_ADDRESS")
+CORRECT=$(vault_rebalance_message)
 execute_wait "$VAULT_ADDRESS" "$CORRECT"
-CORAL_AFTER=$(cw20_balance "$CORAL_ADDRESS" "$VAULT_ADDRESS")
+CORAL_AFTER=$(cw20_balance "$REBALANCE_TOKEN" "$VAULT_ADDRESS")
 test $((CORAL_BEFORE - CORAL_AFTER)) -eq "$REBALANCE_AMOUNT"
 test "$(token_supply "$LIQUIDITY_ADDRESS")" = "$SHARES_BEFORE"
-jq -e '.price_deviation_bps == 0' <<<"$(query_vault_status)" >/dev/null
+POST_STATUS=$(query_vault_status)
+jq -e --argjson pre "$PRE_DEVIATION" \
+    '.allocation_deviation_bps < $pre and
+     (if .allocation_deviation_bps <= 500 then .price_deviation_bps == 0
+      else .price_deviation_bps >= 500 end)' <<<"$POST_STATUS" >/dev/null
 
 echo "[9/10] Verifying no DEX LP custody and no protocol fee"
 test "$(cw20_balance "$DEX_LP_TOKEN" "$VAULT_ADDRESS")" = "0"

@@ -35,7 +35,7 @@ pub enum VaultExecuteMsg {
     },
     FinalizeLiquidityOperation {},
     Rebalance {
-        params: SwapParams,
+        deadline: u64,
     },
     SyncReference {},
     UpdateKeeper {
@@ -44,6 +44,10 @@ pub enum VaultExecuteMsg {
     UpdateThresholds {
         rebalance_threshold_bps: Option<u16>,
         allocation_tolerance_bps: Option<u16>,
+        max_trade_bps: Option<u16>,
+        max_execution_deviation_bps: Option<u16>,
+        quote_slippage_bps: Option<u16>,
+        max_spread: Option<Decimal>,
     },
     TransferAdmin {
         admin: String,
@@ -56,6 +60,7 @@ pub enum VaultQueryMsg {
     Balances {},
     Price {},
     RebalanceStatus {},
+    RebalancePlan {},
 }
 
 #[cw_serde]
@@ -70,6 +75,10 @@ pub struct VaultConfigResponse {
     pub twap_window_seconds: u32,
     pub rebalance_threshold_bps: u16,
     pub allocation_tolerance_bps: u16,
+    pub max_trade_bps: u16,
+    pub max_execution_deviation_bps: u16,
+    pub quote_slippage_bps: u16,
+    pub max_spread: Decimal,
 }
 
 #[cw_serde]
@@ -89,6 +98,20 @@ pub struct RebalanceStatusResponse {
     pub allocation_deviation_bps: u16,
     pub reference_price: Decimal,
     pub current_price: Decimal,
+}
+
+#[cw_serde]
+pub struct RebalancePlanResponse {
+    pub should_rebalance: bool,
+    pub captured_twap: Decimal,
+    pub balances: [Uint128; 2],
+    pub price_deviation_bps: u16,
+    pub allocation_deviation_bps: u16,
+    pub reference_price: Decimal,
+    pub offer_token: Option<String>,
+    pub amount: Option<Uint128>,
+    pub min_return: Option<Uint128>,
+    pub max_spread: Decimal,
 }
 
 #[cw_serde]

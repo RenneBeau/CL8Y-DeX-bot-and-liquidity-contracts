@@ -23,11 +23,11 @@ rebalances currently use a zero protocol charge.
 
 ## Price And Fee Tier
 
-Vaults support CL8Y arithmetic TWAP through `twap_window_seconds`. LocalTerra
-uses `0` for spot-price testing. A short-term strategy can start by testing a
-30-300 second window so meaningful swings trigger quickly while averaging
-multiple blocks. The final value must be chosen from pair liquidity, block
-time, volatility, and manipulation-cost measurements.
+Vaults require a nonzero CL8Y arithmetic TWAP window. One captured TWAP drives
+the trigger, inventory direction, amount, execution floor, and reply check;
+spot reserves never drive keeper safety. A short-term strategy can start by
+testing a 30-300 second window. The final value must be chosen from pair
+liquidity, block time, volatility, and manipulation-cost measurements.
 
 CL8Y fee-registry governance registers the deployed proxy, and the proxy holds
 the selected tier's minimum CL8Y balance.

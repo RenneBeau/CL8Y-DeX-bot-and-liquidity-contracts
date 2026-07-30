@@ -36,6 +36,14 @@ immediately and keeps the existing reference price.
 
 Both values can also be changed in one transaction.
 
+## Update Risk Controls
+
+The same message can update `max_trade_bps`,
+`max_execution_deviation_bps`, `quote_slippage_bps`, and `max_spread`; omitted
+or null fields retain their current values. Hard maxima are respectively 5,000,
+1,000, and 500 basis points and 10% spread. These bounds cannot be overridden
+by the admin or keeper.
+
 ## Replace The Keeper
 
 ```json
@@ -108,21 +116,20 @@ Transfer proxy administration:
 
 ## Keeper Rebalance
 
-After `rebalance_status` reports `should_rebalance: true`, the keeper executes:
+After `rebalance_plan` reports `should_rebalance: true` and an offer, the keeper
+executes only the deadline-bearing command:
 
 ```json
 {
   "rebalance": {
-    "params": {
-      "offer_token": "<TOKEN_A_OR_B>",
-      "amount": "<OFFER_AMOUNT>",
-      "min_return": "<MINIMUM_OUTPUT>",
-      "max_spread": "0.05",
-      "deadline": 1800000000
-    }
+    "deadline": 1800000000
   }
 }
 ```
+
+The vault captures a fresh TWAP and derives all economic parameters during
+execution. If the plan has no offer because allocation is already within
+tolerance, execute `{"sync_reference":{}}` instead.
 
 See [`examples/keeper/README.md`](../examples/keeper/README.md) for key creation,
 gas funding, vault registration, dry runs, signing, service operation, and key

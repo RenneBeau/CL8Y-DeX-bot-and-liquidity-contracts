@@ -30,28 +30,26 @@ for ROUND in $(seq 1 "$ROUNDS"); do
     if [ $((ROUND % 2)) -eq 1 ]; then
         SHOCK_TOKEN="$EMBER_ADDRESS"
         SHOCK_AMOUNT=$((RESERVE_0 * 4 / 100))
-        REBALANCE_TOKEN="$CORAL_ADDRESS"
-        REBALANCE_AMOUNT=0
     else
         SHOCK_TOKEN="$CORAL_ADDRESS"
         SHOCK_AMOUNT=$((RESERVE_1 * 4 / 100))
-        REBALANCE_TOKEN="$EMBER_ADDRESS"
-        REBALANCE_AMOUNT=0
     fi
     pool_swap "$SHOCK_TOKEN" "$SHOCK_AMOUNT"
+    sleep 2
     jq -e '.should_rebalance == true' <<<"$(query_vault_status)" >/dev/null
-    POOL=$(query_pool)
-    VAULT_BALANCES=$(query_vault_balances)
-    REBALANCE_AMOUNT=$(calculate_rebalance_amount \
-        "$REBALANCE_TOKEN" "$POOL" "$VAULT_BALANCES")
+    PLAN=$(query_vault_plan)
+    REBALANCE_TOKEN=$(jq -r '.offer_token' <<<"$PLAN")
+    REBALANCE_AMOUNT=$(jq -r '.amount' <<<"$PLAN")
+    PRE_DEVIATION=$(jq -r '.allocation_deviation_bps' <<<"$PLAN")
     BEFORE=$(cw20_balance "$REBALANCE_TOKEN" "$VAULT_ADDRESS")
     SHARES_BEFORE=$(token_supply "$LIQUIDITY_ADDRESS")
     execute_wait "$VAULT_ADDRESS" \
-        "$(vault_rebalance_message "$REBALANCE_TOKEN" "$REBALANCE_AMOUNT")"
+        "$(vault_rebalance_message)"
     AFTER=$(cw20_balance "$REBALANCE_TOKEN" "$VAULT_ADDRESS")
     test $((BEFORE - AFTER)) -eq "$REBALANCE_AMOUNT"
     test "$(token_supply "$LIQUIDITY_ADDRESS")" = "$SHARES_BEFORE"
-    jq -e '.price_deviation_bps == 0' <<<"$(query_vault_status)" >/dev/null
+    jq -e --argjson pre "$PRE_DEVIATION" '.allocation_deviation_bps < $pre' \
+        <<<"$(query_vault_status)" >/dev/null
     printf 'Round %d/%d passed\n' "$ROUND" "$ROUNDS"
 done
 echo "Soak test passed: $ROUNDS rounds in $(($(date +%s) - STARTED_AT))s."

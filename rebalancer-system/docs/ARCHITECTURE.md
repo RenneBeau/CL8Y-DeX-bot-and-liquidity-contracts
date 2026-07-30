@@ -81,16 +81,17 @@ not the next depositor.
 
 ## Rebalancing
 
-The vault records a reference token1-per-token0 pool price. A keeper may submit
-a constrained swap after the configured price-movement threshold is reached,
-5% by default. The vault requires the post-swap token allocation to improve or
-remain within its configured tolerance before recording a new reference.
+The vault records a reference token1-per-token0 TWAP. Once movement reaches 5%
+by default, the contract captures one TWAP and derives the correcting side,
+amount, trade cap, minimum return, and maximum spread. The reply uses that same
+TWAP and exact balance deltas. Strict partial improvement commits while keeping
+the old reference; reaching tolerance advances the reference to the captured
+TWAP.
 
-Local tests use spot mode (`twap_window_seconds = 0`). For a short-term swing
-strategy, a 30-300 second CL8Y TWAP is a reasonable range to benchmark. Shorter
-windows react faster but cost less to manipulate; longer windows are safer but
-can miss profitable movement. Economically significant pools still require
-liquidity checks and independent oracle validation.
+A 30-300 second CL8Y TWAP is a reasonable range to benchmark. Shorter windows
+react faster but cost less to manipulate; longer windows are safer but can miss
+profitable movement. Economically significant pools still require liquidity
+checks and independent oracle validation.
 
 ## CL8Y Discount
 

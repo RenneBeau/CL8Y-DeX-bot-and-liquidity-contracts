@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Minimal CL8Y bot-vault keeper.
+"""CL8Y bot-vault keeper with final transaction tracking.
 
 Dry-run is the default. Pass --broadcast to sign with a terrad keyring entry.
 """
@@ -10,8 +10,53 @@ import json
 import os
 import subprocess
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
+
+
+class DeterministicTxError(RuntimeError):
+    """A CheckTx or DeliverTx rejection that retrying unchanged cannot fix."""
+
+
+class TxTracker:
+    def __init__(self, path=None):
+        self.path = path
+        self.pending_hash = None
+        self.pending_plan = None
+        self.pending_since = None
+        self.suppressed_plan = None
+        if path and os.path.exists(path):
+            with open(path, encoding="utf-8") as state_file:
+                state = json.load(state_file)
+            self.pending_hash = state.get("pending_hash")
+            self.pending_plan = state.get("pending_plan")
+            self.pending_since = state.get("pending_since")
+            self.suppressed_plan = state.get("suppressed_plan")
+
+    def save(self):
+        if not self.path:
+            return
+        directory = os.path.dirname(os.path.abspath(self.path))
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+        temporary = self.path + ".tmp"
+        with open(temporary, "w", encoding="utf-8") as state_file:
+            json.dump(
+                {
+                    "pending_hash": self.pending_hash,
+                    "pending_plan": self.pending_plan,
+                    "pending_since": self.pending_since,
+                    "suppressed_plan": self.suppressed_plan,
+                },
+                state_file,
+            )
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, self.path)
+
+
+def get_json(url):
+    with urllib.request.urlopen(url, timeout=15) as response:
+        return json.load(response)
 
 
 def smart_query(lcd, contract, message):
@@ -22,92 +67,32 @@ def smart_query(lcd, contract, message):
         f"{lcd.rstrip('/')}/cosmwasm/wasm/v1/contract/"
         f"{urllib.parse.quote(contract, safe='')}/smart/{encoded}"
     )
-    with urllib.request.urlopen(url, timeout=15) as response:
-        return json.load(response)["data"]
+    return get_json(url)["data"]
 
 
-def calculate_offer(balances, reserves, max_trade_bps):
-    """Return (token_index, amount) that moves holdings toward pool ratio."""
-    balance0, balance1 = map(int, balances)
-    reserve0, reserve1 = map(int, reserves)
-    if min(reserve0, reserve1) <= 0 or balance0 + balance1 == 0:
-        return None
-
-    cross = balance1 * reserve0 - balance0 * reserve1
-    if cross > 0:
-        amount = cross // (2 * reserve0)
-        index = 1
-        balance = balance1
-    elif cross < 0:
-        amount = (-cross) // (2 * reserve1)
-        index = 0
-        balance = balance0
-    else:
-        return None
-
-    cap = balance * max_trade_bps // 10_000
-    amount = min(amount, cap)
-    return (index, amount) if amount > 0 else None
-
-
-def quote_swap(lcd, pair, proxy, offer_token, amount):
-    return smart_query(
-        lcd,
-        pair,
+def plan_fingerprint(plan, message):
+    return json.dumps(
         {
-            "hybrid_simulation": {
-                "offer_asset": {
-                    "info": {"token": {"contract_addr": offer_token}},
-                    "amount": str(amount),
-                },
-                "hybrid": {
-                    "pool_input": str(amount),
-                    "book_input": "0",
-                    "max_maker_fills": 1,
-                    "book_start_hint": None,
-                },
-                "trader": proxy,
-                "sender": None,
-                "belief_price": None,
-            }
+            "captured_twap": plan["captured_twap"],
+            "balances": plan["balances"],
+            "reference_price": plan["reference_price"],
+            "action": next(iter(message)),
         },
+        sort_keys=True,
+        separators=(",", ":"),
     )
 
 
-def build_rebalance(config, status, balances, pool, args):
-    if not status["should_rebalance"]:
+def build_rebalance(plan, deadline):
+    if not plan["should_rebalance"]:
         return None
-
-    reserves = [asset["amount"] for asset in pool["assets"]]
-    offer = calculate_offer(balances, reserves, args.max_trade_bps)
-    if offer is None:
-        return None
-    token_index, amount = offer
-    offer_token = config["asset_tokens"][token_index]
-    quote = quote_swap(
-        args.lcd, config["pair"], config["proxy"], offer_token, amount
-    )
-    quoted_return = int(quote["return_amount"])
-    min_return = quoted_return * (10_000 - args.slippage_bps) // 10_000
-    if min_return <= 0:
-        raise RuntimeError("quote produced zero minimum return")
-
-    deadline = int(time.time()) + args.deadline_seconds
-    return {
-        "rebalance": {
-            "params": {
-                "offer_token": offer_token,
-                "amount": str(amount),
-                "min_return": str(min_return),
-                "max_spread": args.max_spread,
-                "deadline": deadline,
-            }
-        }
-    }
+    if plan.get("offer_token") is None:
+        return {"sync_reference": {}}
+    return {"rebalance": {"deadline": deadline}}
 
 
-def broadcast(vault, message, args):
-    command = [
+def tx_command(vault, message, args):
+    return [
         args.terrad,
         "tx",
         "wasm",
@@ -128,39 +113,142 @@ def broadcast(vault, message, args):
         args.gas_adjustment,
         "--gas-prices",
         args.gas_prices,
-        "--broadcast-mode",
-        "sync",
         "--yes",
         "--output",
         "json",
     ]
-    result = subprocess.run(command, check=True, text=True, capture_output=True)
-    tx = json.loads(result.stdout)
-    print(f"broadcast tx: {tx.get('txhash', 'unknown')}")
 
 
-def run_once(args):
-    config = smart_query(args.lcd, args.vault, {"config": {}})
-    status = smart_query(args.lcd, args.vault, {"rebalance_status": {}})
-    if not status["should_rebalance"]:
-        print(
-            "no rebalance: "
-            f"price deviation {status['price_deviation_bps']} bps"
-        )
+def run_command(command):
+    result = subprocess.run(command, text=True, capture_output=True, check=False)
+    if result.returncode:
+        detail = result.stderr.strip() or result.stdout.strip()
+        raise DeterministicTxError(detail or "terrad command failed")
+    return result
+
+
+def preflight(vault, message, args):
+    run_command(tx_command(vault, message, args) + ["--dry-run"])
+
+
+def broadcast(vault, message, args):
+    result = run_command(
+        tx_command(vault, message, args) + ["--broadcast-mode", "sync"]
+    )
+    try:
+        tx = json.loads(result.stdout)
+        code = int(tx.get("code", tx.get("tx_response", {}).get("code", 0)))
+    except (ValueError, TypeError, json.JSONDecodeError) as error:
+        raise RuntimeError("invalid sync broadcast response") from error
+    if code != 0:
+        detail = tx.get("raw_log") or tx.get("tx_response", {}).get("raw_log", "")
+        raise DeterministicTxError(f"CheckTx code {code}: {detail}")
+    tx_hash = tx.get("txhash") or tx.get("tx_response", {}).get("txhash")
+    if not tx_hash:
+        raise RuntimeError("sync broadcast returned no transaction hash")
+    return tx_hash
+
+
+def query_final_tx(lcd, rpc, tx_hash):
+    lcd_url = (
+        f"{lcd.rstrip('/')}/cosmos/tx/v1beta1/txs/"
+        f"{urllib.parse.quote(tx_hash, safe='')}"
+    )
+    try:
+        response = get_json(lcd_url).get("tx_response", {})
+        if response:
+            return {
+                "code": int(response.get("code", 0)),
+                "raw_log": response.get("raw_log", ""),
+                "height": response.get("height"),
+            }
+    except urllib.error.HTTPError as error:
+        if error.code != 404:
+            raise
+
+    rpc_url = f"{rpc.rstrip('/')}/tx?{urllib.parse.urlencode({'hash': '0x' + tx_hash})}"
+    try:
+        response = get_json(rpc_url).get("result")
+    except urllib.error.HTTPError as error:
+        if error.code == 404:
+            return None
+        raise
+    if not response:
+        return None
+    result = response.get("tx_result", {})
+    return {
+        "code": int(result.get("code", 0)),
+        "raw_log": result.get("log", ""),
+        "height": response.get("height"),
+    }
+
+
+def poll_pending(args, tracker, query_tx=query_final_tx, sleep=time.sleep):
+    deadline = time.monotonic() + args.tx_timeout_seconds
+    while True:
+        result = query_tx(args.lcd, args.rpc, tracker.pending_hash)
+        if result is not None:
+            tx_hash = tracker.pending_hash
+            plan = tracker.pending_plan
+            tracker.pending_hash = None
+            tracker.pending_plan = None
+            tracker.pending_since = None
+            if result["code"] != 0:
+                tracker.suppressed_plan = plan
+                tracker.save()
+                raise DeterministicTxError(
+                    f"DeliverTx {tx_hash} code {result['code']}: {result['raw_log']}"
+                )
+            tracker.suppressed_plan = None
+            tracker.save()
+            print(f"confirmed tx {tx_hash} at height {result['height']}")
+            return True
+        if time.monotonic() >= deadline:
+            print(
+                f"transaction {tracker.pending_hash} is still unresolved; "
+                "retaining it without rebroadcast"
+            )
+            return False
+        sleep(args.tx_poll_seconds)
+
+
+def run_once(args, tracker):
+    if tracker.pending_hash:
+        poll_pending(args, tracker)
         return
 
-    balances = smart_query(args.lcd, args.vault, {"balances": {}})["balances"]
-    pool = smart_query(args.lcd, config["pair"], {"pool": {}})
-    message = build_rebalance(config, status, balances, pool, args)
-    if message is None:
-        print("no rebalance: vault allocation already matches the pool")
+    plan = smart_query(args.lcd, args.vault, {"rebalance_plan": {}})
+    if not plan["should_rebalance"]:
+        tracker.suppressed_plan = None
+        tracker.save()
+        print(f"no rebalance: price deviation {plan['price_deviation_bps']} bps")
+        return
+
+    deadline = int(time.time()) + args.deadline_seconds
+    message = build_rebalance(plan, deadline)
+    fingerprint = plan_fingerprint(plan, message)
+    if tracker.suppressed_plan == fingerprint:
+        print("rebalance suppressed after deterministic failure; plan is unchanged")
         return
 
     print(json.dumps(message, indent=2))
-    if args.broadcast:
-        broadcast(args.vault, message, args)
-    else:
-        print("dry-run only; pass --broadcast to sign and submit")
+    if not args.broadcast:
+        print("dry-run only; pass --broadcast to preflight, sign, and submit")
+        return
+
+    try:
+        preflight(args.vault, message, args)
+        tx_hash = broadcast(args.vault, message, args)
+    except DeterministicTxError:
+        tracker.suppressed_plan = fingerprint
+        tracker.save()
+        raise
+    tracker.pending_hash = tx_hash
+    tracker.pending_plan = fingerprint
+    tracker.pending_since = time.monotonic()
+    tracker.save()
+    print(f"broadcast tx: {tx_hash}")
+    poll_pending(args, tracker)
 
 
 def parse_args():
@@ -174,29 +262,28 @@ def parse_args():
     parser.add_argument("--terrad", default=os.getenv("KEEPER_TERRAD", "terrad"))
     parser.add_argument("--gas-prices", default=os.getenv("KEEPER_GAS_PRICES", "28.325uluna"))
     parser.add_argument("--gas-adjustment", default=os.getenv("KEEPER_GAS_ADJUSTMENT", "1.4"))
-    parser.add_argument("--slippage-bps", type=int, default=int(os.getenv("KEEPER_SLIPPAGE_BPS", "200")))
-    parser.add_argument("--max-spread", default=os.getenv("KEEPER_MAX_SPREAD", "0.05"))
-    parser.add_argument("--max-trade-bps", type=int, default=int(os.getenv("KEEPER_MAX_TRADE_BPS", "2500")))
     parser.add_argument("--deadline-seconds", type=int, default=int(os.getenv("KEEPER_DEADLINE_SECONDS", "120")))
     parser.add_argument("--poll-seconds", type=int, default=int(os.getenv("KEEPER_POLL_SECONDS", "15")))
+    parser.add_argument("--tx-poll-seconds", type=float, default=float(os.getenv("KEEPER_TX_POLL_SECONDS", "2")))
+    parser.add_argument("--tx-timeout-seconds", type=float, default=float(os.getenv("KEEPER_TX_TIMEOUT_SECONDS", "60")))
+    parser.add_argument("--state-file", default=os.getenv("KEEPER_STATE_FILE", ".keeper-state.json"))
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--broadcast", action="store_true")
     args = parser.parse_args()
     if not args.vault:
         parser.error("--vault or KEEPER_VAULT_ADDRESS is required")
-    if not 0 <= args.slippage_bps < 10_000:
-        parser.error("--slippage-bps must be between 0 and 9999")
-    if not 1 <= args.max_trade_bps <= 10_000:
-        parser.error("--max-trade-bps must be between 1 and 10000")
+    if args.deadline_seconds <= 0 or args.tx_poll_seconds <= 0 or args.tx_timeout_seconds <= 0:
+        parser.error("deadline and transaction polling values must be positive")
     return args
 
 
 def main():
     args = parse_args()
+    tracker = TxTracker(args.state_file)
     while True:
         try:
-            run_once(args)
-        except Exception as error:  # Keep a long-running keeper alive on RPC errors.
+            run_once(args, tracker)
+        except Exception as error:  # Keep a long-running keeper alive on endpoint errors.
             print(f"keeper error: {error}")
             if args.once:
                 raise

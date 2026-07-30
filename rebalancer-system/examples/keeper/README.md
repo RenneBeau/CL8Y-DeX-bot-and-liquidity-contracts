@@ -1,13 +1,12 @@
 # Keeper Setup And Operation
 
 This directory contains everything needed to run a keeper for one bot vault.
-The keeper monitors the vault, prepares an improving inventory trade when the
-on-chain trigger is reached, obtains a CL8Y quote, and signs the vault
-`rebalance` transaction with `terrad`.
+The keeper monitors the vault's on-chain plan and signs the deadline-only
+`rebalance` transaction with `terrad`. The vault derives every economic value.
 
 ## Files
 
-- `keeper.py`: polling, ratio calculation, CL8Y quote, and transaction signing.
+- `keeper.py`: plan polling, preflight, transaction signing, and finality tracking.
 - `config.example.env`: all runtime settings without key material.
 - `setup-key.sh`: creates or displays the keeper key.
 - `register-keeper.sh`: lets the vault admin assign that key as keeper.
@@ -151,29 +150,23 @@ The keeper sends this message to `KEEPER_VAULT_ADDRESS`:
 ```json
 {
   "rebalance": {
-    "params": {
-      "offer_token": "terra1...",
-      "amount": "250000000",
-      "min_return": "240000000",
-      "max_spread": "0.05",
-      "deadline": 1800000000
-    }
+    "deadline": 1800000000
   }
 }
 ```
 
-The values are calculated as follows:
+The keeper first queries `rebalance_plan`. The vault recaptures TWAP during
+execution and derives offer side, amount, trade cap, minimum return, and maximum
+spread from on-chain configuration. If movement has triggered but allocation is
+already within tolerance, the keeper sends `sync_reference` instead.
 
-1. `offer_token`: whichever vault token is above the current CL8Y pool ratio.
-2. `amount`: half of the ratio excess, capped by `KEEPER_MAX_TRADE_BPS`.
-3. `min_return`: CL8Y hybrid simulation output minus
-   `KEEPER_SLIPPAGE_BPS`.
-4. `max_spread`: `KEEPER_MAX_SPREAD` from configuration.
-5. `deadline`: current Unix time plus `KEEPER_DEADLINE_SECONDS`.
-
-The vault checks the 5% trigger again on-chain, verifies the token and deadline,
-routes through the registered proxy, and accepts the trade only when vault
-allocation improves or reaches its configured tolerance.
+Before broadcast the keeper runs a `terrad --dry-run` preflight. It parses the
+sync CheckTx code and hash, then polls LCD with RPC fallback until DeliverTx is
+final and requires code zero. Only one hash can be in flight. Pending hashes and
+deterministic-failure suppression are persisted in `KEEPER_STATE_FILE`, so an
+ambiguous timeout or service restart never causes rebroadcast of an unresolved
+transaction. An unchanged plan rejected by CheckTx or DeliverTx remains
+suppressed until on-chain plan inputs change.
 
 ## 7. Run As A Service
 
@@ -189,8 +182,10 @@ sudo systemctl enable --now cl8y-keeper
 sudo journalctl -u cl8y-keeper -f
 ```
 
-The service restarts after RPC failures or process exits. Monitor transaction
-results, RPC availability, vault allocation, and keeper LUNC balance.
+The service restarts after RPC failures or process exits. Its systemd
+`StateDirectory` supplies the writable persistent transaction-state path.
+Monitor final transaction results, RPC availability, vault allocation, and
+keeper LUNC balance.
 
 Before enabling continuous broadcast, run one signed transaction as the
 service user and confirm its keyring can unlock noninteractively. If the chosen

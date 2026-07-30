@@ -25,6 +25,10 @@ pub enum ContractError {
     ExcessiveSpread,
     #[error("threshold must be between 1 and 10,000 basis points")]
     InvalidThreshold,
+    #[error("TWAP window must be greater than zero")]
+    InvalidTwapWindow,
+    #[error("risk control exceeds its hard safety bound")]
+    InvalidRiskControl,
     #[error("pool price has not moved enough to rebalance")]
     RebalanceNotRequired,
     #[error("vault allocation did not improve")]

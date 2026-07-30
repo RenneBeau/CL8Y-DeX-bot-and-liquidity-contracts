@@ -21,8 +21,8 @@ and sends proportional assets to users through its liquidity contract.
 ## Initialization
 
 The vault queries pair metadata and both CW20 token records. It rejects native
-assets, duplicate assets, mismatched token decimals, empty pool reserves, and
-invalid threshold values. The liquidity-controller address can be assigned
+assets, duplicate assets, mismatched token decimals, a zero TWAP window, and
+invalid threshold or risk-control values. The liquidity-controller address can be assigned
 only once.
 
 ## User Operations
@@ -33,16 +33,20 @@ two configured assets. There is no generic token withdrawal method.
 
 ## Rebalancing
 
-Price is token1 per token0. With a nonzero TWAP window, the vault computes price
-from CL8Y cumulative observations. A keeper swap is permitted only when price
-has moved at least `rebalance_threshold_bps` from the stored reference. The
-vault enforces the correcting token direction, caps the amount at half the
-ratio excess, and requires a minimum return within 2% of the current CL8Y
-simulation.
+Price is token1 per token0. The vault derives it from CL8Y `price_a` cumulative
+observations, whose orientation was verified at pinned revision `fad8011` as
+reserve token1 divided by reserve token0. A single captured TWAP controls the
+trigger, equal-value allocation direction and amount, execution-price floor,
+and post-swap allocation check. The amount is additionally capped by
+`max_trade_bps`. The minimum return is the greater of the TWAP floor using
+`max_execution_deviation_bps` and the CL8Y simulation floor using
+`quote_slippage_bps`; `max_spread` is also read from on-chain configuration.
 
-After execution, the reply compares vault holdings with the current ordered
-pool reserve ratio. The transaction reverts unless allocation is inside
-`allocation_tolerance_bps`. Only then is the reference price updated.
+The pending record contains the captured TWAP, pre-swap balances and deviation,
+and complete offer. Reply requires exact offer spending, at least the planned
+minimum output, and either tolerance or strict improvement. Partial improvement
+outside tolerance commits but keeps the old reference. Reaching tolerance
+updates the reference to the captured TWAP.
 
 ## Invariants
 
@@ -57,8 +61,7 @@ pool reserve ratio. The transaction reverts unless allocation is inside
 
 - Admin and keeper keys must be separately controlled.
 - Each vault reads price from its single registered CL8Y pair.
-- Keeper-provided swap parameters remain bounded by deadline, spread, token,
-  pair, and post-allocation checks.
+- The keeper supplies only a deadline; all economic parameters are on-chain.
 
 Deployment and configuration examples are in
 [`docs/DEPLOYMENT.md`](../DEPLOYMENT.md) and

@@ -12,6 +12,7 @@ Environment=KEEPER_BROADCAST=1
 ExecStart=/usr/bin/python3 /opt/CL8Y-DeX-bot-and-liquidity-contracts/rebalancer-system/examples/keeper/keeper.py --broadcast
 Restart=always
 RestartSec=10
+StateDirectory=cl8y-keeper
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
