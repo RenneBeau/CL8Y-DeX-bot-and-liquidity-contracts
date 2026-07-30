@@ -1,63 +1,33 @@
-# Experimental Grid Contract System
+# Trust-Minimized Grid Contract System
 
-This directory is an independent Cargo workspace for the proposed CL8Y grid
-system. It is intentionally separate from the rebalancer contracts
-while its execution costs, onboarding flow, and multi-bot accounting are being
-evaluated.
+This independent Cargo workspace contains:
 
-Canonical documentation:
+- `contracts/grid-manager`: non-custodial vault factory and registry.
+- `contracts/grid-vault`: one-owner, one-bot custody and CL8Y order contract.
+- `services/grid-operator`: optional discovery and transaction automation.
 
-- [Implementation guide](IMPLEMENTATION.md)
-- [Grid manager protocol](docs/GRID_MANAGER_PROTOCOL.md)
-- [Grid keeper and admin operations](docs/GRID_OPERATIONS.md)
-- [Grid indexer protocol](docs/GRID_INDEXER.md)
-- [Verification report](../docs/TEST_RESULTS.md)
+The manager never receives CW20 deposits. Each vault address owns only its own
+funds and CL8Y orders. Reconciliation is permissionless and accepts order IDs
+only; credited proceeds come from queried vault balances, not keeper/indexer
+amounts. Every newly placed order has a configured timeout, and the owner retains
+an indexer-independent exit path.
 
-`contracts/grid-manager` is a multi-tenant prototype. Users create independent
-bots with their own bounds and rung count. Every bot has isolated token
-balances, internal LP shares, CL8Y order records, and prepaid LUNC gas credit.
-The manager address owns the CL8Y orders, allowing all bots to use one
-governance-assigned fee tier.
+The current CL8Y pair does not retain cumulative maker output or typed terminal
+history. Exact event-by-event opposite-order recreation is therefore intentionally
+not part of the trust-minimized flow. See the [protocol and threat model](docs/GRID_MANAGER_PROTOCOL.md).
 
-The contract calculates prices, allocations, and opposite orders. One trusted
-grid keeper relays exact `limit_order_fill` events supplied by a trusted chain
-indexer. The contract verifies each report against the standard pair's current
-escrow, order metadata, and CL8Y rounding arithmetic before crediting output. A
-keeper receives a capped reimbursement only after a valid reconciliation.
-Users cancel a bot's active orders before burning internal bot LP shares for a
-pro-rata withdrawal calculated from that bot's logical balances and shares.
-Physical CW20 custody is pooled in one manager, so a compromised keeper/indexer
-can threaten global solvency within the accepted rounding envelope.
-Cancellation processes a bounded page at a time; owners repeat it until the
-reported `remaining_orders` reaches zero.
-CW20 deposits are allocated automatically: token A is divided by the number of
-sell-A rungs and token B by the number of sell-B rungs. Integer remainders stay
-free and can be allocated later.
+Additional guides:
 
-The manager accepts only standard pairs registered by its configured CL8Y
-factory and requires matching CW20 decimals. It uses arithmetic price spacing.
-The trusted indexer archives historical transaction events and completed-order
-output for standard pairs.
+- [Implementation status](IMPLEMENTATION.md)
+- [Operations](docs/GRID_OPERATIONS.md)
+- [Optional indexer](docs/GRID_INDEXER.md)
 
-The grid manager has one dedicated keeper address. It is independent from each
-rebalance vault's keeper and can reconcile every `bot_id` managed by the grid
-contract. The trusted indexer streams exact fill events to the grid keeper,
-which acts as the system's single transaction signer, submits one constant-size
-aggregate report per changed order, and pays gas before
-reimbursement. The report includes consumed escrow, exact maker output, and fill
-count; the contract checks it against the current order and aggregate rounding
-bounds.
-
-Every bot prepays a separate LUNC gas credit. The keeper pays transaction fees
-and receives a fixed reimbursement only after useful reconciliation. Owners can
-recover excess gas credit, while active bots must retain the emergency reserve.
-The onboarding and up-front funding tradeoff remains tracked in
-[GitHub issue #1](https://github.com/RenneBeau/CL8Y-DeX-bot-and-liquidity-contracts/issues/1).
-
-Run its tests independently:
+Build and test:
 
 ```sh
 cargo test --manifest-path grid-contract-system/Cargo.toml
 cargo clippy --manifest-path grid-contract-system/Cargo.toml --all-targets -- -D warnings
-make local-grid
 ```
+
+This remains pre-production code pending CL8Y integration/property testing,
+token allowlisting, interface pinning, and an external security review.

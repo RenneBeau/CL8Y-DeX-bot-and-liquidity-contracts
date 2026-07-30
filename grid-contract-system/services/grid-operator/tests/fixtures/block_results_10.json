@@ -1,0 +1,18 @@
+{
+  "height": "10",
+  "txs_results": [{
+    "code": 0,
+    "events": [{
+      "type": "wasm",
+      "attributes": [
+        {"key": "_contract_address", "value": "pairA"},
+        {"key": "action", "value": "limit_order_fill"},
+        {"key": "maker", "value": "vault1"},
+        {"key": "order_id", "value": "7"},
+        {"key": "side", "value": "ask"},
+        {"key": "token0_amount", "value": "10"},
+        {"key": "token1_amount", "value": "20"}
+      ]
+    }]
+  }]
+}

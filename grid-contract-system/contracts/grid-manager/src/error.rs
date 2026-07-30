@@ -1,4 +1,5 @@
-use cosmwasm_std::{OverflowError, StdError};
+use cosmwasm_std::StdError;
+use cw_utils::ParseReplyError;
 use thiserror::Error;
 
 #[derive(Error, Debug, PartialEq)]
@@ -6,49 +7,13 @@ pub enum ContractError {
     #[error("{0}")]
     Std(#[from] StdError),
     #[error("{0}")]
-    Overflow(#[from] OverflowError),
+    ParseReply(#[from] ParseReplyError),
     #[error("unauthorized")]
     Unauthorized,
-    #[error("invalid grid parameters")]
-    InvalidGrid,
-    #[error("invalid CL8Y pair")]
-    InvalidPair,
-    #[error("only CW20 pair assets are supported")]
-    UnsupportedAsset,
     #[error("unexpected native funds")]
     UnexpectedFunds,
-    #[error("the configured gas denom must be funded")]
-    MissingGasFunds,
-    #[error("unsupported deposit token")]
-    UnsupportedToken,
-    #[error("amount must be greater than zero")]
-    ZeroAmount,
-    #[error("bot has no grids on this side of the reference price")]
-    EmptySide,
-    #[error("no free assets can be allocated")]
-    NothingToAllocate,
-    #[error("no order changes require reconciliation")]
-    NothingToReconcile,
-    #[error("bot gas credit is below the reimbursement reserve")]
-    InsufficientGasCredit,
-    #[error("CL8Y order does not belong to this contract")]
-    InvalidOrderOwner,
-    #[error("CL8Y order differs from recorded grid order")]
-    InvalidOrder,
-    #[error("limit placement reply did not contain all order ids")]
-    InvalidPlacementReply,
-    #[error("unknown reply id")]
+    #[error("invalid manager configuration")]
+    InvalidConfig,
+    #[error("unknown vault instantiation reply")]
     UnknownReply,
-    #[error("insufficient free balance")]
-    InsufficientBalance,
-    #[error("cancel all active orders before withdrawing")]
-    ActiveOrders,
-    #[error("insufficient bot LP shares")]
-    InsufficientShares,
-    #[error("bot active-order limit reached")]
-    ActiveOrderLimit,
-    #[error("fill report does not match CL8Y order state")]
-    InvalidFillReport,
-    #[error("order changed since its last indexed reconciliation")]
-    UnsettledOrder,
 }

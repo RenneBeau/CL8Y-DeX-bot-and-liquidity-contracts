@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["contracts/grid-manager"]
+members = ["contracts/grid-manager", "contracts/grid-vault"]
 
 [workspace.package]
 version = "0.1.0"
@@ -12,6 +12,7 @@ cosmwasm-schema = "1.5.9"
 cosmwasm-std = "1.5.11"
 cw-storage-plus = "1.2.0"
 cw2 = "1.1.2"
+cw-utils = "1.0.3"
 cw20 = "1.1.2"
 schemars = "0.8.15"
 serde = { version = "1.0.188", default-features = false, features = ["derive"] }

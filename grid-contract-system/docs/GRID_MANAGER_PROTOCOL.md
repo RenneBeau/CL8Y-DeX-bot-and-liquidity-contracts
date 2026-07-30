@@ -1,254 +1,207 @@
-# Grid Manager Protocol
+# Trust-Minimized Grid Protocol
 
-## Status And Purpose
+## Architecture
 
-`grid-contract-system/contracts/grid-manager` is an experimental multi-user
-limit-order grid manager for standard CL8Y DEX pairs. One contract can hold many
-independent bots across many factory-registered pairs while the manager address
-owns every CL8Y order and receives one governance-assigned CL8Y fee tier.
+`contracts/grid-manager` is a non-custodial factory and registry. It instantiates
+`contracts/grid-vault` and records `(vault_id, owner, vault_address)`. It has no
+CW20 receive entry point, balance ledger, order map, or asset-withdrawal message.
 
-The manager trades through standard CL8Y pairs using their existing interfaces.
-A trusted off-chain indexer archives exact fill events, including completed-order
-maker output, and one trusted grid keeper relays bounded reports on-chain.
+Each grid vault has one designated owner and permits one bot, `bot_id: 1`. The
+vault address is the CL8Y maker and holds only that owner's liquid assets. CL8Y
+cancellation and expired-order claims always return assets to the recorded maker,
+so another vault, the manager, admin, keeper, and indexer cannot redirect them.
 
-## Roles
+## Threat Model
 
-- `admin` rotates the one global grid keeper.
-- `keeper` is the only address authorized to submit indexed fill reports.
-- `indexer` is the authenticated off-chain source of exact fill history.
-- `bot owner` creates, funds, allocates, cancels, and withdraws one bot.
-- CL8Y fee-registry governance registers the manager address for a tier.
+The design protects against:
 
-The grid keeper is independent from every rebalance-vault keeper. One grid
-keeper serves every grid `bot_id` and every admitted pair.
+- A keeper inventing fill output, replaying reconciliation, disappearing, or
+  submitting another vault's order ID.
+- Indexer loss, incomplete historical fill events, and incorrect event amounts.
+- One owner becoming insolvent or attempting to withdraw another owner's assets.
+- Stale internal remaining values during owner recovery.
+- A CW20 `Send` callback claiming an amount inconsistent with the vault's queried
+  liquid balance.
+
+The design does not protect against:
+
+- A malicious CW20 that lies consistently in smart queries or violates execution
+  semantics. Production manager configuration must be paired with a reviewed-token
+  allowlist or equivalent governance policy.
+- CL8Y pair governance pausing cancellation and claims, changing the wire
+  interface, or maliciously violating its documented custody behavior.
+- Temporary inability to distinguish a missing order from an unrelated pair query
+  error. Emergency processing is owner-only and should be retried after pair/RPC
+  health is restored.
+- Exact event-by-event opposite-rung recreation. The current pair does not retain
+  cumulative maker output, and per-fill rounding prevents exact reconstruction
+  from aggregate escrow reduction.
+
+## Roles And Trust
+
+- `owner`: controls deposits, allocation, cancellation, exit, and recipients.
+- `keeper`: optional reimbursed operator. It has no exclusive reconciliation
+  authority and supplies no accounting amounts.
+- `admin`: configures the factory/vault fleet and pause state. It cannot withdraw
+  vault CW20 balances.
+- `indexer`: optional availability and discovery service. Its data is advisory.
+- `CL8Y pair`: trusted to enforce maker ownership and transfer correct fills and
+  refunds. This is the unavoidable external custody dependency.
+- `CW20 assets`: required to have standard, exact-transfer, non-rebasing behavior.
 
 ## Initialization
 
-```json
-{
-  "admin": "<ADMIN_MULTISIG>",
-  "keeper": "<GRID_KEEPER>",
-  "factory": "<CL8Y_FACTORY>",
-  "gas_denom": "uluna",
-  "keeper_reward": "30000000",
-  "minimum_gas_reserve": "30000000",
-  "max_grid_count": 20,
-  "max_orders_per_reconcile": 20,
-  "max_active_orders_per_bot": 100
-}
-```
+The manager stores the vault code ID, CL8Y factory, operator settings, safety
+limits, and `order_timeout_seconds`. `create_vault` instantiates a vault with the
+caller as its designated owner and Wasm migration admin. The owner then creates the sole bot and prepays
+its native gas reserve.
 
-`max_active_orders_per_bot` must be at least `max_grid_count`. A bot must be
-created with at least `minimum_gas_reserve + keeper_reward` in `gas_denom`.
+The vault admits only a factory-registered CL8Y CW20/CW20 pair with distinct
+assets, equal decimals, nonzero reserves, compatible batch limits, valid price
+bounds, and at least one bid and ask rung.
 
-## Pair Admission
+## Lifecycle
 
-`create_bot` accepts a pair only when all checks pass:
+### Deposit
 
-- The configured CL8Y factory returns the same pair for its two assets.
-- Both assets are distinct CW20 contracts.
-- Both CW20s use the same decimals.
-- Both assets are reviewed exact-transfer CW20 implementations; fee-on-transfer,
-  rebasing, and tokens that can fabricate receive amounts are unsupported.
-- Pool assets match pair assets in the same token0/token1 order.
-- Both pool reserves are nonzero.
-- `grid_count` is within the manager and pair batch-rung limits.
-- The current token1-per-token0 price lies strictly inside the bounds.
-- Every generated rung is within the standard pair's price bounds and distinct.
-- At least one initial bid and one initial ask rung exist.
+Only the designated bot owner may use the CW20 `deposit` hook. During the callback,
+the vault queries its own CW20 balance. The observed liquid balance must equal the
+previous free balance plus the callback amount; otherwise the transaction rejects
+the token behavior. Accepted assets are divided over the applicable initial rungs.
 
-The current prototype uses arithmetic price spacing including both bounds.
-Prices below the creation reference become bids, prices above it become asks,
-and an exactly equal rung starts neutral.
+### Order Creation
 
-## Bot Isolation
+The vault reserves free balance before sending CW20 assets to the pair. Every
+order has `expires_at = current_time + order_timeout_seconds`. In the reply, the
+vault extracts order IDs and queries each active row to verify owner, side, price,
+and post-maker-fee remaining escrow. A malformed reply reverts atomically.
 
-Every bot has a unique `bot_id` and separate state for:
+### Partial Fill And Reconciliation
 
-- Owner
-- Pair and token addresses
-- Bounds, reference price, and rungs
-- Free token balances
-- Internal bot LP shares
-- LUNC gas credit
-- Active CL8Y order records
-
-Physical CW20 custody is shared by the manager address. Logical isolation
-therefore relies on correct indexed fill attribution and the trusted keeper.
-The contract validates reports against standard pair state and arithmetic before
-changing a bot ledger.
-
-## Deposits And Shares
-
-Only the bot owner may deposit. Deposits use CW20 `Send` with:
+Anyone may call:
 
 ```json
-{"deposit":{"bot_id":1}}
+{"reconcile":{"bot_id":1,"order_ids":[77,78]}}
 ```
 
-Token0 is automatically divided by the number of sell-token0 ask rungs. Token1
-is divided by the number of sell-token1 bid rungs. Integer remainder stays free.
+The caller cannot provide input, output, fill count, pair, recipient, or price.
+For active orders, the vault verifies immutable metadata and updates remaining
+escrow monotonically. It then queries both vault CW20 balances and credits only
+positive differences over recorded free balances. Thus a keeper cannot create a
+withdrawable claim unsupported by assets at this vault address.
 
-Internal shares are bot-specific and non-transferable:
+Verified proceeds remain free. The owner can call `allocate` to distribute free
+assets over configured empty-side capacity. This intentionally replaces exact
+fill-to-opposite-rung behavior, which cannot be proven through the current pair
+query interface.
 
-```text
-token0 shares = token0 deposit
-token1 shares = floor(token1 deposit / creation reference price)
-```
+### Terminal And Parked Orders
 
-This owner-only prototype uses the immutable creation reference price. Support
-for unrelated depositors requires complete free-plus-escrow NAV accounting.
+If the active query is absent, the vault queries `expired_limit_refund`. A valid
+owned refund is credited and claimed atomically. If neither active nor parked
+state exists, the local record is terminal and removed; any maker output is still
+credited only from the vault's physical balance. Historical fill events are not
+required.
 
-## Order Placement
+### Cancellation
 
-The manager sends token0 to the pair for asks and token1 for bids using standard
-`place_limit_order_batch` hooks. Gross free balance is reserved before the
-submessage. Its reply extracts each `limit_order_placed` ID and queries the
-standard `limit_order` endpoint to record actual post-maker-fee escrow.
+Normal cancellation is owner-only and bounded. If escrow changed since the last
+reconciliation, cancellation returns `UnsettledOrder`; any caller can reconcile
+the current state first. Pair cancellation sends refunds only to the vault.
 
-Order slots are reserved when placement is scheduled. If the active-order cap
-would be exceeded, output remains free and the response includes
-`allocation_deferred=active_order_limit`.
+### Withdrawal
 
-## Indexed Reconciliation
+Normal withdrawal requires no active orders and burns the sole owner's internal
+shares against free balances. The manager cannot invoke this path and each vault
+can transfer only tokens held at its own address.
 
-The trusted indexer aggregates all new fill events for one order since its last
-successful checkpoint:
+### Emergency Exit
 
-```json
-{
-  "order_id": 77,
-  "input_amount": "100",
-  "output_amount": "200",
-  "fill_count": 3
-}
-```
+The owner can irreversibly enter exit mode, disabling deposits and placements.
+Bounded `emergency_cancel` pages use current pair state rather than indexed fill
+history or stale recorded remaining values. They cancel active rows, claim parked
+refunds, and retire terminal rows. `emergency_withdraw` then queries and transfers
+the vault's actual liquid CW20 balances. Expired orders may require a CL8Y cleanup
+walk before their refund row becomes claimable. Pair pause can delay this flow but
+cannot redirect the funds.
 
-Amount mapping follows CL8Y pair token order:
+## State
 
-- Ask: input is `token0_amount`; output is `token1_amount`.
-- Bid: input is `token1_amount`; output is `token0_amount`.
+Manager state:
 
-One `reconcile` transaction contains reports for one bot only:
+- `Config`: admin handoff, keeper, CL8Y factory, vault code ID, gas settings,
+  order timeout, and bounded-work limits.
+- `PendingVault`: reply ID, vault ID, and owner.
+- `Vault`: owner and instantiated address.
+- Owner-to-vault secondary index.
 
-```json
-{
-  "reconcile": {
-    "bot_id": 1,
-    "reports": [{
-      "pair": "<CL8Y_PAIR>",
-      "order_id": 77,
-      "input_amount": "100",
-      "output_amount": "200",
-      "fill_count": 3
-    }]
-  }
-}
-```
+Vault state:
 
-The contract verifies:
+- `Config`: designated owner, roles, CL8Y factory, timeout, and limits.
+- `VaultMode`: `Active`, `Paused`, or irreversible `Exit`.
+- `Bot`: pair, two assets, grid parameters, free balances, gas credit, shares,
+  active-order count, and pair batch limit.
+- `Rung`: price and initial side.
+- `GridOrder`: pair-local ID key, rung, side, price, and last remaining escrow.
+- `PlacementPlan`: reply-scoped expected rungs and gross amounts.
 
-- Caller equals the configured keeper.
-- Report count is nonzero and bounded.
-- Every report names the bot's configured pair.
-- Every order ID is unique and belongs to the specified bot.
-- Pair-reported owner, side, price, and remaining escrow match recorded state.
-- Reported input equals the exact escrow decrease.
-- Amounts are positive for nonzero fill counts.
-- Aggregate output lies within CL8Y per-fill floor-rounding bounds.
-- Zero reports are accepted only for terminal parked orders with no fills.
+## Security Invariants
 
-For `n` indexed fills, summing individual floors differs from flooring the
-aggregate by less than `n` smallest units. The manager verifies:
+1. The manager never holds user CW20 funds or owns CL8Y orders.
+2. One vault address is associated with one designated owner and at most one bot.
+3. A vault message never references another vault's state or custody.
+4. Pair order ownership must equal the executing vault address.
+5. Keeper/indexer values never increase accounting balances.
+6. Free balances increase only from verified deposit deltas, queried liquid
+   balances, or atomic pair refunds.
+7. Recorded active-order remaining is monotonic.
+8. New orders are funded only from that vault's free balance and have a timeout.
+9. Exit is irreversible and keeps the owner recovery path available while normal
+   maintenance is disabled.
+10. Repeated reconciliation cannot credit the same physical balance increase twice.
 
-```text
-indexed_floor <= aggregate_floor
-aggregate_floor - indexed_floor < fill_count
-```
+## Migration From Pooled Custody
 
-The indexer's exact output and fill count remain trusted because several valid per-fill
-decompositions can share the same aggregate escrow decrease.
+There is no safe in-place state migration from the pooled manager. The old
+contract owns orders and refunds under its address; changing namespaces or code
+does not change pair ownership.
 
-All bots share the manager's physical CW20 custody. A compromised keeper or
-indexer can over-credit within the accepted aggregate rounding envelope and
-therefore threaten other bots' solvency. Bot isolation is logical, not a
-cryptographic replacement for trustworthy event history.
+Migration must:
 
-## Opposite Orders
+1. Pause pooled deposits and new placement.
+2. Reconcile where possible, cancel every active order, and claim every parked
+   refund under the old manager address.
+3. Withdraw each user's settled assets from the old contract using audited
+   accounting and an independently verified custody snapshot.
+4. Deploy the new manager and vault code, create one vault per owner/bot, and
+   deposit directly into those addresses.
+5. Register each vault independently for any CL8Y fee tier.
+6. Keep the old contract recoverable until every old pair-owned order is resolved.
 
-After a valid partial fill:
+## Failure And Recovery
 
-- The unfilled original order remains active.
-- Exact indexed output is credited to that bot.
-- Ask output creates a bid one rung lower.
-- Bid output creates an ask one rung higher.
-- Only the filled output amount funds the opposite order.
-- If the pair rejects or skips a single opposite placement, settlement remains
-  committed and the output returns to the bot's free balance.
+- Keeper unavailable: owner or any third party reconciles; owner cancels/exits.
+- Indexer database lost: rediscover tracked IDs from vault queries; no fill amounts
+  or historical records are needed for accounting or exit.
+- Partial fill before cancellation: permissionless reconciliation updates current
+  escrow and observed proceeds, then cancellation can retry.
+- Pair paused: retain order records and retry after governance restores pair
+  operations.
+- CW20 delta mismatch: reject the operation and quarantine/remove the token from
+  future supported deployments.
+- Vault-specific accounting failure: only that vault is affected; no other vault's
+  address, orders, or balances can subsidize it.
 
-Multiple indexed fills are aggregated into one opposite placement, keeping the
-on-chain report and transaction size bounded.
+## Implementation Priority
 
-## Full And Parked Orders
+1. Address-level custody split and non-custodial factory.
+2. Remove keeper-reported amounts and make reconciliation permissionless.
+3. Enforce observed-balance deposits and timed orders.
+4. Harden cancellation/claim replies and pair-query error classification.
+5. Add reviewed-token admission policy and code-ID/interface pinning.
+6. Add multi-contract integration/property tests against the real CL8Y pair.
+7. Update the operator to discovery-only operation with durable monitoring.
 
-If `limit_order` no longer exists, the manager queries
-`expired_limit_refund`:
-
-- A refund row means the order is parked. The manager credits the refund,
-  submits `claim_expired_limit_orders`, and removes its local order.
-- No refund row means the indexed order is fully filled. A report covering the
-  entire remaining escrow is required.
-
-Indexer archival history is mandatory because a completed standard order no
-longer exposes its maker output.
-
-## Cancellation And Withdrawal
-
-The owner calls `cancel_all` repeatedly. Each call processes at most
-`max_orders_per_reconcile` records and chunks pair messages by that pair's batch
-limit. Cancellation succeeds only when pair remaining escrow equals the last
-reconciled amount. Any intervening fill produces `UnsettledOrder`; the keeper
-must reconcile indexed events first.
-
-Withdrawal requires zero active orders. Shares burn against free balances:
-
-```text
-claim_i = floor(free_balance_i * burned_shares / total_shares)
-```
-
-## Gas Accounting
-
-Each bot prepays an isolated native gas credit. The keeper signs and initially
-pays reconciliation gas. A successful useful reconciliation reimburses one
-fixed `keeper_reward` from that bot. No-op or invalid reports receive nothing.
-
-An active or funded bot retains `minimum_gas_reserve + keeper_reward` when the
-owner withdraws gas. The keeper funds the gas cost of failed transactions.
-
-## Execute Messages
-
-- `create_bot`: create one owner-controlled strategy.
-- `receive/deposit`: credit and automatically allocate one CW20 asset.
-- `fund_gas`: add native keeper credit to any bot.
-- `withdraw_gas`: owner recovery subject to reserve rules.
-- `allocate`: place residual free balances across configured sides.
-- `reconcile`: keeper-only indexed fill settlement and opposite placement.
-- `cancel_all`: bounded owner cancellation after reconciliation.
-- `withdraw`: burn internal shares and transfer free assets.
-- `update_keeper`: admin rotation of the global grid keeper.
-
-## Queries
-
-- `config`: global roles and safety limits.
-- `bot`: pair, balances, shares, gas, and active-order count.
-- `rungs`: bot prices and initial sides.
-- `orders`: tracked CL8Y IDs and remaining escrow.
-- `shares`: one address's internal shares for one bot.
-
-## Trust And Scope
-
-One keeper and one indexer are operationally sufficient for all bots across all
-compatible pairs. Throughput is bounded by keeper signing rate, chain block
-capacity, and configured reports per transaction. They are global availability
-and trust dependencies. The system currently supports factory-registered
-CW20/CW20 pairs with equal decimals and the tested standard CL8Y event schema.
+Items 1 through 3 are implemented in this workspace. Items 4 through 7 remain
+required before a production security review; this code is not declared mainnet
+ready.

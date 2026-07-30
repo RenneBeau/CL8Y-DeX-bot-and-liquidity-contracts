@@ -1,0 +1,7 @@
+{
+  "block_id": {"hash": "HASH10"},
+  "block": {
+    "header": {"height": "10", "time": "2026-01-01T00:00:00Z", "last_block_id": {"hash": "HASH9"}},
+    "data": {"txs": ["dHgtMTA="]}
+  }
+}

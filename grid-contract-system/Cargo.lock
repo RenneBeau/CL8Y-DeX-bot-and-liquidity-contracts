@@ -81,6 +81,20 @@ dependencies = [
  "cosmwasm-schema",
  "cosmwasm-std",
  "cw-storage-plus",
+ "cw-utils",
+ "cw2",
+ "thiserror",
+ "zeroize",
+]
+
+[[package]]
+name = "cl8y-grid-vault"
+version = "0.1.0"
+dependencies = [
+ "base64ct",
+ "cosmwasm-schema",
+ "cosmwasm-std",
+ "cw-storage-plus",
  "cw2",
  "cw20",
  "thiserror",
