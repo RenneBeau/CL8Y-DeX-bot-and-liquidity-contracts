@@ -2,6 +2,8 @@
 
 Date: 2026-07-30
 
+Verified source revision: `570dfd3a83acee90a66992d84e7cffc47fc0501c`
+
 Environment:
 
 - Terra Classic LocalTerra, chain ID `localterra`
