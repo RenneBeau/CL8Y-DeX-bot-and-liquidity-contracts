@@ -56,3 +56,7 @@ inside `allocation_tolerance_bps`. Only then is the reference price updated.
 - Each vault reads price from its single registered CL8Y pair.
 - Keeper-provided swap parameters remain bounded by deadline, spread, token,
   pair, and post-allocation checks.
+
+Deployment and configuration examples are in
+[`docs/DEPLOYMENT.md`](../DEPLOYMENT.md) and
+[`docs/ADMIN_OPERATIONS.md`](../ADMIN_OPERATIONS.md).

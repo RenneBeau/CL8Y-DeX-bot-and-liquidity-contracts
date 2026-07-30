@@ -62,6 +62,8 @@ See `test-area/README.md` for the LocalTerra lifecycle.
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md)
+- [Deployment and new-pair setup](docs/DEPLOYMENT.md)
+- [Admin and keeper operations](docs/ADMIN_OPERATIONS.md)
 - [Shared swap proxy protocol](docs/protocols/SWAP_PROXY.md)
 - [Bot vault protocol](docs/protocols/BOT_VAULT.md)
 - [Bot liquidity token protocol](docs/protocols/BOT_LIQUIDITY.md)
