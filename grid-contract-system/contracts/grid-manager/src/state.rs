@@ -45,7 +45,6 @@ pub struct GridOrder {
     pub side: LimitOrderSide,
     pub price: Decimal,
     pub remaining: Uint128,
-    pub settled_output: Uint128,
 }
 
 #[cw_serde]

@@ -11,8 +11,8 @@ all approved bot vaults can benefit from the proxy's assigned CL8Y fee tier.
 The proposed multi-user limit-order grid system is developed separately in
 [`grid-contract-system`](grid-contract-system/README.md). It is an experimental
 workspace and is not part of the production rebalance deployment.
-Its LocalTerra path includes a CL8Y settlement extension that exposes exact
-per-order maker output for secure multi-bot accounting.
+It uses standard CL8Y pairs with one trusted grid keeper relaying exact fill
+events from a trusted chain indexer.
 
 ### Shared swap proxy
 
@@ -73,6 +73,9 @@ See `test-area/README.md` for the LocalTerra lifecycle.
 - [Shared swap proxy protocol](docs/protocols/SWAP_PROXY.md)
 - [Bot vault protocol](docs/protocols/BOT_VAULT.md)
 - [Bot liquidity token protocol](docs/protocols/BOT_LIQUIDITY.md)
+- [Experimental grid manager protocol](docs/protocols/GRID_MANAGER.md)
+- [Grid keeper and admin operations](docs/GRID_OPERATIONS.md)
+- [Grid indexer protocol](docs/GRID_INDEXER.md)
 - [Verification report](docs/TEST_RESULTS.md)
 - [Security notice](SECURITY.md)
 - [Keeper example](examples/keeper/README.md)

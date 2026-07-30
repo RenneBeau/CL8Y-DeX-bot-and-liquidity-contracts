@@ -19,6 +19,7 @@ set +a
 EMBER_ADDRESS="$VITE_TOKEN_EMBER_ADDRESS"
 CORAL_ADDRESS="$VITE_TOKEN_CORAL_ADDRESS"
 CL8Y_ADDRESS="$VITE_CL8Y_TOKEN_ADDRESS"
+LUNC_C_ADDRESS="$VITE_LUNC_C_TOKEN_ADDRESS"
 FEE_REGISTRY_ADDRESS="$VITE_FEE_DISCOUNT_ADDRESS"
 PAIR_QUERY=$(jq -nc --arg ember "$EMBER_ADDRESS" --arg coral "$CORAL_ADDRESS" \
     '{pair:{asset_infos:[{token:{contract_addr:$ember}},{token:{contract_addr:$coral}}]}}')
@@ -26,6 +27,14 @@ PAIR_ADDRESS=$(terrad_query wasm contract-state smart "$VITE_FACTORY_ADDRESS" "$
     | jq -r '.data.pair.contract_addr // empty')
 if [ -z "$PAIR_ADDRESS" ]; then
     echo "ERROR: CL8Y factory did not return the EMBER/CORAL pair." >&2
+    exit 1
+fi
+SECOND_PAIR_QUERY=$(jq -nc --arg lunc "$LUNC_C_ADDRESS" --arg ember "$EMBER_ADDRESS" \
+    '{pair:{asset_infos:[{token:{contract_addr:$lunc}},{token:{contract_addr:$ember}}]}}')
+SECOND_PAIR_ADDRESS=$(terrad_query wasm contract-state smart "$VITE_FACTORY_ADDRESS" \
+    "$SECOND_PAIR_QUERY" | jq -r '.data.pair.contract_addr // empty')
+if [ -z "$SECOND_PAIR_ADDRESS" ]; then
+    echo "ERROR: CL8Y factory did not return the LUNC-C/EMBER pair." >&2
     exit 1
 fi
 
@@ -44,6 +53,16 @@ docker run --rm \
     cosmwasm/workspace-optimizer:0.16.1
 
 CONTAINER=$(localterra_container)
+if ! docker exec "$CONTAINER" terrad keys show gridkeeper \
+    --keyring-backend test --address >/dev/null 2>&1; then
+    docker exec "$CONTAINER" terrad keys add gridkeeper \
+        --keyring-backend test --output json >/dev/null
+fi
+GRID_KEEPER_ADDRESS=$(docker exec "$CONTAINER" terrad keys show gridkeeper \
+    --keyring-backend test --address)
+TX_HASH=$(terrad_tx bank send test1 "$GRID_KEEPER_ADDRESS" 500000000uluna | jq -r '.txhash')
+wait_tx "$TX_HASH" >/dev/null
+
 store_contract() {
     local artifact="$1"
     local tx_hash result
@@ -89,7 +108,7 @@ LIQUIDITY_INIT=$(jq -nc --arg vault "$VAULT_ADDRESS" \
       symbol:"ECBOTLP",decimals:6,minimum_initial_deposit:"100000",marketing:null}')
 LIQUIDITY_ADDRESS=$(instantiate_contract "$LIQUIDITY_CODE_ID" "$LIQUIDITY_INIT" ember-coral-bot-liquidity)
 
-GRID_INIT=$(jq -nc --arg admin "$TEST_ADDRESS" --arg keeper "$TEST_ADDRESS" \
+GRID_INIT=$(jq -nc --arg admin "$TEST_ADDRESS" --arg keeper "$GRID_KEEPER_ADDRESS" \
     --arg factory "$VITE_FACTORY_ADDRESS" \
     '{admin:$admin,keeper:$keeper,factory:$factory,gas_denom:"uluna",
       keeper_reward:"30000000",minimum_gas_reserve:"30000000",max_grid_count:20,
@@ -128,8 +147,10 @@ wait_tx "$TX_HASH" >/dev/null
 cat > "$LOCAL_ENV" <<ENVEOF
 CL8Y_DEX_DIR=$DEX_DIR
 PAIR_ADDRESS=$PAIR_ADDRESS
+SECOND_PAIR_ADDRESS=$SECOND_PAIR_ADDRESS
 EMBER_ADDRESS=$EMBER_ADDRESS
 CORAL_ADDRESS=$CORAL_ADDRESS
+LUNC_C_ADDRESS=$LUNC_C_ADDRESS
 CL8Y_ADDRESS=$CL8Y_ADDRESS
 FEE_REGISTRY_ADDRESS=$FEE_REGISTRY_ADDRESS
 PROXY_ADDRESS=$PROXY_ADDRESS
@@ -137,6 +158,7 @@ VAULT_ADDRESS=$VAULT_ADDRESS
 LIQUIDITY_ADDRESS=$LIQUIDITY_ADDRESS
 GRID_CODE_ID=$GRID_CODE_ID
 GRID_ADDRESS=$GRID_ADDRESS
+GRID_KEEPER_ADDRESS=$GRID_KEEPER_ADDRESS
 FACTORY_ADDRESS=$VITE_FACTORY_ADDRESS
 TEST_ADDRESS=$TEST_ADDRESS
 ENVEOF

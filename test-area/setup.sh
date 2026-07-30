@@ -16,7 +16,7 @@ make -C "$DEX_DIR" wait-healthy
 echo "Building and deploying the minimal CL8Y test DEX..."
 rm -f "$DEX_DIR/frontend-dapp/.env.local"
 set +e
-QA_DEPLOY_SEED=minimal make -C "$DEX_DIR" deploy-local
+QA_DEPLOY_SEED=wallet make -C "$DEX_DIR" deploy-local
 DEPLOY_STATUS=$?
 set -e
 if [ "$DEPLOY_STATUS" -ne 0 ]; then

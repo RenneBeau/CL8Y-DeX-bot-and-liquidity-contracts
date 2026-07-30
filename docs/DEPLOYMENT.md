@@ -249,3 +249,7 @@ make local-setup
 
 See `test-area/deploy-system.sh`. Generated addresses are written to the ignored
 `test-area/.env` file.
+
+The experimental multi-pair grid deployment is documented separately in
+[Grid Keeper And Admin Operations](GRID_OPERATIONS.md). It uses one manager and
+one dedicated grid keeper for all grid bots rather than one vault per pair.

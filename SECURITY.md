@@ -15,3 +15,8 @@ Key deployment requirements:
 - Verify CL8Y pair code and fee-registry addresses before registration.
 - Test every new pair and token implementation independently.
 - Do not use fee-on-transfer or rebasing CW20 tokens.
+- Treat the experimental grid keeper and indexer as trusted global components.
+- Retain archive-capable CL8Y fill history before operating grid bots.
+- Use a dedicated grid keeper key separate from rebalance keeper keys.
+- Do not expose owner-only grid shares to unrelated depositors without live NAV accounting.
+- Independently audit the experimental grid manager before economic deployment.

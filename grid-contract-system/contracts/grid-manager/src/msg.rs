@@ -37,7 +37,7 @@ pub enum ExecuteMsg {
     },
     Reconcile {
         bot_id: u64,
-        start_after: Option<u64>,
+        reports: Vec<OrderFillReport>,
     },
     CancelAll {
         bot_id: u64,
@@ -73,6 +73,16 @@ pub struct LimitOrderPlacementItem {
 }
 
 #[cw_serde]
+pub struct OrderFillReport {
+    pub order_id: u64,
+    /// Aggregate escrow consumed since the previous reconciliation.
+    pub input_amount: Uint128,
+    /// Exact aggregate maker output from indexed CL8Y fill events.
+    pub output_amount: Uint128,
+    pub fill_count: u32,
+}
+
+#[cw_serde]
 pub enum PairCw20HookMsg {
     PlaceLimitOrderBatch {
         side: LimitOrderSide,
@@ -91,7 +101,7 @@ pub enum PairQueryMsg {
     Pair {},
     Pool {},
     LimitOrder { order_id: u64 },
-    LimitOrderSettlement { order_id: u64 },
+    ExpiredLimitRefund { order_id: u64 },
     LimitOrderConfig {},
 }
 
@@ -143,23 +153,12 @@ pub struct LimitOrderResponse {
 }
 
 #[cw_serde]
-pub enum LimitOrderSettlementStatus {
-    Open,
-    Filled,
-    Parked,
-}
-
-#[cw_serde]
-pub struct LimitOrderSettlementResponse {
+pub struct ExpiredLimitRefundResponse {
     pub order_id: u64,
     pub owner: String,
     pub side: LimitOrderSide,
-    pub price: Decimal,
-    pub initial_remaining: Uint128,
     pub remaining: Uint128,
-    pub cumulative_output: Uint128,
-    pub status: LimitOrderSettlementStatus,
-    pub claimable_refund: Uint128,
+    pub expires_at: Option<u64>,
 }
 
 #[cw_serde]
@@ -226,7 +225,6 @@ pub struct OrderResponse {
     pub side: LimitOrderSide,
     pub price: Decimal,
     pub remaining: Uint128,
-    pub settled_output: Uint128,
 }
 
 #[cw_serde]

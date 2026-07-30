@@ -47,4 +47,8 @@ pub enum ContractError {
     InsufficientShares,
     #[error("bot active-order limit reached")]
     ActiveOrderLimit,
+    #[error("fill report does not match CL8Y order state")]
+    InvalidFillReport,
+    #[error("order changed since its last indexed reconciliation")]
+    UnsettledOrder,
 }

@@ -5,7 +5,6 @@ PROJECT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 DEX_REPO_URL="https://github.com/PlasticDigits/cl8y-dex-terraclassic.git"
 DEX_REVISION="fad801117fe54420d7529da04e485d67d511ef2c"
 DEX_DIR="${CL8Y_DEX_DIR:-$PROJECT_ROOT/test-area/.cache/cl8y-dex-terraclassic}"
-GRID_DEX_PATCH="$PROJECT_ROOT/grid-contract-system/cl8y-extension/limit-order-settlement.patch"
 LOCAL_ENV="$PROJECT_ROOT/test-area/.env"
 COMPOSE_OVERRIDE="$PROJECT_ROOT/test-area/docker-compose.override.yml"
 CHAIN_ID="localterra"
@@ -17,10 +16,6 @@ ensure_dex_repo() {
         git clone --filter=blob:none "$DEX_REPO_URL" "$DEX_DIR"
     fi
 
-    if git -C "$DEX_DIR" apply --unidiff-zero -R --check "$GRID_DEX_PATCH" 2>/dev/null; then
-        git -C "$DEX_DIR" apply --unidiff-zero -R "$GRID_DEX_PATCH"
-    fi
-
     if ! git -C "$DEX_DIR" diff --quiet -- . ':(exclude)smartcontracts/artifacts/checksums.txt' \
         || ! git -C "$DEX_DIR" diff --cached --quiet; then
         echo "ERROR: managed CL8Y checkout has local changes: $DEX_DIR" >&2
@@ -30,8 +25,6 @@ ensure_dex_repo() {
     if [ "$(git -C "$DEX_DIR" rev-parse HEAD)" != "$DEX_REVISION" ]; then
         git -C "$DEX_DIR" checkout --detach "$DEX_REVISION"
     fi
-    git -C "$DEX_DIR" apply --unidiff-zero --check "$GRID_DEX_PATCH"
-    git -C "$DEX_DIR" apply --unidiff-zero "$GRID_DEX_PATCH"
 }
 
 localterra_container() {

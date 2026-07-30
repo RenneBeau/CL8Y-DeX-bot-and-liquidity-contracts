@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use cosmwasm_std::{
     entry_point, from_json, to_json_binary, Addr, BankMsg, Binary, Coin, Decimal, Deps, DepsMut,
     Env, Fraction, MessageInfo, Order, Reply, Response, StdError, StdResult, SubMsg, Uint128,
@@ -9,11 +11,11 @@ use cw_storage_plus::Bound;
 
 use crate::error::ContractError;
 use crate::msg::{
-    AssetInfo, BotResponse, ConfigResponse, ExecuteMsg, FactoryQueryMsg, InstantiateMsg,
-    LimitOrderConfigResponse, LimitOrderPlacementItem, LimitOrderSettlementResponse,
-    LimitOrderSettlementStatus, LimitOrderSide, OrderResponse, PairCw20HookMsg, PairExecuteMsg,
-    PairInfo, PairQueryMsg, PairResponse, PoolResponse, QueryMsg, ReceiveMsg, RungResponse,
-    ShareResponse,
+    AssetInfo, BotResponse, ConfigResponse, ExecuteMsg, ExpiredLimitRefundResponse,
+    FactoryQueryMsg, InstantiateMsg, LimitOrderConfigResponse, LimitOrderPlacementItem,
+    LimitOrderResponse, LimitOrderSide, OrderFillReport, OrderResponse, PairCw20HookMsg,
+    PairExecuteMsg, PairInfo, PairQueryMsg, PairResponse, PoolResponse, QueryMsg, ReceiveMsg,
+    RungResponse, ShareResponse,
 };
 use crate::state::{
     Bot, Config, GridOrder, PlacementPlan, Rung, BOTS, CONFIG, NEXT_BOT_ID, NEXT_REPLY_ID, ORDERS,
@@ -82,10 +84,9 @@ pub fn execute(
             recipient,
         } => execute_withdraw_gas(deps, info, bot_id, amount, recipient),
         ExecuteMsg::Allocate { bot_id } => execute_allocate(deps, info, bot_id),
-        ExecuteMsg::Reconcile {
-            bot_id,
-            start_after,
-        } => execute_reconcile(deps, env, info, bot_id, start_after),
+        ExecuteMsg::Reconcile { bot_id, reports } => {
+            execute_reconcile(deps, env, info, bot_id, reports)
+        }
         ExecuteMsg::CancelAll { bot_id } => execute_cancel_all(deps, env, info, bot_id),
         ExecuteMsg::Withdraw {
             bot_id,
@@ -382,47 +383,68 @@ fn execute_reconcile(
     env: Env,
     info: MessageInfo,
     bot_id: u64,
-    start_after: Option<u64>,
+    reports: Vec<OrderFillReport>,
 ) -> Result<Response, ContractError> {
     assert_no_funds(&info)?;
     let config = CONFIG.load(deps.storage)?;
     let mut bot = BOTS.load(deps.storage, bot_id)?;
-    if info.sender != config.keeper && info.sender != bot.owner {
+    if info.sender != config.keeper {
         return Err(ContractError::Unauthorized);
     }
-    let keeper_call = info.sender == config.keeper;
-    if keeper_call
-        && bot.gas_credit
-            < config
-                .minimum_gas_reserve
-                .checked_add(config.keeper_reward)?
+    if reports.is_empty() || reports.len() > config.max_orders_per_reconcile as usize {
+        return Err(ContractError::InvalidFillReport);
+    }
+    if bot.gas_credit
+        < config
+            .minimum_gas_reserve
+            .checked_add(config.keeper_reward)?
     {
         return Err(ContractError::InsufficientGasCredit);
     }
-    let tracked: Vec<(u64, GridOrder)> = ORDERS
-        .prefix(bot_id)
-        .range(
-            deps.storage,
-            start_after.map(Bound::exclusive),
-            None,
-            Order::Ascending,
-        )
-        .take(config.max_orders_per_reconcile as usize)
-        .collect::<StdResult<_>>()?;
+    let mut seen = BTreeSet::new();
     let mut placements: Vec<(LimitOrderSide, u32, Uint128)> = vec![];
     let mut parked_claims = vec![];
-    let mut changes = 0u32;
-    for (order_id, mut order) in tracked {
-        let settlement: LimitOrderSettlementResponse = deps
-            .querier
-            .query_wasm_smart(&bot.pair, &PairQueryMsg::LimitOrderSettlement { order_id })?;
-        validate_settlement(&env.contract.address, order_id, &order, &settlement)?;
-        let output = settlement
-            .cumulative_output
-            .checked_sub(order.settled_output)?;
-        let terminal = settlement.status != LimitOrderSettlementStatus::Open;
-        if output.is_zero() && settlement.remaining == order.remaining && !terminal {
-            continue;
+    for report in &reports {
+        if !seen.insert(report.order_id) {
+            return Err(ContractError::InvalidFillReport);
+        }
+        let mut order = ORDERS.load(deps.storage, (bot_id, report.order_id))?;
+        let active: StdResult<LimitOrderResponse> = deps.querier.query_wasm_smart(
+            &bot.pair,
+            &PairQueryMsg::LimitOrder {
+                order_id: report.order_id,
+            },
+        );
+        let (current_remaining, terminal, parked_refund) = match active {
+            Ok(on_chain) => {
+                validate_order(&env.contract.address, report.order_id, &order, &on_chain)?;
+                (on_chain.remaining, false, Uint128::zero())
+            }
+            Err(_) => {
+                let parked: Option<ExpiredLimitRefundResponse> = deps.querier.query_wasm_smart(
+                    &bot.pair,
+                    &PairQueryMsg::ExpiredLimitRefund {
+                        order_id: report.order_id,
+                    },
+                )?;
+                if let Some(refund) = parked {
+                    if refund.owner != env.contract.address
+                        || refund.order_id != report.order_id
+                        || refund.side != order.side
+                        || refund.remaining > order.remaining
+                    {
+                        return Err(ContractError::InvalidOrder);
+                    }
+                    (refund.remaining, true, refund.remaining)
+                } else {
+                    (Uint128::zero(), true, Uint128::zero())
+                }
+            }
+        };
+        let consumed = order.remaining.checked_sub(current_remaining)?;
+        let (reported_input, output) = validate_indexed_report(&order, report, terminal)?;
+        if reported_input != consumed || (consumed.is_zero() && !terminal) {
+            return Err(ContractError::InvalidFillReport);
         }
         let (output_index, opposite, opposite_rung) = match order.side {
             LimitOrderSide::Ask => (
@@ -437,47 +459,34 @@ fn execute_reconcile(
             ),
         };
         bot.free_balances[output_index] = bot.free_balances[output_index].checked_add(output)?;
-        match settlement.status {
-            LimitOrderSettlementStatus::Open => {
-                order.remaining = settlement.remaining;
-                order.settled_output = settlement.cumulative_output;
-                ORDERS.save(deps.storage, (bot_id, order_id), &order)?;
-            }
-            LimitOrderSettlementStatus::Filled => {
-                ORDERS.remove(deps.storage, (bot_id, order_id));
-                bot.active_orders = bot
-                    .active_orders
-                    .checked_sub(1)
-                    .ok_or(ContractError::InvalidOrder)?;
-            }
-            LimitOrderSettlementStatus::Parked => {
+        if terminal {
+            if !parked_refund.is_zero() {
                 let input_index = match order.side {
                     LimitOrderSide::Ask => 0,
                     LimitOrderSide::Bid => 1,
                 };
                 bot.free_balances[input_index] =
-                    bot.free_balances[input_index].checked_add(settlement.claimable_refund)?;
-                parked_claims.push(order_id);
-                ORDERS.remove(deps.storage, (bot_id, order_id));
-                bot.active_orders = bot
-                    .active_orders
-                    .checked_sub(1)
-                    .ok_or(ContractError::InvalidOrder)?;
+                    bot.free_balances[input_index].checked_add(parked_refund)?;
+                parked_claims.push(report.order_id);
             }
+            ORDERS.remove(deps.storage, (bot_id, report.order_id));
+            bot.active_orders = bot
+                .active_orders
+                .checked_sub(1)
+                .ok_or(ContractError::InvalidOrder)?;
+        } else {
+            order.remaining = current_remaining;
+            ORDERS.save(deps.storage, (bot_id, report.order_id), &order)?;
         }
         if !output.is_zero() {
             placements.push((opposite, opposite_rung, output));
         }
-        changes += 1;
-    }
-    if changes == 0 {
-        return Err(ContractError::NothingToReconcile);
     }
     BOTS.save(deps.storage, bot_id, &bot)?;
     let mut response = Response::new()
         .add_attribute("action", "reconcile_grid")
         .add_attribute("bot_id", bot_id.to_string())
-        .add_attribute("changed_orders", changes.to_string());
+        .add_attribute("changed_orders", reports.len().to_string());
     response = add_pair_batches(
         response,
         &bot.pair,
@@ -497,19 +506,17 @@ fn execute_reconcile(
             amount,
         )?;
     }
-    if keeper_call {
-        BOTS.update(deps.storage, bot_id, |bot| -> Result<_, ContractError> {
-            let mut bot = bot.ok_or_else(|| StdError::not_found("bot"))?;
-            bot.gas_credit = bot.gas_credit.checked_sub(config.keeper_reward)?;
-            Ok(bot)
-        })?;
-        response = response
-            .add_message(BankMsg::Send {
-                to_address: info.sender.to_string(),
-                amount: vec![Coin::new(config.keeper_reward.u128(), config.gas_denom)],
-            })
-            .add_attribute("keeper_reward", config.keeper_reward);
-    }
+    BOTS.update(deps.storage, bot_id, |bot| -> Result<_, ContractError> {
+        let mut bot = bot.ok_or_else(|| StdError::not_found("bot"))?;
+        bot.gas_credit = bot.gas_credit.checked_sub(config.keeper_reward)?;
+        Ok(bot)
+    })?;
+    response = response
+        .add_message(BankMsg::Send {
+            to_address: info.sender.to_string(),
+            amount: vec![Coin::new(config.keeper_reward.u128(), config.gas_denom)],
+        })
+        .add_attribute("keeper_reward", config.keeper_reward);
     Ok(response)
 }
 
@@ -534,37 +541,22 @@ fn execute_cancel_all(
     }
     let processed_orders = tracked.len() as u32;
     let mut cancel_ids = Vec::with_capacity(tracked.len());
-    let mut claim_ids = vec![];
     for (order_id, order) in tracked {
-        let settlement: LimitOrderSettlementResponse = deps
+        let on_chain: LimitOrderResponse = deps
             .querier
-            .query_wasm_smart(&bot.pair, &PairQueryMsg::LimitOrderSettlement { order_id })?;
-        validate_settlement(&env.contract.address, order_id, &order, &settlement)?;
-        let output_index = match order.side {
-            LimitOrderSide::Ask => 1,
-            LimitOrderSide::Bid => 0,
-        };
-        let output = settlement
-            .cumulative_output
-            .checked_sub(order.settled_output)?;
-        bot.free_balances[output_index] = bot.free_balances[output_index].checked_add(output)?;
+            .query_wasm_smart(&bot.pair, &PairQueryMsg::LimitOrder { order_id })
+            .map_err(|_| ContractError::UnsettledOrder)?;
+        validate_order(&env.contract.address, order_id, &order, &on_chain)?;
+        if on_chain.remaining != order.remaining {
+            return Err(ContractError::UnsettledOrder);
+        }
         let input_index = match order.side {
             LimitOrderSide::Ask => 0,
             LimitOrderSide::Bid => 1,
         };
-        match settlement.status {
-            LimitOrderSettlementStatus::Open => {
-                bot.free_balances[input_index] =
-                    bot.free_balances[input_index].checked_add(settlement.remaining)?;
-                cancel_ids.push(order_id);
-            }
-            LimitOrderSettlementStatus::Parked => {
-                bot.free_balances[input_index] =
-                    bot.free_balances[input_index].checked_add(settlement.claimable_refund)?;
-                claim_ids.push(order_id);
-            }
-            LimitOrderSettlementStatus::Filled => {}
-        }
+        bot.free_balances[input_index] =
+            bot.free_balances[input_index].checked_add(on_chain.remaining)?;
+        cancel_ids.push(order_id);
         ORDERS.remove(deps.storage, (bot_id, order_id));
     }
     bot.active_orders = bot
@@ -576,7 +568,7 @@ fn execute_cancel_all(
         Response::new(),
         &bot.pair,
         &cancel_ids,
-        &claim_ids,
+        &[],
         bot.pair_batch_limit,
     )?
     .add_attribute("action", "cancel_grid_orders")
@@ -757,17 +749,14 @@ pub fn reply(deps: DepsMut, env: Env, reply: Reply) -> Result<Response, Contract
         {
             return Err(ContractError::InvalidPlacementReply);
         }
-        let on_chain: LimitOrderSettlementResponse = deps
+        let on_chain: LimitOrderResponse = deps
             .querier
-            .query_wasm_smart(&bot.pair, &PairQueryMsg::LimitOrderSettlement { order_id })?;
+            .query_wasm_smart(&bot.pair, &PairQueryMsg::LimitOrder { order_id })?;
         let rung = RUNGS.load(deps.storage, (plan.bot_id, rung_index))?;
         if on_chain.owner != env.contract.address
             || on_chain.side != plan.side
             || on_chain.price != rung.price
-            || on_chain.initial_remaining > gross
-            || on_chain.remaining != on_chain.initial_remaining
-            || !on_chain.cumulative_output.is_zero()
-            || on_chain.status != LimitOrderSettlementStatus::Open
+            || on_chain.remaining > gross
         {
             return Err(ContractError::InvalidOrder);
         }
@@ -779,7 +768,6 @@ pub fn reply(deps: DepsMut, env: Env, reply: Reply) -> Result<Response, Contract
                 side: plan.side.clone(),
                 price: on_chain.price,
                 remaining: on_chain.remaining,
-                settled_output: Uint128::zero(),
             },
         )?;
     }
@@ -848,7 +836,6 @@ pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
                         side: order.side,
                         price: order.price,
                         remaining: order.remaining,
-                        settled_output: order.settled_output,
                     })
                 })
                 .collect::<StdResult<Vec<_>>>()?,
@@ -984,11 +971,11 @@ fn add_pair_batches(
     Ok(response)
 }
 
-fn validate_settlement(
+fn validate_order(
     manager: &Addr,
     order_id: u64,
     recorded: &GridOrder,
-    on_chain: &LimitOrderSettlementResponse,
+    on_chain: &LimitOrderResponse,
 ) -> Result<(), ContractError> {
     if on_chain.owner != manager.as_str() {
         return Err(ContractError::InvalidOrderOwner);
@@ -997,11 +984,41 @@ fn validate_settlement(
         || on_chain.side != recorded.side
         || on_chain.price != recorded.price
         || on_chain.remaining > recorded.remaining
-        || on_chain.cumulative_output < recorded.settled_output
     {
         return Err(ContractError::InvalidOrder);
     }
     Ok(())
+}
+
+fn validate_indexed_report(
+    order: &GridOrder,
+    report: &OrderFillReport,
+    terminal: bool,
+) -> Result<(Uint128, Uint128), ContractError> {
+    if report.fill_count == 0 {
+        if terminal && report.input_amount.is_zero() && report.output_amount.is_zero() {
+            return Ok((Uint128::zero(), Uint128::zero()));
+        }
+        return Err(ContractError::InvalidFillReport);
+    }
+    if report.input_amount.is_zero() || report.output_amount.is_zero() {
+        return Err(ContractError::InvalidFillReport);
+    }
+    // Summing per-fill floors can differ from flooring the aggregate by at most n - 1 units.
+    let aggregate_floor = match order.side {
+        LimitOrderSide::Ask => order.price * report.input_amount,
+        LimitOrderSide::Bid => order.price * report.output_amount,
+    };
+    let indexed_floor = match order.side {
+        LimitOrderSide::Ask => report.output_amount,
+        LimitOrderSide::Bid => report.input_amount,
+    };
+    if indexed_floor > aggregate_floor
+        || aggregate_floor.checked_sub(indexed_floor)? >= Uint128::from(report.fill_count as u128)
+    {
+        return Err(ContractError::InvalidFillReport);
+    }
+    Ok((report.input_amount, report.output_amount))
 }
 
 #[cfg(test)]
@@ -1112,8 +1129,11 @@ mod tests {
                         })
                         .unwrap()
                     }
-                    PairQueryMsg::LimitOrder { .. } | PairQueryMsg::LimitOrderSettlement { .. } => {
+                    PairQueryMsg::LimitOrder { .. } => {
                         return SystemResult::Ok(ContractResult::Err("order not installed".into()))
+                    }
+                    PairQueryMsg::ExpiredLimitRefund { .. } => {
+                        to_json_binary(&Option::<ExpiredLimitRefundResponse>::None).unwrap()
                     }
                 };
                 SystemResult::Ok(ContractResult::Ok(response))
@@ -1347,7 +1367,6 @@ mod tests {
                     side: LimitOrderSide::Bid,
                     price: Decimal::percent(150),
                     remaining: Uint128::new(100),
-                    settled_output: Uint128::zero(),
                 },
             )
             .unwrap();
@@ -1355,31 +1374,38 @@ mod tests {
             WasmQuery::Smart { msg, .. } => {
                 let query: PairQueryMsg = from_json(msg).unwrap();
                 match query {
-                    PairQueryMsg::LimitOrderSettlement { order_id } => {
-                        SystemResult::Ok(ContractResult::Ok(
-                            to_json_binary(&LimitOrderSettlementResponse {
-                                order_id,
-                                owner: mock_env().contract.address.to_string(),
-                                side: LimitOrderSide::Bid,
-                                price: Decimal::percent(150),
-                                initial_remaining: Uint128::new(100),
-                                remaining: Uint128::new(99),
-                                cumulative_output: Uint128::one(),
-                                status: LimitOrderSettlementStatus::Open,
-                                claimable_refund: Uint128::zero(),
-                            })
-                            .unwrap(),
-                        ))
-                    }
+                    PairQueryMsg::LimitOrder { order_id } => SystemResult::Ok(ContractResult::Ok(
+                        to_json_binary(&LimitOrderResponse {
+                            order_id,
+                            owner: mock_env().contract.address.to_string(),
+                            side: LimitOrderSide::Bid,
+                            price: Decimal::percent(150),
+                            remaining: Uint128::new(99),
+                            expires_at: None,
+                            prev: None,
+                            next: None,
+                        })
+                        .unwrap(),
+                    )),
                     _ => SystemResult::Ok(ContractResult::Err("unsupported".into())),
                 }
             }
             _ => SystemResult::Ok(ContractResult::Err("unsupported".into())),
         });
 
-        let response =
-            execute_reconcile(deps.as_mut(), mock_env(), mock_info("keeper", &[]), 1, None)
-                .unwrap();
+        let response = execute_reconcile(
+            deps.as_mut(),
+            mock_env(),
+            mock_info("keeper", &[]),
+            1,
+            vec![OrderFillReport {
+                order_id: 77,
+                input_amount: Uint128::one(),
+                output_amount: Uint128::one(),
+                fill_count: 1,
+            }],
+        )
+        .unwrap();
         assert_eq!(
             ORDERS.load(&deps.storage, (1, 77)).unwrap().remaining,
             Uint128::new(99)
@@ -1396,7 +1422,7 @@ mod tests {
     }
 
     #[test]
-    fn keeper_is_not_paid_for_noop_reconciliation() {
+    fn keeper_is_not_paid_for_empty_fill_report() {
         let mut deps = mock_dependencies();
         instantiate_default(deps.as_mut());
         BOTS.save(
@@ -1418,9 +1444,15 @@ mod tests {
             },
         )
         .unwrap();
-        let error = execute_reconcile(deps.as_mut(), mock_env(), mock_info("keeper", &[]), 1, None)
-            .unwrap_err();
-        assert_eq!(error, ContractError::NothingToReconcile);
+        let error = execute_reconcile(
+            deps.as_mut(),
+            mock_env(),
+            mock_info("keeper", &[]),
+            1,
+            vec![],
+        )
+        .unwrap_err();
+        assert_eq!(error, ContractError::InvalidFillReport);
         assert_eq!(
             BOTS.load(&deps.storage, 1).unwrap().gas_credit,
             Uint128::new(200)
