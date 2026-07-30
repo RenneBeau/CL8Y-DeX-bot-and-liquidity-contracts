@@ -25,7 +25,7 @@ indexer. The contract verifies each report against the standard pair's current
 escrow, order metadata, and CL8Y rounding arithmetic before crediting output. A
 keeper receives a capped reimbursement only after a valid reconciliation.
 Users cancel a bot's active orders before burning internal bot LP shares for a
-pro-rata withdrawal. Other bots' logical balances and shares are never included.
+pro-rata withdrawal calculated from that bot's logical balances and shares.
 Physical CW20 custody is pooled in one manager, so a compromised keeper/indexer
 can threaten global solvency within the accepted rounding envelope.
 Cancellation processes a bounded page at a time; owners repeat it until the
@@ -36,14 +36,14 @@ free and can be allocated later.
 
 The manager accepts only standard pairs registered by its configured CL8Y
 factory and requires matching CW20 decimals. It uses arithmetic price spacing.
-The trusted indexer is required because standard pairs remove completed orders
-and contracts cannot query historical transaction events themselves.
+The trusted indexer archives historical transaction events and completed-order
+output for standard pairs.
 
 The grid manager has one dedicated keeper address. It is independent from each
 rebalance vault's keeper and can reconcile every `bot_id` managed by the grid
-contract. The trusted indexer is an off-chain data source rather than another
-transaction signer: it streams exact fill events to the grid keeper, which
-submits one constant-size aggregate report per changed order and pays gas before
+contract. The trusted indexer streams exact fill events to the grid keeper,
+which acts as the system's single transaction signer, submits one constant-size
+aggregate report per changed order, and pays gas before
 reimbursement. The report includes consumed escrow, exact maker output, and fill
 count; the contract checks it against the current order and aggregate rounding
 bounds.

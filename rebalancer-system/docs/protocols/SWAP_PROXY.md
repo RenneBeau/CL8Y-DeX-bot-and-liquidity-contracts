@@ -28,8 +28,8 @@ validates the real CW20 contract (`info.sender`), embedded vault sender, pair,
 amount, deadline, and maximum spread. It forwards the exact received amount to
 the pair with output fixed to the originating vault.
 
-The caller cannot select an arbitrary recipient or route. An unregistered
-contract or wallet cannot use the proxy's discount.
+The registered route fixes the recipient to the originating vault and grants
+discount access exclusively to registered vault contracts.
 
 ## Administrative Authority
 

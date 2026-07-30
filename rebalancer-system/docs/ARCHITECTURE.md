@@ -54,8 +54,8 @@ claim_i = floor(vault_balance_i * shares / total_supply_before_burn)
 
 Pro-rata withdrawals transfer both claims at the vault's current token ratio.
 Single-token withdrawals swap exactly the unwanted claim and pay the wanted
-claim plus the actual vault balance increase produced by the swap. Existing
-users do not absorb another user's withdrawal swap cost.
+claim plus the actual vault balance increase produced by the swap. The
+withdrawing user receives the execution result and bears its swap cost.
 
 ## Share Accounting
 
@@ -95,7 +95,7 @@ liquidity checks and independent oracle validation.
 ## CL8Y Discount
 
 The shared proxy holds CL8Y and is the effective trader seen by CL8Y pairs.
-CL8Y contracts cannot self-register. Fee-registry governance must execute:
+Fee-registry governance registers the proxy by executing:
 
 ```json
 {

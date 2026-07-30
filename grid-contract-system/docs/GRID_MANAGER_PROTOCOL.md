@@ -7,16 +7,15 @@ limit-order grid manager for standard CL8Y DEX pairs. One contract can hold many
 independent bots across many factory-registered pairs while the manager address
 owns every CL8Y order and receives one governance-assigned CL8Y fee tier.
 
-The contract does not modify CL8Y pairs. Standard pairs remove completed orders
-and do not expose historical maker output through queries, so exact fill events
-must be retained by a trusted off-chain indexer and relayed by one trusted grid
-keeper.
+The manager trades through standard CL8Y pairs using their existing interfaces.
+A trusted off-chain indexer archives exact fill events, including completed-order
+maker output, and one trusted grid keeper relays bounded reports on-chain.
 
 ## Roles
 
 - `admin` rotates the one global grid keeper.
 - `keeper` is the only address authorized to submit indexed fill reports.
-- `indexer` is an authenticated off-chain service with no on-chain authority.
+- `indexer` is the authenticated off-chain source of exact fill history.
 - `bot owner` creates, funds, allocates, cancels, and withdraws one bot.
 - CL8Y fee-registry governance registers the manager address for a tier.
 
@@ -97,9 +96,8 @@ token0 shares = token0 deposit
 token1 shares = floor(token1 deposit / creation reference price)
 ```
 
-This owner-only prototype uses the immutable creation reference price rather
-than live NAV. It must not be opened to unrelated depositors without replacing
-share minting with complete free-plus-escrow NAV accounting.
+This owner-only prototype uses the immutable creation reference price. Support
+for unrelated depositors requires complete free-plus-escrow NAV accounting.
 
 ## Order Placement
 
@@ -224,8 +222,8 @@ Each bot prepays an isolated native gas credit. The keeper signs and initially
 pays reconciliation gas. A successful useful reconciliation reimburses one
 fixed `keeper_reward` from that bot. No-op or invalid reports receive nothing.
 
-An active or funded bot must retain `minimum_gas_reserve + keeper_reward` when
-the owner withdraws gas. Failed transactions cannot reimburse the keeper.
+An active or funded bot retains `minimum_gas_reserve + keeper_reward` when the
+owner withdraws gas. The keeper funds the gas cost of failed transactions.
 
 ## Execute Messages
 

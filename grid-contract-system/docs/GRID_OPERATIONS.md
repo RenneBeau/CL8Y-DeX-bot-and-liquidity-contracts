@@ -153,7 +153,7 @@ execute:
 {"allocate":{"bot_id":1}}
 ```
 
-The contract, rather than the caller, chooses sides, prices, and amounts.
+The contract derives sides, prices, and amounts from the bot configuration.
 
 ## Exit
 
@@ -186,8 +186,9 @@ The admin rotates the one global grid keeper:
 {"update_keeper":{"keeper":"<NEW_GRID_KEEPER>"}}
 ```
 
-This changes reconciliation authority for every bot on every pair immediately.
-It does not alter rebalance-vault keepers.
+This changes grid reconciliation authority for every bot on every pair
+immediately. Rebalance vaults continue using their separately configured
+keepers.
 
 ## Monitoring
 

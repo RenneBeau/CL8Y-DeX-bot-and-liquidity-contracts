@@ -48,8 +48,8 @@ pool reserve ratio. The transaction reverts unless allocation is inside
 
 - One immutable pair and two ordered assets per vault.
 - User withdrawals can be initiated only by the assigned liquidity contract.
-- Keepers cannot transfer assets to themselves.
-- Rebalances cannot mint, burn, or transfer bot LP shares.
+- Keeper swap output returns directly to the vault.
+- Bot LP minting, burning, and transfers remain under the liquidity contract.
 - Failed swaps or post-swap checks roll back all nested messages atomically.
 - Foreign CW20 donations are ignored because only configured assets are queried.
 

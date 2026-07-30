@@ -79,8 +79,8 @@ Verified scenarios:
 6. Pro-rata withdrawal at the vault's current A/B ratio.
 7. Proportional single-token withdrawal using only the user's unwanted claim.
 8. 5% price trigger, wrong-direction rollback, simulation-bounded minimum
-   return, ratio-excess amount cap, and successful inventory rebalance without
-   changing bot LP supply.
+   return, ratio-excess amount cap, and successful inventory rebalance while
+   preserving bot LP supply.
 9. Zero DEX LP balances in vault and liquidity contracts; unchanged proxy CL8Y.
 10. Zero deposit and unauthorized CL8Y-withdrawal failure paths.
 11. Four independently owned grid bots, two on EMBER/CORAL and two on
@@ -124,5 +124,6 @@ SOAK_ROUNDS=100 make local-soak
 ## Scope
 
 These results demonstrate functional behavior against the pinned CL8Y code and
-LocalTerra VM. They are not a substitute for an independent security audit,
-mainnet TWAP validation, economic simulation, or formal verification.
+LocalTerra VM. Production readiness additionally requires an independent
+security audit, mainnet TWAP validation, economic simulation, and formal
+verification.

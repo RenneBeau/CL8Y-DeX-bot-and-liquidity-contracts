@@ -1,12 +1,11 @@
 # Security
 
-This repository contains unaudited financial smart-contract software. Do not
-deploy it with economic assets without an independent audit and a mainnet
-oracle/TWAP review.
+This repository contains unaudited financial smart-contract software. Economic
+deployment requires an independent audit and a mainnet oracle/TWAP review.
 
-Please report vulnerabilities privately through
+Please report vulnerabilities through
 [GitHub's private vulnerability reporting](https://github.com/RenneBeau/CL8Y-DeX-bot-and-liquidity-contracts/security/advisories/new)
-rather than opening a public issue with exploit details.
+and reserve public issues for non-sensitive reports.
 
 Key deployment requirements:
 
@@ -20,5 +19,5 @@ Key deployment requirements:
 - Treat the experimental grid keeper and indexer as trusted global components.
 - Retain archive-capable CL8Y fill history before operating grid bots.
 - Use a dedicated grid keeper key separate from rebalance keeper keys.
-- Do not expose owner-only grid shares to unrelated depositors without live NAV accounting.
+- Support for unrelated grid depositors requires live NAV share accounting.
 - Independently audit the experimental grid manager before economic deployment.

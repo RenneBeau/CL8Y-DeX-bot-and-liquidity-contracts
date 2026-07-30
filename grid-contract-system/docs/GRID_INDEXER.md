@@ -2,12 +2,13 @@
 
 ## Purpose
 
-The trusted grid indexer retains exact maker-fill history that standard CL8Y
-pairs do not expose after an order completes. It watches every supported pair
-and delivers bounded aggregate reports to the one trusted grid keeper.
+The trusted grid indexer archives exact maker-fill history for completed and
+active standard CL8Y orders. It watches every supported pair and delivers
+bounded aggregate reports to the one trusted grid keeper.
 
-The indexer has no on-chain role. The contract authenticates the keeper, not the
-indexer, so the indexer-to-keeper channel must be authenticated operationally.
+The indexer serves as the keeper's authenticated off-chain event source. The
+contract authenticates the keeper address, while operators authenticate the
+indexer-to-keeper channel.
 
 ## Event Selection
 
@@ -18,8 +19,8 @@ action = limit_order_fill
 maker = grid manager address
 ```
 
-Map each event using `(pair_address, order_id)`. Order IDs are pair-local and
-must never be treated as globally unique.
+Map each event by the globally unique tuple `(pair_address, order_id)` because
+each pair maintains its own order-ID sequence.
 
 Canonical amount mapping:
 
@@ -90,7 +91,7 @@ Only `bot_id` and `reports` are included in the on-chain message. Each report's
 The keeper should:
 
 1. Read finalized reports from the indexer.
-2. Group reports by `bot_id`; never mix bot IDs in one call.
+2. Group each on-chain call by one `bot_id`.
 3. Bound each call by `max_orders_per_reconcile`.
 4. Simulate against current manager and pair state.
 5. Broadcast serially from the single keeper wallet.
@@ -98,9 +99,9 @@ The keeper should:
 7. Atomically advance indexer checkpoints only after success.
 8. Re-read finalized events and retry if pair escrow changed before execution.
 
-The same loop scans all admitted pairs. Pair count and bot count do not require
-additional keeper keys or indexer instances, though operators may scale the
-single logical indexer internally for throughput.
+The same loop scans all admitted pairs and serves every bot with one keeper key
+and one logical indexer. Operators may scale that indexer internally for
+throughput.
 
 ## Terminal Orders
 
@@ -132,7 +133,7 @@ Alert on:
 - Pair/order mappings missing a bot ID
 - Aggregate input differing from manager escrow delta
 - Keeper transaction failure or sequence mismatch
-- Orders disappearing without complete archived fills
+- Missing archived fills for completed orders
 - Bot gas credit below the next reimbursement requirement
 - Active-order cap causing deferred allocation
 

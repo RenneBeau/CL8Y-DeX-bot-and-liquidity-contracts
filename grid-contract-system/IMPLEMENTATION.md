@@ -30,8 +30,8 @@ CL8Y aggregate rounding bounds before crediting output and placing the opposite
 order. If a single opposite placement fails or is skipped, reconciliation still
 commits and its output returns to the bot's free balance for later allocation.
 
-This trust boundary is required because unchanged standard pairs remove
-completed orders and contracts cannot query historical transaction events.
+This architecture keeps standard pairs unchanged while the indexer supplies the
+historical transaction events needed for completed-order settlement.
 
 ## 5. Fund Operations And Exits
 

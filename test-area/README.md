@@ -10,7 +10,8 @@ unchanged pinned CL8Y pairs. The upstream `wallet` seed supplies
 LocalTerra uses a dedicated `gridkeeper` key; rebalance operations continue to
 use the separately configured vault keeper.
 
-The managed CL8Y checkout is under `test-area/.cache/` and is not committed.
+The harness stores its generated CL8Y checkout under the ignored
+`test-area/.cache/` directory.
 Contracts are built with `cosmwasm/workspace-optimizer:0.16.1` for Terra Classic
 VM compatibility. LCD/RPC use `1317`/`26657`; optional gRPC is remapped to
 `29090`/`29091`.

@@ -51,10 +51,10 @@ balance increase and enforces the user's minimum output.
 - Share minting occurs only after settled balance and allocation checks.
 - Withdrawal claims are proportional to pre-burn supply.
 - A single-token withdrawal swaps only that owner's proportional claim.
-- The current test implementation mints and redeems shares without an
-  additional protocol charge.
+- The current test implementation uses a zero protocol charge for share minting
+  and redemption.
 
 ## Supported Assets
 
 The first release requires the pair's two CW20 assets to use equal decimals.
-Fee-on-transfer and rebasing tokens are not supported.
+Supported assets use exact-transfer, fixed-balance CW20 semantics.
