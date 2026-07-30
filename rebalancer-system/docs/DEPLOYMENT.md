@@ -17,6 +17,8 @@ LP contracts.
 
 ## Build And Upload
 
+Run the build and upload commands from the `rebalancer-system` directory.
+
 Use the optimizer version tested by this repository:
 
 ```sh
@@ -241,7 +243,7 @@ exactly the user's proportional unwanted-token claim.
 
 ## LocalTerra Example
 
-The repository automates the complete sequence:
+From the repository root, the test harness automates the complete sequence:
 
 ```sh
 make local-setup
@@ -249,7 +251,3 @@ make local-setup
 
 See `test-area/deploy-system.sh`. Generated addresses are written to the ignored
 `test-area/.env` file.
-
-The experimental multi-pair grid deployment is documented separately in
-[Grid Keeper And Admin Operations](GRID_OPERATIONS.md). It uses one manager and
-one dedicated grid keeper for all grid bots rather than one vault per pair.

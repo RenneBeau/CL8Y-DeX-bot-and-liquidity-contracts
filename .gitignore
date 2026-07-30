@@ -1,4 +1,6 @@
 /target/
+/rebalancer-system/target/
+/rebalancer-system/artifacts/
 /grid-contract-system/target/
 /grid-contract-system/artifacts/
 /artifacts/
@@ -6,4 +8,4 @@
 /test-area/.env
 __pycache__/
 *.pyc
-/examples/keeper/config.env
+/rebalancer-system/examples/keeper/config.env

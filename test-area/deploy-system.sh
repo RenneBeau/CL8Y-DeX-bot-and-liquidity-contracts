@@ -40,7 +40,7 @@ fi
 
 echo "Building clean proxy, vault, and liquidity Wasm artifacts..."
 docker run --rm \
-    -v "$PROJECT_ROOT:/code" \
+    -v "$PROJECT_ROOT/rebalancer-system:/code" \
     --mount type=volume,source=cl8y_bot_target_cache,target=/code/target \
     --mount type=volume,source=registry_cache,target=/usr/local/cargo/registry \
     cosmwasm/workspace-optimizer:0.16.1
@@ -66,7 +66,8 @@ wait_tx "$TX_HASH" >/dev/null
 store_contract() {
     local artifact="$1"
     local tx_hash result
-    docker cp "$PROJECT_ROOT/artifacts/$artifact.wasm" "$CONTAINER:/tmp/$artifact.wasm"
+    docker cp "$PROJECT_ROOT/rebalancer-system/artifacts/$artifact.wasm" \
+        "$CONTAINER:/tmp/$artifact.wasm"
     tx_hash=$(terrad_tx wasm store "/tmp/$artifact.wasm" | jq -r '.txhash')
     result=$(wait_tx "$tx_hash")
     tx_event_value "$result" code_id

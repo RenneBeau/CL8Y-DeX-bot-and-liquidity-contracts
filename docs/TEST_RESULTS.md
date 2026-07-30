@@ -17,9 +17,10 @@ Environment:
 Commands:
 
 ```sh
-cargo fmt --all -- --check
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --manifest-path rebalancer-system/Cargo.toml --all -- --check
+cargo test --manifest-path rebalancer-system/Cargo.toml
+cargo clippy --manifest-path rebalancer-system/Cargo.toml --all-targets -- -D warnings
+cargo fmt --manifest-path grid-contract-system/Cargo.toml --all -- --check
 cargo test --manifest-path grid-contract-system/Cargo.toml
 cargo clippy --manifest-path grid-contract-system/Cargo.toml --all-targets -- -D warnings
 ```

@@ -28,6 +28,8 @@ permission. Its only protocol role is submitting constrained rebalances.
 
 ## 1. Configure
 
+Run the relative commands below from the `rebalancer-system` directory.
+
 ```sh
 cp examples/keeper/config.example.env examples/keeper/config.env
 ```

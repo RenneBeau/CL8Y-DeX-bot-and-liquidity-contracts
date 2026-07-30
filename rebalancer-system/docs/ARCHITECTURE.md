@@ -103,23 +103,3 @@ CL8Y contracts cannot self-register. Fee-registry governance must execute:
 
 Standard tiers continue checking the proxy's CL8Y balance during discount
 queries. Pair-side discount values may remain cached for up to 300 seconds.
-
-## Experimental Grid Architecture
-
-The grid system is an independent multi-tenant contract rather than an
-extension of the rebalance vault:
-
-```text
-CL8Y pairs -> trusted indexer -> one grid keeper -> grid manager
-                                                   | bot_id ledgers
-                                                   | CL8Y limit orders
-                                                   v
-                                             standard CL8Y pairs
-```
-
-One manager owns orders for many bots across many factory pairs and receives one
-CL8Y fee tier. One dedicated grid keeper can reconcile all bot IDs. It is
-separate from rebalance-vault keepers. Standard pairs do not expose historical
-maker output after completion, so a trusted archive-capable indexer provides
-exact fill aggregates. See [Grid Manager](protocols/GRID_MANAGER.md) and
-[Grid Indexer](GRID_INDEXER.md).

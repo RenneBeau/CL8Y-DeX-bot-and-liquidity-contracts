@@ -7,9 +7,10 @@ evaluated.
 
 Canonical documentation:
 
-- [Grid manager protocol](../docs/protocols/GRID_MANAGER.md)
-- [Grid keeper and admin operations](../docs/GRID_OPERATIONS.md)
-- [Grid indexer protocol](../docs/GRID_INDEXER.md)
+- [Implementation guide](IMPLEMENTATION.md)
+- [Grid manager protocol](docs/GRID_MANAGER_PROTOCOL.md)
+- [Grid keeper and admin operations](docs/GRID_OPERATIONS.md)
+- [Grid indexer protocol](docs/GRID_INDEXER.md)
 - [Verification report](../docs/TEST_RESULTS.md)
 
 `contracts/grid-manager` is a multi-tenant prototype. Users create independent
