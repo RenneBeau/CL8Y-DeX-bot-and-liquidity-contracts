@@ -7,6 +7,7 @@ Dry-run is the default. Pass --broadcast to sign with a terrad keyring entry.
 import argparse
 import base64
 import json
+import os
 import subprocess
 import time
 import urllib.parse
@@ -164,23 +165,25 @@ def run_once(args):
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--vault", required=True, help="Bot vault address")
-    parser.add_argument("--lcd", default="http://127.0.0.1:1317")
-    parser.add_argument("--rpc", default="http://127.0.0.1:26657")
-    parser.add_argument("--chain-id", default="localterra")
-    parser.add_argument("--key", default="test1", help="terrad keyring name")
-    parser.add_argument("--keyring-backend", default="test")
-    parser.add_argument("--terrad", default="terrad")
-    parser.add_argument("--gas-prices", default="28.325uluna")
-    parser.add_argument("--gas-adjustment", default="1.4")
-    parser.add_argument("--slippage-bps", type=int, default=200)
-    parser.add_argument("--max-spread", default="0.05")
-    parser.add_argument("--max-trade-bps", type=int, default=2500)
-    parser.add_argument("--deadline-seconds", type=int, default=120)
-    parser.add_argument("--poll-seconds", type=int, default=15)
+    parser.add_argument("--vault", default=os.getenv("KEEPER_VAULT_ADDRESS"))
+    parser.add_argument("--lcd", default=os.getenv("KEEPER_LCD_URL", "http://127.0.0.1:1317"))
+    parser.add_argument("--rpc", default=os.getenv("KEEPER_RPC_URL", "http://127.0.0.1:26657"))
+    parser.add_argument("--chain-id", default=os.getenv("KEEPER_CHAIN_ID", "localterra"))
+    parser.add_argument("--key", default=os.getenv("KEEPER_KEY_NAME", "test1"))
+    parser.add_argument("--keyring-backend", default=os.getenv("KEEPER_KEYRING_BACKEND", "test"))
+    parser.add_argument("--terrad", default=os.getenv("KEEPER_TERRAD", "terrad"))
+    parser.add_argument("--gas-prices", default=os.getenv("KEEPER_GAS_PRICES", "28.325uluna"))
+    parser.add_argument("--gas-adjustment", default=os.getenv("KEEPER_GAS_ADJUSTMENT", "1.4"))
+    parser.add_argument("--slippage-bps", type=int, default=int(os.getenv("KEEPER_SLIPPAGE_BPS", "200")))
+    parser.add_argument("--max-spread", default=os.getenv("KEEPER_MAX_SPREAD", "0.05"))
+    parser.add_argument("--max-trade-bps", type=int, default=int(os.getenv("KEEPER_MAX_TRADE_BPS", "2500")))
+    parser.add_argument("--deadline-seconds", type=int, default=int(os.getenv("KEEPER_DEADLINE_SECONDS", "120")))
+    parser.add_argument("--poll-seconds", type=int, default=int(os.getenv("KEEPER_POLL_SECONDS", "15")))
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--broadcast", action="store_true")
     args = parser.parse_args()
+    if not args.vault:
+        parser.error("--vault or KEEPER_VAULT_ADDRESS is required")
     if not 0 <= args.slippage_bps < 10_000:
         parser.error("--slippage-bps must be between 0 and 9999")
     if not 1 <= args.max_trade_bps <= 10_000:

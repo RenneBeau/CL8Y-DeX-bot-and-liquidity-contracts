@@ -124,4 +124,6 @@ After `rebalance_status` reports `should_rebalance: true`, the keeper executes:
 }
 ```
 
-See `examples/keeper/` for polling, quoting, and signing code.
+See [`examples/keeper/README.md`](../examples/keeper/README.md) for key creation,
+gas funding, vault registration, dry runs, signing, service operation, and key
+rotation.

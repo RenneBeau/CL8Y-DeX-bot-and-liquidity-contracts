@@ -1,0 +1,21 @@
+[Unit]
+Description=CL8Y bot vault keeper
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cl8ykeeper
+WorkingDirectory=/opt/CL8Y-DeX-bot-and-liquidity-contracts
+EnvironmentFile=/etc/cl8y-keeper/config.env
+Environment=KEEPER_BROADCAST=1
+ExecStart=/usr/bin/python3 /opt/CL8Y-DeX-bot-and-liquidity-contracts/examples/keeper/keeper.py --broadcast
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+
+[Install]
+WantedBy=multi-user.target

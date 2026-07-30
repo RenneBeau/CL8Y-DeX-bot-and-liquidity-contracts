@@ -4,3 +4,4 @@
 /test-area/.env
 __pycache__/
 *.pyc
+/examples/keeper/config.env
