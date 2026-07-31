@@ -29,6 +29,8 @@ pub enum ContractError {
     AllocationOutsideTolerance,
     #[error("insufficient shares")]
     InsufficientShares,
+    #[error("unauthorized")]
+    Unauthorized,
     #[error("invalid vault configuration")]
     InvalidVault,
     #[error("unknown reply id")]

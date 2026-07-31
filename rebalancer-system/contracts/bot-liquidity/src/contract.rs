@@ -29,6 +29,7 @@ pub fn instantiate(
     msg: InstantiateMsg,
 ) -> Result<Response, ContractError> {
     set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
+    let admin = deps.api.addr_validate(&msg.admin)?;
     let vault = deps.api.addr_validate(&msg.vault)?;
     let vault_config: VaultConfigResponse = deps
         .querier
@@ -60,6 +61,7 @@ pub fn instantiate(
     CONFIG.save(
         deps.storage,
         &Config {
+            admin,
             vault,
             asset_tokens,
             minimum_initial_deposit: msg.minimum_initial_deposit,
@@ -88,6 +90,9 @@ pub fn execute(
             deadline,
             output,
         } => execute_withdraw(deps, env, info, shares, recipient, deadline, output),
+        ExecuteMsg::UpdateConfig {
+            minimum_initial_deposit,
+        } => execute_update_config(deps, info, minimum_initial_deposit),
         other => execute_cw20(deps, env, info, other),
     }
 }
@@ -197,12 +202,12 @@ fn execute_withdraw(
     let recipient = deps
         .api
         .addr_validate(recipient.as_deref().unwrap_or(info.sender.as_str()))?;
-    burn_shares(deps.branch(), env.clone(), info.clone(), shares)?;
     match output {
         WithdrawalType::ProRata { min_assets } => {
             if claims[0] < min_assets[0] || claims[1] < min_assets[1] {
                 return Err(ContractError::MinimumNotMet);
             }
+            burn_shares(deps.branch(), env.clone(), info.clone(), shares)?;
             let mut response = Response::new().add_attribute("action", "withdraw_pro_rata");
             for (token, amount) in config.asset_tokens.iter().zip(claims) {
                 if !amount.is_zero() {
@@ -213,19 +218,35 @@ fn execute_withdraw(
             Ok(response)
         }
         WithdrawalType::Token0 { min_amount, swap } => execute_single_withdraw(
-            deps, config, recipient, claims, 0, min_amount, swap, deadline,
+            deps, info, config, recipient, shares, claims, 0, min_amount, swap, deadline,
         ),
         WithdrawalType::Token1 { min_amount, swap } => execute_single_withdraw(
-            deps, config, recipient, claims, 1, min_amount, swap, deadline,
+            deps, info, config, recipient, shares, claims, 1, min_amount, swap, deadline,
         ),
     }
+}
+
+fn execute_update_config(
+    deps: DepsMut,
+    info: MessageInfo,
+    minimum_initial_deposit: Option<Uint128>,
+) -> Result<Response, ContractError> {
+    let mut config = CONFIG.load(deps.storage)?;
+    assert_admin(&config, &info.sender)?;
+    if let Some(value) = minimum_initial_deposit {
+        config.minimum_initial_deposit = value;
+    }
+    CONFIG.save(deps.storage, &config)?;
+    Ok(Response::new().add_attribute("action", "update_config"))
 }
 
 #[allow(clippy::too_many_arguments)]
 fn execute_single_withdraw(
     deps: DepsMut,
+    info: MessageInfo,
     config: Config,
     recipient: Addr,
+    shares: Uint128,
     claims: [Uint128; 2],
     payout_index: usize,
     min_amount: Uint128,
@@ -244,6 +265,8 @@ fn execute_single_withdraw(
     PENDING.save(
         deps.storage,
         &PendingOperation::WithdrawSingle {
+            owner: info.sender.clone(),
+            shares,
             recipient,
             payout_token: config.asset_tokens[payout_index].clone(),
             base_amount: claims[payout_index],
@@ -252,7 +275,7 @@ fn execute_single_withdraw(
         },
     )?;
     Ok(Response::new()
-        .add_submessage(SubMsg::reply_on_success(
+        .add_submessage(SubMsg::reply_always(
             WasmMsg::Execute {
                 contract_addr: config.vault.to_string(),
                 msg: to_json_binary(&VaultExecuteMsg::LiquiditySwap { params: swap })?,
@@ -267,7 +290,7 @@ fn execute_single_withdraw(
 pub fn reply(deps: DepsMut, env: Env, reply: Reply) -> Result<Response, ContractError> {
     match reply.id {
         DEPOSIT_REPLY_ID => complete_deposit(deps, env),
-        WITHDRAW_REPLY_ID => complete_single_withdraw(deps),
+        WITHDRAW_REPLY_ID => complete_single_withdraw(deps, env, reply),
         _ => Err(ContractError::UnknownReply),
     }
 }
@@ -336,9 +359,15 @@ fn complete_deposit(mut deps: DepsMut, env: Env) -> Result<Response, ContractErr
         .add_attribute("shares", user_shares))
 }
 
-fn complete_single_withdraw(deps: DepsMut) -> Result<Response, ContractError> {
+fn complete_single_withdraw(
+    mut deps: DepsMut,
+    env: Env,
+    reply: Reply,
+) -> Result<Response, ContractError> {
     let pending = PENDING.load(deps.storage)?;
     let PendingOperation::WithdrawSingle {
+        owner,
+        shares,
         recipient,
         payout_token,
         base_amount,
@@ -348,6 +377,12 @@ fn complete_single_withdraw(deps: DepsMut) -> Result<Response, ContractError> {
     else {
         return Err(ContractError::UnknownReply);
     };
+    if reply.result.is_err() {
+        PENDING.remove(deps.storage);
+        return Ok(Response::new()
+            .add_attribute("action", "withdraw_single_failed")
+            .add_attribute("owner", owner));
+    }
     let config = CONFIG.load(deps.storage)?;
     let current = cw20_balance(deps.as_ref(), &payout_token, &config.vault)?;
     let received = current
@@ -359,6 +394,15 @@ fn complete_single_withdraw(deps: DepsMut) -> Result<Response, ContractError> {
     if payout < min_amount {
         return Err(ContractError::MinimumNotMet);
     }
+    burn_shares(
+        deps.branch(),
+        env,
+        MessageInfo {
+            sender: owner,
+            funds: vec![],
+        },
+        shares,
+    )?;
     PENDING.remove(deps.storage);
     Ok(Response::new()
         .add_message(vault_transfer(&config, &payout_token, payout, &recipient)?)
@@ -436,7 +480,11 @@ fn execute_cw20(
             marketing,
         },
         ExecuteMsg::UploadLogo(logo) => BaseExecuteMsg::UploadLogo(logo),
-        ExecuteMsg::Deposit { .. } | ExecuteMsg::Withdraw { .. } => unreachable!(),
+        ExecuteMsg::UpdateConfig { .. }
+        | ExecuteMsg::Deposit { .. }
+        | ExecuteMsg::Withdraw { .. } => {
+            unreachable!()
+        }
     };
     cw20_base::contract::execute(deps, env, info, msg).map_err(cw20_error)
 }
@@ -447,6 +495,7 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
         QueryMsg::Config {} => {
             let config = CONFIG.load(deps.storage)?;
             to_json_binary(&ConfigResponse {
+                admin: config.admin.to_string(),
                 vault: config.vault.to_string(),
                 asset_tokens: config.asset_tokens.map(|addr| addr.to_string()),
                 minimum_initial_deposit: config.minimum_initial_deposit,
@@ -609,6 +658,13 @@ fn assert_no_pending(deps: Deps) -> Result<(), ContractError> {
     Ok(())
 }
 
+fn assert_admin(config: &Config, sender: &Addr) -> Result<(), ContractError> {
+    if sender != config.admin {
+        return Err(ContractError::Unauthorized);
+    }
+    Ok(())
+}
+
 fn cw20_error(error: cw20_base::ContractError) -> ContractError {
     ContractError::Cw20(error.to_string())
 }
@@ -616,6 +672,17 @@ fn cw20_error(error: cw20_base::ContractError) -> ContractError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cosmwasm_std::testing::{mock_dependencies, mock_env, mock_info};
+    use cosmwasm_std::{from_json, ContractResult, Reply, SubMsgResult, SystemResult};
+
+    fn test_config() -> Config {
+        Config {
+            admin: Addr::unchecked("admin"),
+            vault: Addr::unchecked("vault"),
+            asset_tokens: [Addr::unchecked("token0"), Addr::unchecked("token1")],
+            minimum_initial_deposit: Uint128::new(1_000),
+        }
+    }
 
     #[test]
     fn nav_values_token1_at_fixed_price() {
@@ -646,5 +713,107 @@ mod tests {
             .unwrap(),
             Uint128::new(100)
         );
+    }
+
+    #[test]
+    fn update_config_is_admin_gated_and_updates_minimum() {
+        let mut deps = mock_dependencies();
+        CONFIG.save(deps.as_mut().storage, &test_config()).unwrap();
+        let error = execute_update_config(
+            deps.as_mut(),
+            mock_info("attacker", &[]),
+            Some(Uint128::new(5_000)),
+        )
+        .unwrap_err();
+        assert_eq!(error, ContractError::Unauthorized);
+        execute_update_config(
+            deps.as_mut(),
+            mock_info("admin", &[]),
+            Some(Uint128::new(5_000)),
+        )
+        .unwrap();
+        assert_eq!(
+            CONFIG.load(&deps.storage).unwrap().minimum_initial_deposit,
+            Uint128::new(5_000)
+        );
+        execute_update_config(deps.as_mut(), mock_info("admin", &[]), None).unwrap();
+        assert_eq!(
+            CONFIG.load(&deps.storage).unwrap().minimum_initial_deposit,
+            Uint128::new(5_000)
+        );
+    }
+
+    #[test]
+    fn failed_withdraw_reply_clears_pending_without_burning() {
+        let mut deps = mock_dependencies();
+        CONFIG.save(deps.as_mut().storage, &test_config()).unwrap();
+        PENDING
+            .save(
+                deps.as_mut().storage,
+                &PendingOperation::WithdrawSingle {
+                    owner: Addr::unchecked("owner"),
+                    shares: Uint128::new(100),
+                    recipient: Addr::unchecked("recipient"),
+                    payout_token: Addr::unchecked("token0"),
+                    base_amount: Uint128::new(50),
+                    pre_payout_balance: Uint128::new(1_000),
+                    min_amount: Uint128::new(40),
+                },
+            )
+            .unwrap();
+        let response = complete_single_withdraw(
+            deps.as_mut(),
+            mock_env(),
+            Reply {
+                id: WITHDRAW_REPLY_ID,
+                result: SubMsgResult::Err("swap failed".to_string()),
+            },
+        )
+        .unwrap();
+        assert_eq!(response.attributes[0].value, "withdraw_single_failed");
+        assert!(PENDING.may_load(&deps.storage).unwrap().is_none());
+    }
+
+    #[test]
+    fn withdraw_single_uses_reply_always() {
+        let mut deps = mock_dependencies();
+        CONFIG.save(deps.as_mut().storage, &test_config()).unwrap();
+        deps.querier.update_wasm(|query| match query {
+            cosmwasm_std::WasmQuery::Smart { contract_addr, msg } if contract_addr == "vault" => {
+                let query: VaultQueryMsg = from_json(msg).unwrap();
+                match query {
+                    VaultQueryMsg::Balances {} => SystemResult::Ok(ContractResult::Ok(
+                        to_json_binary(&VaultBalancesResponse {
+                            balances: [Uint128::new(1_000), Uint128::new(2_000)],
+                        })
+                        .unwrap(),
+                    )),
+                    _ => SystemResult::Ok(ContractResult::Err("unsupported".to_string())),
+                }
+            }
+            _ => SystemResult::Ok(ContractResult::Err("unsupported".to_string())),
+        });
+        let response = execute_single_withdraw(
+            deps.as_mut(),
+            mock_info("owner", &[]),
+            test_config(),
+            Addr::unchecked("recipient"),
+            Uint128::new(100),
+            [Uint128::new(50), Uint128::new(50)],
+            0,
+            Uint128::new(40),
+            SwapParams {
+                offer_token: "token1".to_string(),
+                amount: Uint128::new(50),
+                min_return: Uint128::new(40),
+                max_spread: Decimal::percent(1),
+                deadline: u64::MAX,
+            },
+            u64::MAX,
+        )
+        .unwrap();
+        let submsg = response.messages[0].clone();
+        assert_eq!(submsg.id, WITHDRAW_REPLY_ID);
+        assert!(matches!(submsg.reply_on, cosmwasm_std::ReplyOn::Always));
     }
 }

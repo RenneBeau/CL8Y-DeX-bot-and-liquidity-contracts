@@ -79,9 +79,7 @@ pub fn instantiate(
     let max_execution_deviation_bps = msg
         .max_execution_deviation_bps
         .unwrap_or(DEFAULT_MAX_EXECUTION_DEVIATION_BPS);
-    let quote_slippage_bps = msg
-        .quote_slippage_bps
-        .unwrap_or(DEFAULT_QUOTE_SLIPPAGE_BPS);
+    let quote_slippage_bps = msg.quote_slippage_bps.unwrap_or(DEFAULT_QUOTE_SLIPPAGE_BPS);
     let max_spread = msg.max_spread.unwrap_or(DEFAULT_MAX_SPREAD);
     validate_risk_controls(
         max_trade_bps,
@@ -143,6 +141,7 @@ pub fn execute(
             max_execution_deviation_bps,
             quote_slippage_bps,
             max_spread,
+            twap_window_seconds,
         } => execute_update_thresholds(
             deps,
             info,
@@ -152,6 +151,7 @@ pub fn execute(
             max_execution_deviation_bps,
             quote_slippage_bps,
             max_spread,
+            twap_window_seconds,
         ),
         VaultExecuteMsg::TransferAdmin { admin } => execute_transfer_admin(deps, info, admin),
     }
@@ -246,10 +246,16 @@ fn execute_rebalance(
     if !plan.should_rebalance {
         return Err(ContractError::RebalanceNotRequired);
     }
-    let offer_token = plan.offer_token.ok_or(ContractError::InvalidRebalanceSwap)?;
+    let offer_token = plan
+        .offer_token
+        .ok_or(ContractError::InvalidRebalanceSwap)?;
     let amount = plan.amount.ok_or(ContractError::InvalidRebalanceSwap)?;
     let min_return = plan.min_return.ok_or(ContractError::InvalidRebalanceSwap)?;
-    let offer_index = if offer_token == config.asset_tokens[0] { 0 } else { 1 };
+    let offer_index = if offer_token == config.asset_tokens[0] {
+        0
+    } else {
+        1
+    };
     let params = SwapParams {
         offer_token,
         amount,
@@ -365,6 +371,7 @@ fn execute_update_thresholds(
     max_execution_deviation_bps: Option<u16>,
     quote_slippage_bps: Option<u16>,
     max_spread: Option<Decimal>,
+    twap_window_seconds: Option<u32>,
 ) -> Result<Response, ContractError> {
     let mut config = CONFIG.load(deps.storage)?;
     assert_admin(&config, &info.sender)?;
@@ -376,9 +383,14 @@ fn execute_update_thresholds(
         validate_allocation_tolerance(value)?;
         config.allocation_tolerance_bps = value;
     }
+    if let Some(value) = twap_window_seconds {
+        if value == 0 {
+            return Err(ContractError::InvalidTwapWindow);
+        }
+        config.twap_window_seconds = value;
+    }
     let next_max_trade = max_trade_bps.unwrap_or(config.max_trade_bps);
-    let next_execution =
-        max_execution_deviation_bps.unwrap_or(config.max_execution_deviation_bps);
+    let next_execution = max_execution_deviation_bps.unwrap_or(config.max_execution_deviation_bps);
     let next_quote = quote_slippage_bps.unwrap_or(config.quote_slippage_bps);
     let next_spread = max_spread.unwrap_or(config.max_spread);
     validate_risk_controls(next_max_trade, next_execution, next_quote, next_spread)?;
@@ -431,9 +443,7 @@ pub fn query(deps: Deps, env: Env, msg: VaultQueryMsg) -> StdResult<Binary> {
         VaultQueryMsg::RebalanceStatus {} => {
             to_json_binary(&rebalance_status(deps, &env, &config)?)
         }
-        VaultQueryMsg::RebalancePlan {} => {
-            to_json_binary(&rebalance_plan(deps, &env, &config)?)
-        }
+        VaultQueryMsg::RebalancePlan {} => to_json_binary(&rebalance_plan(deps, &env, &config)?),
     }
 }
 
@@ -528,8 +538,8 @@ fn query_price(deps: Deps, _env: &Env, config: &Config) -> StdResult<Decimal> {
 fn twap_from_observation(response: &ObserveResponse, window: u32) -> StdResult<Decimal> {
     let difference = response.price_a_cumulatives[0] - response.price_a_cumulatives[1];
     let atomics = difference.checked_div(Uint128::from(window))?;
-    let price =
-        Decimal::from_atomics(atomics, 18).map_err(|error| StdError::generic_err(error.to_string()))?;
+    let price = Decimal::from_atomics(atomics, 18)
+        .map_err(|error| StdError::generic_err(error.to_string()))?;
     if price.is_zero() {
         return Err(StdError::generic_err("empty TWAP price"));
     }
@@ -554,8 +564,7 @@ fn planned_offer(
     max_trade_bps: u16,
 ) -> StdResult<Option<(usize, Uint128)>> {
     let token0_value = Uint256::from(holdings[0]) * Uint256::from(price.atomics());
-    let token1_value =
-        Uint256::from(holdings[1]) * Uint256::from(Decimal::one().atomics());
+    let token1_value = Uint256::from(holdings[1]) * Uint256::from(Decimal::one().atomics());
     let (index, uncapped) = match token1_value.cmp(&token0_value) {
         std::cmp::Ordering::Greater => {
             let amount = (token1_value - token0_value)
@@ -564,9 +573,8 @@ fn planned_offer(
             (1, amount)
         }
         std::cmp::Ordering::Less => {
-            let amount = (token0_value - token1_value)
-                / Uint256::from(price.atomics())
-                / Uint256::from(2u8);
+            let amount =
+                (token0_value - token1_value) / Uint256::from(price.atomics()) / Uint256::from(2u8);
             (0, amount)
         }
         std::cmp::Ordering::Equal => return Ok(None),
@@ -796,6 +804,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -811,9 +820,76 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap_err();
         assert_eq!(error, ContractError::InvalidThreshold);
+    }
+
+    #[test]
+    fn twap_window_update_is_admin_gated_and_validated() {
+        let mut deps = mock_dependencies();
+        CONFIG
+            .save(
+                deps.as_mut().storage,
+                &Config {
+                    admin: Addr::unchecked("admin"),
+                    keeper: Addr::unchecked("keeper"),
+                    liquidity_contract: None,
+                    proxy: Addr::unchecked("proxy"),
+                    pair: Addr::unchecked("pair"),
+                    asset_tokens: [Addr::unchecked("token0"), Addr::unchecked("token1")],
+                    decimals: 6,
+                    twap_window_seconds: 60,
+                    rebalance_threshold_bps: 500,
+                    allocation_tolerance_bps: 500,
+                    max_trade_bps: 2_500,
+                    max_execution_deviation_bps: 500,
+                    quote_slippage_bps: 200,
+                    max_spread: Decimal::percent(5),
+                    reference_price: Decimal::one(),
+                },
+            )
+            .unwrap();
+        execute_update_thresholds(
+            deps.as_mut(),
+            mock_info("admin", &[]),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(300),
+        )
+        .unwrap();
+        assert_eq!(CONFIG.load(&deps.storage).unwrap().twap_window_seconds, 300);
+        let error = execute_update_thresholds(
+            deps.as_mut(),
+            mock_info("admin", &[]),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(0),
+        )
+        .unwrap_err();
+        assert_eq!(error, ContractError::InvalidTwapWindow);
+        let error = execute_update_thresholds(
+            deps.as_mut(),
+            mock_info("keeper", &[]),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(300),
+        )
+        .unwrap_err();
+        assert_eq!(error, ContractError::Unauthorized);
     }
 
     #[test]
@@ -841,8 +917,12 @@ mod tests {
             None
         );
         assert_eq!(
-            planned_offer([Uint128::new(1_000), Uint128::zero()], Decimal::one(), 1_000)
-                .unwrap(),
+            planned_offer(
+                [Uint128::new(1_000), Uint128::zero()],
+                Decimal::one(),
+                1_000
+            )
+            .unwrap(),
             Some((0, Uint128::new(100)))
         );
     }
@@ -892,11 +972,7 @@ mod tests {
             amount: Uint128::new(50),
             min_return: Uint128::new(48),
         };
-        assert!(validate_settlement(
-            &pending,
-            [Uint128::new(150), Uint128::new(148)]
-        )
-        .is_ok());
+        assert!(validate_settlement(&pending, [Uint128::new(150), Uint128::new(148)]).is_ok());
         assert_eq!(
             validate_settlement(&pending, [Uint128::new(150), Uint128::new(147)]),
             Err(ContractError::AllocationDidNotImprove)

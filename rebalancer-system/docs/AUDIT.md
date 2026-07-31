@@ -38,6 +38,8 @@ Scope: `bot-vault`, `bot-liquidity`, `swap-proxy`, `bot-types`, `cl8y-dex`
 
 **Workaround (existing):** Pro-rata withdrawal (`WithdrawalType::ProRata`) does NOT go through a swap and is safe. Users should prefer pro-rata for trust-minimized withdrawals.
 
+**Resolution:** Implemented an escrow pattern in `contracts/bot-liquidity/src/contract.rs`. Single-token withdrawals now use `SubMsg::reply_always`: shares are no longer burned upfront, and `complete_single_withdraw` burns them only after the swap succeeds. If the swap fails, the pending state is cleared and the owner keeps their shares.
+
 ---
 
 ### 2.2 MEDIUM — No emergency withdrawal mechanism
@@ -125,6 +127,8 @@ This is not a meaningful finding. Removed from issue tracker.
 
 **Recommendation:** Add an admin `UpdateConfig` message.
 
+**Resolution:** Added an `admin` field to the liquidity contract config and an admin-gated `UpdateConfig { minimum_initial_deposit }` message in `contracts/bot-liquidity`. The deploy script passes the admin at instantiation.
+
 ---
 
 ### 2.6 LOW — TWAP window is fixed at instantiate
@@ -135,6 +139,8 @@ This is not a meaningful finding. Removed from issue tracker.
 **Impact:** Only one window length per vault. Deploy a new vault if different behavior is needed.
 
 **Recommendation:** Add an admin update function.
+
+**Resolution:** Added `twap_window_seconds` to the existing admin-gated `UpdateThresholds` message in `contracts/bot-vault`, validated to be greater than zero.
 
 ---
 
@@ -207,9 +213,9 @@ All enforced in `validate_risk_controls` and instantiation validation. Admin can
 
 | # | Severity | Description | Status |
 |---|----------|-------------|--------|
-| 2.1 | **HIGH** | Single-token withdrawal burns shares before swap — shares lost if swap fails | Open |
-| 2.5 | **LOW** | minimum_initial_deposit cannot be updated | Open |
-| 2.6 | **LOW** | TWAP window cannot be updated | Open |
+| 2.1 | **HIGH** | Single-token withdrawal burns shares before swap — shares lost if swap fails | Fixed |
+| 2.5 | **LOW** | minimum_initial_deposit cannot be updated | Fixed |
+| 2.6 | **LOW** | TWAP window cannot be updated | Fixed |
 | 2.7 | **INFO** | One vault per pair per proxy (by design) | Documented |
 
 The highest-priority fix before mainnet is **2.1** (withdrawal share burn race). Consider `reply_always` for the pending-rebalance state in the vault contract as well.

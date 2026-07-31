@@ -6,6 +6,7 @@ use cw20_base::msg::InstantiateMarketingInfo;
 
 #[cw_serde]
 pub struct InstantiateMsg {
+    pub admin: String,
     pub vault: String,
     pub name: String,
     pub symbol: String,
@@ -16,6 +17,9 @@ pub struct InstantiateMsg {
 
 #[cw_serde]
 pub enum ExecuteMsg {
+    UpdateConfig {
+        minimum_initial_deposit: Option<Uint128>,
+    },
     Deposit {
         amounts: [Uint128; 2],
         min_shares: Uint128,
@@ -111,6 +115,7 @@ pub enum QueryMsg {
 
 #[cw_serde]
 pub struct ConfigResponse {
+    pub admin: String,
     pub vault: String,
     pub asset_tokens: [String; 2],
     pub minimum_initial_deposit: Uint128,

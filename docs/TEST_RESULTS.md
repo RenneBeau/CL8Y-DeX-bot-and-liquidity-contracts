@@ -30,13 +30,13 @@ python3 -m unittest discover -s rebalancer-system/examples/keeper -p 'test_*.py'
 
 Result: PASS
 
-- Bot liquidity unit tests: 3 passed
-- Bot vault unit tests: 4 passed
+- Bot liquidity unit tests: 6 passed
+- Bot vault unit tests: 10 passed
 - Swap proxy unit tests: 2 passed
 - Documentation tests: passed
 - Strict Clippy: passed with no warnings
 - Grid manager unit tests: 8 passed
-- Keeper Python tests: 4 passed
+- Keeper Python tests: 44 passed
 
 ## Optimized Wasm
 

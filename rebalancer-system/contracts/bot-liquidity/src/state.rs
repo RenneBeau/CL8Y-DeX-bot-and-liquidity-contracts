@@ -4,6 +4,7 @@ use cw_storage_plus::Item;
 
 #[cw_serde]
 pub struct Config {
+    pub admin: Addr,
     pub vault: Addr,
     pub asset_tokens: [Addr; 2],
     pub minimum_initial_deposit: Uint128,
@@ -19,6 +20,8 @@ pub enum PendingOperation {
         min_shares: Uint128,
     },
     WithdrawSingle {
+        owner: Addr,
+        shares: Uint128,
         recipient: Addr,
         payout_token: Addr,
         base_amount: Uint128,

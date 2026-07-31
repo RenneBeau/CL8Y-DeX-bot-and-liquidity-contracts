@@ -147,6 +147,7 @@ pair tokens to use the same decimals.
 
 ```json
 {
+  "admin": "<VAULT_ADMIN_MULTISIG>",
   "vault": "<VAULT_ADDRESS>",
   "name": "TOKEN A TOKEN B Bot Liquidity",
   "symbol": "ABOTLP",

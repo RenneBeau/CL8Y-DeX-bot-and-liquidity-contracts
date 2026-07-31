@@ -8,6 +8,14 @@ This contract is both the user-flow controller and the transferable CW20 bot LP
 token for one vault. Its shares represent proportional ownership of that
 vault's token A and token B inventory.
 
+## Roles
+
+- `admin`: may update `minimum_initial_deposit` at any time via
+  `UpdateConfig`. Omitted fields retain their current values; existing
+  positions are unaffected.
+- `vault`: the only contract allowed to settle deposits and single-token
+  withdrawal swaps.
+
 ## CW20 Behavior
 
 The contract delegates standard transfer, send, burn, allowance, delegated
@@ -31,10 +39,14 @@ before settlement.
 ## Withdrawals
 
 Claims use vault balances and total supply before shares are burned. Pro-rata
-withdrawals transfer both claims at the vault's current A/B ratio. Token-0-only
-and token-1-only withdrawals require a swap spending exactly the user's
-unwanted-token claim. The final payout uses the actual wanted-token vault
-balance increase and enforces the user's minimum output.
+withdrawals burn shares and transfer both claims at the vault's current A/B
+ratio atomically. Token-0-only and token-1-only withdrawals require a swap
+spending exactly the user's unwanted-token claim and use an escrow pattern:
+the shares are **not** burned up front. The swap is dispatched as a
+`reply_always` submessage. On success the reply burns the owner's shares and
+pays out using the actual wanted-token vault balance increase, enforcing the
+user's minimum output. On failure the pending operation is cleared and the
+owner keeps their shares — a failed swap can never strand a position.
 
 ## Inflation And Donation Protection
 
@@ -51,6 +63,8 @@ balance increase and enforces the user's minimum output.
 - Share minting occurs only after settled balance and allocation checks.
 - Withdrawal claims are proportional to pre-burn supply.
 - A single-token withdrawal swaps only that owner's proportional claim.
+- Shares are burned only after a single-token swap succeeds; a failed swap
+  refunds the pending operation and keeps the owner's shares.
 - The current test implementation uses a zero protocol charge for share minting
   and redemption.
 

@@ -48,6 +48,7 @@ pub enum VaultExecuteMsg {
         max_execution_deviation_bps: Option<u16>,
         quote_slippage_bps: Option<u16>,
         max_spread: Option<Decimal>,
+        twap_window_seconds: Option<u32>,
     },
     TransferAdmin {
         admin: String,

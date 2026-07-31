@@ -52,10 +52,13 @@ Claims are calculated before burning:
 claim_i = floor(vault_balance_i * shares / total_supply_before_burn)
 ```
 
-Pro-rata withdrawals transfer both claims at the vault's current token ratio.
-Single-token withdrawals swap exactly the unwanted claim and pay the wanted
-claim plus the actual vault balance increase produced by the swap. The
-withdrawing user receives the execution result and bears its swap cost.
+Pro-rata withdrawals burn shares and transfer both claims at the vault's
+current token ratio. Single-token withdrawals use an escrow pattern: shares are
+held (not burned) while the unwanted claim is swapped, then burned on swap
+success. The payout is the wanted claim plus the actual vault balance increase
+produced by the swap. If the swap fails, the pending operation is cleared and
+the owner keeps their shares. The withdrawing user receives the execution
+result and bears its swap cost.
 
 ## Share Accounting
 

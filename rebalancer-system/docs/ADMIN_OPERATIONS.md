@@ -36,6 +36,21 @@ immediately and keeps the existing reference price.
 
 Both values can also be changed in one transaction.
 
+## Update The TWAP Window
+
+The vault admin can change the TWAP observation window with the same message.
+It must be greater than zero:
+
+```json
+{
+  "update_thresholds": {
+    "rebalance_threshold_bps": null,
+    "allocation_tolerance_bps": null,
+    "twap_window_seconds": 600
+  }
+}
+```
+
 ## Update Risk Controls
 
 The same message can update `max_trade_bps`,
@@ -55,6 +70,22 @@ by the admin or keeper.
 ```
 
 The new keeper becomes active immediately.
+
+## Update The Liquidity Minimum Initial Deposit
+
+The liquidity contract admin can adjust the minimum initial deposit for the
+first LP entry at any time:
+
+```json
+{
+  "update_config": {
+    "minimum_initial_deposit": "250000"
+  }
+}
+```
+
+Omitted fields retain their current values. The update applies to the next
+initial deposit; existing positions are unaffected.
 
 ## Transfer Vault Administration
 

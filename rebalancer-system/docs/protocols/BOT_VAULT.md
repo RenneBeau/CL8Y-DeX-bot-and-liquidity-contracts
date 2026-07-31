@@ -10,8 +10,8 @@ and sends proportional assets to users through its liquidity contract.
 
 ## Roles
 
-- `admin`: configures the liquidity controller once, updates keeper and
-  thresholds, and transfers administration.
+- `admin`: configures the liquidity controller once, updates keeper, thresholds,
+  and the TWAP observation window, and transfers administration.
 - `liquidity_contract`: the only caller allowed to perform user-flow swaps or
   transfer underlying assets to withdrawal recipients.
 - `keeper`: may perform threshold-gated inventory rebalances or synchronize a
@@ -24,6 +24,15 @@ The vault queries pair metadata and both CW20 token records. It rejects native
 assets, duplicate assets, mismatched token decimals, a zero TWAP window, and
 invalid threshold or risk-control values. The liquidity-controller address can be assigned
 only once.
+
+## Configuration Updates
+
+The admin can update `rebalance_threshold_bps`, `allocation_tolerance_bps`,
+`max_trade_bps`, `max_execution_deviation_bps`, `quote_slippage_bps`,
+`max_spread`, and `twap_window_seconds` at any time through `UpdateThresholds`;
+omitted fields retain their current values. The TWAP window must remain
+nonzero. This lets a vault adapt its observation window to changed volatility
+without redeploying.
 
 ## User Operations
 

@@ -115,8 +115,8 @@ VAULT_INIT=$(jq -nc --arg admin "$TEST_ADDRESS" --arg keeper "$TEST_ADDRESS" \
       max_execution_deviation_bps:500,quote_slippage_bps:200,max_spread:"0.05"}')
 VAULT_ADDRESS=$(instantiate_contract "$VAULT_CODE_ID" "$VAULT_INIT" ember-coral-bot-vault)
 
-LIQUIDITY_INIT=$(jq -nc --arg vault "$VAULT_ADDRESS" \
-    '{vault:$vault,name:"EMBER CORAL Bot Liquidity",
+LIQUIDITY_INIT=$(jq -nc --arg admin "$TEST_ADDRESS" --arg vault "$VAULT_ADDRESS" \
+    '{admin:$admin,vault:$vault,name:"EMBER CORAL Bot Liquidity",
       symbol:"ECBOTLP",decimals:6,minimum_initial_deposit:"100000",marketing:null}')
 LIQUIDITY_ADDRESS=$(instantiate_contract "$LIQUIDITY_CODE_ID" "$LIQUIDITY_INIT" ember-coral-bot-liquidity)
 
