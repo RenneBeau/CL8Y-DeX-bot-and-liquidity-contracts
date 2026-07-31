@@ -15,7 +15,7 @@ use crate::msg::{
     FactoryQueryMsg, InstantiateMsg, LimitOrderConfigResponse, LimitOrderPlacementItem,
     LimitOrderResponse, LimitOrderSide, OrderResponse, PairCw20HookMsg, PairExecuteMsg, PairInfo,
     PairQueryMsg, PairResponse, PoolResponse, QueryMsg, ReceiveMsg, RungResponse, ShareResponse,
-    VaultModeResponse,
+    SolvencyResponse, VaultModeResponse,
 };
 use crate::state::{
     Bot, Config, GridOrder, PlacementPlan, Rung, VaultMode, BOTS, CONFIG, NEXT_BOT_ID,
@@ -107,6 +107,9 @@ pub fn execute(
             recipient,
         } => execute_withdraw(deps, info, bot_id, shares, recipient),
         ExecuteMsg::UpdateKeeper { keeper } => execute_update_keeper(deps, info, keeper),
+        ExecuteMsg::UpdatePairCode { bot_id, code_id } => {
+            execute_update_pair_code(deps, info, bot_id, code_id)
+        }
         ExecuteMsg::TransferAdmin { admin } => execute_transfer_admin(deps, info, admin),
         ExecuteMsg::AcceptAdmin {} => execute_accept_admin(deps, info),
         ExecuteMsg::Pause {} => execute_pause(deps, info),
@@ -144,6 +147,10 @@ fn execute_create_bot(
         .querier
         .query_wasm_smart(&pair, &PairQueryMsg::Pair {})?;
     if deps.api.addr_validate(&pair_info.contract_addr)? != pair {
+        return Err(ContractError::InvalidPair);
+    }
+    let pair_code_id = deps.querier.query_wasm_contract_info(&pair)?.code_id;
+    if pair_code_id == 0 {
         return Err(ContractError::InvalidPair);
     }
     let registered: PairResponse = deps.querier.query_wasm_smart(
@@ -227,6 +234,7 @@ fn execute_create_bot(
         &Bot {
             owner: info.sender.clone(),
             pair,
+            pair_code_id,
             asset_tokens,
             lower_price,
             upper_price,
@@ -267,6 +275,7 @@ fn execute_receive(
             if depositor != bot.owner {
                 return Err(ContractError::Unauthorized);
             }
+            assert_pair_code(deps.as_ref(), &bot)?;
             let config = CONFIG.load(deps.storage)?;
             if bot.gas_credit
                 < config
@@ -392,6 +401,7 @@ fn execute_allocate(
     if info.sender != bot.owner {
         return Err(ContractError::Unauthorized);
     }
+    assert_pair_code(deps.as_ref(), &bot)?;
     let expires_at = env
         .block
         .time
@@ -458,6 +468,7 @@ fn execute_reconcile(
     if order_ids.is_empty() || order_ids.len() > config.max_orders_per_reconcile as usize {
         return Err(ContractError::InvalidFillReport);
     }
+    assert_pair_code(deps.as_ref(), &bot)?;
     if bot.gas_credit
         < config
             .minimum_gas_reserve
@@ -571,6 +582,7 @@ fn execute_cancel_all(
     if info.sender != bot.owner {
         return Err(ContractError::Unauthorized);
     }
+    assert_pair_code(deps.as_ref(), &bot)?;
     let tracked: Vec<(u64, GridOrder)> = ORDERS
         .prefix(bot_id)
         .range(deps.storage, None, None, Order::Ascending)
@@ -694,6 +706,28 @@ fn execute_update_keeper(
     Ok(Response::new().add_attribute("action", "update_grid_keeper"))
 }
 
+fn execute_update_pair_code(
+    deps: DepsMut,
+    info: MessageInfo,
+    bot_id: u64,
+    code_id: u64,
+) -> Result<Response, ContractError> {
+    assert_no_funds(&info)?;
+    assert_admin(deps.as_ref(), &info.sender)?;
+    if code_id == 0 {
+        return Err(ContractError::InvalidPair);
+    }
+    BOTS.update(deps.storage, bot_id, |bot| -> Result<_, ContractError> {
+        let mut bot = bot.ok_or_else(|| StdError::not_found("bot"))?;
+        bot.pair_code_id = code_id;
+        Ok(bot)
+    })?;
+    Ok(Response::new()
+        .add_attribute("action", "update_grid_pair_code")
+        .add_attribute("bot_id", bot_id.to_string())
+        .add_attribute("code_id", code_id.to_string()))
+}
+
 fn execute_transfer_admin(
     deps: DepsMut,
     info: MessageInfo,
@@ -779,6 +813,7 @@ fn execute_emergency_cancel(
     if info.sender != bot.owner {
         return Err(ContractError::Unauthorized);
     }
+    assert_pair_code(deps.as_ref(), &bot)?;
     let limit = CONFIG.load(deps.storage)?.max_orders_per_reconcile as usize;
     let tracked: Vec<(u64, GridOrder)> = ORDERS
         .prefix(bot_id)
@@ -901,6 +936,14 @@ fn execute_emergency_withdraw(
 fn assert_admin(deps: Deps, sender: &Addr) -> Result<(), ContractError> {
     if CONFIG.load(deps.storage)?.admin != *sender {
         return Err(ContractError::Unauthorized);
+    }
+    Ok(())
+}
+
+fn assert_pair_code(deps: Deps, bot: &Bot) -> Result<(), ContractError> {
+    let current = deps.querier.query_wasm_contract_info(&bot.pair)?.code_id;
+    if current != bot.pair_code_id {
+        return Err(ContractError::PairCodeMismatch);
     }
     Ok(())
 }
@@ -1088,7 +1131,7 @@ fn restore_single_placement(
 }
 
 #[entry_point]
-pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
+pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
     match msg {
         QueryMsg::Config {} => {
             let config = CONFIG.load(deps.storage)?;
@@ -1119,6 +1162,7 @@ pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
                 bot_id,
                 owner: bot.owner.to_string(),
                 pair: bot.pair.to_string(),
+                pair_code_id: bot.pair_code_id,
                 asset_tokens: bot.asset_tokens.map(|token| token.to_string()),
                 lower_price: bot.lower_price,
                 upper_price: bot.upper_price,
@@ -1167,6 +1211,7 @@ pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
                     .unwrap_or_default(),
             })
         }
+        QueryMsg::Solvency { bot_id } => to_json_binary(&check_solvency(deps, &env, bot_id)?),
     }
 }
 
@@ -1339,11 +1384,63 @@ fn validate_order(
     Ok(())
 }
 
+fn check_solvency(deps: Deps, env: &Env, bot_id: u64) -> StdResult<SolvencyResponse> {
+    let bot = BOTS.load(deps.storage, bot_id)?;
+    let mut expected = bot.free_balances;
+    let mut on_chain_escrow = [Uint128::zero(), Uint128::zero()];
+    let mut warnings = Vec::new();
+    for item in ORDERS
+        .prefix(bot_id)
+        .range(deps.storage, None, None, Order::Ascending)
+    {
+        let (order_id, order) = item?;
+        let token_index = match order.side {
+            LimitOrderSide::Ask => 0,
+            LimitOrderSide::Bid => 1,
+        };
+        expected[token_index] = expected[token_index].checked_add(order.remaining)?;
+        match deps.querier.query_wasm_smart::<LimitOrderResponse>(
+            &bot.pair,
+            &PairQueryMsg::LimitOrder { order_id },
+        ) {
+            Ok(on_chain) if on_chain.owner == env.contract.address => {
+                on_chain_escrow[token_index] =
+                    on_chain_escrow[token_index].checked_add(on_chain.remaining)?;
+            }
+            Ok(_) => warnings.push(format!(
+                "order {order_id} is no longer escrowed to this vault"
+            )),
+            Err(_) => warnings.push(format!("order {order_id} escrow could not be verified")),
+        }
+    }
+    let mut actual = [Uint128::zero(), Uint128::zero()];
+    for (index, token) in bot.asset_tokens.iter().enumerate() {
+        actual[index] = query_token_balance(deps, token, &env.contract.address)?
+            .checked_add(on_chain_escrow[index])?;
+    }
+    Ok(SolvencyResponse {
+        token_0_expected: expected[0],
+        token_0_actual: actual[0],
+        token_1_expected: expected[1],
+        token_1_actual: actual[1],
+        warnings,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use cosmwasm_std::testing::{mock_dependencies, mock_env, mock_info};
-    use cosmwasm_std::{coin, from_json, ContractResult, SubMsgResult, SystemResult, WasmQuery};
+    use cosmwasm_std::{
+        coin, from_json, ContractInfoResponse, ContractResult, SubMsgResult, SystemResult,
+        WasmQuery,
+    };
+
+    fn contract_info(code_id: u64) -> ContractInfoResponse {
+        let mut response = ContractInfoResponse::default();
+        response.code_id = code_id;
+        response
+    }
 
     fn instantiate_default(deps: DepsMut) {
         instantiate(
@@ -1472,6 +1569,11 @@ mod tests {
                 };
                 SystemResult::Ok(ContractResult::Ok(response))
             }
+            WasmQuery::ContractInfo { contract_addr } if contract_addr == "pair" => {
+                SystemResult::Ok(ContractResult::Ok(
+                    to_json_binary(&contract_info(7)).unwrap(),
+                ))
+            }
             _ => SystemResult::Ok(ContractResult::Err("unsupported query".into())),
         });
     }
@@ -1561,6 +1663,7 @@ mod tests {
             &Bot {
                 owner: Addr::unchecked("alice"),
                 pair: Addr::unchecked("pair"),
+                pair_code_id: 7,
                 asset_tokens: [Addr::unchecked("token_a"), Addr::unchecked("token_b")],
                 lower_price: Decimal::one(),
                 upper_price: Decimal::percent(300),
@@ -1686,6 +1789,7 @@ mod tests {
                 &Bot {
                     owner: Addr::unchecked(owner),
                     pair: Addr::unchecked("pair"),
+                    pair_code_id: 7,
                     asset_tokens: [Addr::unchecked("token_a"), Addr::unchecked("token_b")],
                     lower_price: Decimal::one(),
                     upper_price: Decimal::percent(300),
@@ -1847,6 +1951,11 @@ mod tests {
                     .unwrap(),
                 ))
             }
+            WasmQuery::ContractInfo { contract_addr } if contract_addr == "pair" => {
+                SystemResult::Ok(ContractResult::Ok(
+                    to_json_binary(&contract_info(7)).unwrap(),
+                ))
+            }
             _ => SystemResult::Ok(ContractResult::Err("unsupported".into())),
         });
 
@@ -1881,6 +1990,7 @@ mod tests {
         Bot {
             owner: Addr::unchecked(owner),
             pair: Addr::unchecked("pair"),
+            pair_code_id: 7,
             asset_tokens: [Addr::unchecked("token_a"), Addr::unchecked("token_b")],
             lower_price: Decimal::one(),
             upper_price: Decimal::percent(300),
@@ -1901,6 +2011,7 @@ mod tests {
         let bot = Bot {
             owner: Addr::unchecked("alice"),
             pair: Addr::unchecked("pair"),
+            pair_code_id: 7,
             asset_tokens: [Addr::unchecked("token_a"), Addr::unchecked("token_b")],
             lower_price: Decimal::one(),
             upper_price: Decimal::from_ratio(3u128, 1u128),
@@ -1976,6 +2087,11 @@ mod tests {
                     .unwrap(),
                 ))
             }
+            WasmQuery::ContractInfo { contract_addr } if contract_addr == "pair" => {
+                SystemResult::Ok(ContractResult::Ok(
+                    to_json_binary(&contract_info(7)).unwrap(),
+                ))
+            }
             _ => SystemResult::Ok(ContractResult::Err("unsupported".into())),
         });
 
@@ -2033,6 +2149,11 @@ mod tests {
                         balance: Uint128::new(99),
                     })
                     .unwrap(),
+                ))
+            }
+            WasmQuery::ContractInfo { contract_addr } if contract_addr == "pair" => {
+                SystemResult::Ok(ContractResult::Ok(
+                    to_json_binary(&contract_info(7)).unwrap(),
                 ))
             }
             _ => SystemResult::Ok(ContractResult::Err("unsupported".into())),
@@ -2112,6 +2233,11 @@ mod tests {
                     .unwrap(),
                 ))
             }
+            WasmQuery::ContractInfo { contract_addr } if contract_addr == "pair" => {
+                SystemResult::Ok(ContractResult::Ok(
+                    to_json_binary(&contract_info(7)).unwrap(),
+                ))
+            }
             _ => SystemResult::Ok(ContractResult::Err("unsupported".into())),
         });
 
@@ -2141,6 +2267,7 @@ mod tests {
             &Bot {
                 owner: Addr::unchecked("alice"),
                 pair: Addr::unchecked("pair"),
+                pair_code_id: 7,
                 asset_tokens: [Addr::unchecked("token_a"), Addr::unchecked("token_b")],
                 lower_price: Decimal::one(),
                 upper_price: Decimal::percent(300),
@@ -2167,5 +2294,176 @@ mod tests {
             BOTS.load(&deps.storage, 1).unwrap().gas_credit,
             Uint128::new(200)
         );
+    }
+
+    #[test]
+    fn solvency_query_sums_vault_and_pair_escrow() {
+        let mut deps = mock_dependencies();
+        instantiate_default(deps.as_mut());
+        let mut bot = test_bot("alice", 2);
+        bot.free_balances = [Uint128::new(100), Uint128::new(200)];
+        BOTS.save(deps.as_mut().storage, 1, &bot).unwrap();
+        for (order_id, side, price, remaining) in [
+            (7, LimitOrderSide::Ask, 250u64, 40u128),
+            (8, LimitOrderSide::Bid, 150u64, 60u128),
+        ] {
+            ORDERS
+                .save(
+                    deps.as_mut().storage,
+                    (1, order_id),
+                    &GridOrder {
+                        rung_index: 3,
+                        side,
+                        price: Decimal::percent(price),
+                        remaining: Uint128::new(remaining),
+                    },
+                )
+                .unwrap();
+        }
+        deps.querier.update_wasm(|query| match query {
+            WasmQuery::Smart { contract_addr, msg } if contract_addr == "pair" => {
+                match from_json::<PairQueryMsg>(msg).unwrap() {
+                    PairQueryMsg::LimitOrder { order_id } => SystemResult::Ok(ContractResult::Ok(
+                        to_json_binary(&LimitOrderResponse {
+                            order_id,
+                            owner: mock_env().contract.address.to_string(),
+                            side: if order_id == 7 {
+                                LimitOrderSide::Ask
+                            } else {
+                                LimitOrderSide::Bid
+                            },
+                            price: Decimal::percent(if order_id == 7 { 250 } else { 150 }),
+                            remaining: Uint128::new(if order_id == 7 { 35 } else { 55 }),
+                            expires_at: None,
+                            prev: None,
+                            next: None,
+                        })
+                        .unwrap(),
+                    )),
+                    _ => SystemResult::Ok(ContractResult::Err("unsupported".into())),
+                }
+            }
+            WasmQuery::Smart { contract_addr, msg }
+                if contract_addr == "token_a" || contract_addr == "token_b" =>
+            {
+                let _: Cw20QueryMsg = from_json(msg).unwrap();
+                let balance = if contract_addr == "token_a" { 105 } else { 205 };
+                SystemResult::Ok(ContractResult::Ok(
+                    to_json_binary(&BalanceResponse {
+                        balance: Uint128::new(balance),
+                    })
+                    .unwrap(),
+                ))
+            }
+            _ => SystemResult::Ok(ContractResult::Err("unsupported".into())),
+        });
+
+        let response: SolvencyResponse =
+            from_json(query(deps.as_ref(), mock_env(), QueryMsg::Solvency { bot_id: 1 }).unwrap())
+                .unwrap();
+        assert_eq!(response.token_0_expected, Uint128::new(140));
+        assert_eq!(response.token_0_actual, Uint128::new(140));
+        assert_eq!(response.token_1_expected, Uint128::new(260));
+        assert_eq!(response.token_1_actual, Uint128::new(260));
+        assert!(response.warnings.is_empty());
+    }
+
+    #[test]
+    fn solvency_query_warns_when_order_escrow_cannot_be_verified() {
+        let mut deps = mock_dependencies();
+        instantiate_default(deps.as_mut());
+        let mut bot = test_bot("alice", 1);
+        bot.free_balances = [Uint128::new(100), Uint128::zero()];
+        BOTS.save(deps.as_mut().storage, 1, &bot).unwrap();
+        ORDERS
+            .save(
+                deps.as_mut().storage,
+                (1, 7),
+                &GridOrder {
+                    rung_index: 3,
+                    side: LimitOrderSide::Ask,
+                    price: Decimal::percent(250),
+                    remaining: Uint128::new(40),
+                },
+            )
+            .unwrap();
+        deps.querier.update_wasm(|query| match query {
+            WasmQuery::Smart { contract_addr, msg } if contract_addr == "pair" => {
+                let _: PairQueryMsg = from_json(msg).unwrap();
+                SystemResult::Ok(ContractResult::Err("not found".into()))
+            }
+            WasmQuery::Smart { contract_addr, msg }
+                if contract_addr == "token_a" || contract_addr == "token_b" =>
+            {
+                let _: Cw20QueryMsg = from_json(msg).unwrap();
+                SystemResult::Ok(ContractResult::Ok(
+                    to_json_binary(&BalanceResponse {
+                        balance: Uint128::zero(),
+                    })
+                    .unwrap(),
+                ))
+            }
+            _ => SystemResult::Ok(ContractResult::Err("unsupported".into())),
+        });
+
+        let response: SolvencyResponse =
+            from_json(query(deps.as_ref(), mock_env(), QueryMsg::Solvency { bot_id: 1 }).unwrap())
+                .unwrap();
+        assert_eq!(response.token_0_expected, Uint128::new(140));
+        assert_eq!(response.token_0_actual, Uint128::zero());
+        assert_eq!(response.warnings.len(), 1);
+        assert!(response.warnings[0].contains("order 7"));
+    }
+
+    #[test]
+    fn reconcile_rejects_mismatched_pair_code() {
+        let mut deps = mock_dependencies();
+        instantiate_default(deps.as_mut());
+        BOTS.save(deps.as_mut().storage, 1, &test_bot("alice", 1))
+            .unwrap();
+        ORDERS
+            .save(
+                deps.as_mut().storage,
+                (1, 77),
+                &GridOrder {
+                    rung_index: 3,
+                    side: LimitOrderSide::Ask,
+                    price: Decimal::percent(250),
+                    remaining: Uint128::new(100),
+                },
+            )
+            .unwrap();
+        deps.querier.update_wasm(|query| match query {
+            WasmQuery::ContractInfo { contract_addr } if contract_addr == "pair" => {
+                SystemResult::Ok(ContractResult::Ok(
+                    to_json_binary(&contract_info(9)).unwrap(),
+                ))
+            }
+            _ => SystemResult::Ok(ContractResult::Err("unsupported".into())),
+        });
+
+        let error = execute_reconcile(
+            deps.as_mut(),
+            mock_env(),
+            mock_info("permissionless", &[]),
+            1,
+            vec![77],
+        )
+        .unwrap_err();
+        assert_eq!(error, ContractError::PairCodeMismatch);
+    }
+
+    #[test]
+    fn update_pair_code_is_admin_only() {
+        let mut deps = mock_dependencies();
+        instantiate_default(deps.as_mut());
+        BOTS.save(deps.as_mut().storage, 1, &test_bot("alice", 0))
+            .unwrap();
+
+        let error =
+            execute_update_pair_code(deps.as_mut(), mock_info("alice", &[]), 1, 8).unwrap_err();
+        assert_eq!(error, ContractError::Unauthorized);
+        execute_update_pair_code(deps.as_mut(), mock_info("admin", &[]), 1, 8).unwrap();
+        assert_eq!(BOTS.load(&deps.storage, 1).unwrap().pair_code_id, 8);
     }
 }

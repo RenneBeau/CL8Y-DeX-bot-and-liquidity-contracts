@@ -35,7 +35,8 @@ Result: PASS
 - Swap proxy unit tests: 2 passed
 - Documentation tests: passed
 - Strict Clippy: passed with no warnings
-- Grid manager unit tests: 8 passed
+- Grid manager unit tests: 2 passed
+- Grid vault unit tests: 17 passed
 - Keeper Python tests: 44 passed
 
 ## Optimized Wasm

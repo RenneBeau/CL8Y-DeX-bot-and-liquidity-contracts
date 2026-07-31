@@ -13,6 +13,8 @@ pub enum ContractError {
     InvalidGrid,
     #[error("invalid CL8Y pair")]
     InvalidPair,
+    #[error("CL8Y pair implementation no longer matches the pinned code id")]
+    PairCodeMismatch,
     #[error("only CW20 pair assets are supported")]
     UnsupportedAsset,
     #[error("unexpected native funds")]

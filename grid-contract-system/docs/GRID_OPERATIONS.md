@@ -41,10 +41,21 @@ Reconciliation is permissionless:
 No off-chain amounts are accepted. After reconciliation, the owner may call
 `{"allocate":{"bot_id":1}}` to place verified free proceeds.
 
+If a CL8Y pair is migrated to new code after an approved upgrade, the vault
+aborts pair interactions until the admin re-pins the verified code ID:
+
+```json
+{"update_pair_code":{"bot_id":1,"code_id":<NEW_CODE_ID>}}
+```
+
 ## Recovery
 
 If the keeper or indexer disappears, query the vault's `orders`, submit their IDs
 to `reconcile`, then use bounded `cancel_all`. Historical events are unnecessary.
+
+If the pair's code ID no longer matches the pinned ID, pair interactions are
+disabled by design; re-pin only after independently verifying the replacement
+pair, then continue normal recovery.
 
 For stale state or incident response, the owner uses:
 
@@ -64,6 +75,8 @@ retry after pair health is restored.
 - Vault creation and fee-tier registration.
 - Oldest active order versus configured timeout.
 - Pair pause, blacklist, and code migration state.
+- `solvency` per vault: `expected` versus `actual` liquid-plus-escrow totals and
+  any verification warnings.
 - Vault gas credit and active-order count.
 - CW20 balance-delta mismatch errors.
 - Reconciliation/cancellation query errors and unresolved exits.

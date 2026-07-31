@@ -31,6 +31,7 @@ pub enum VaultMode {
 pub struct Bot {
     pub owner: Addr,
     pub pair: Addr,
+    pub pair_code_id: u64,
     pub asset_tokens: [Addr; 2],
     pub lower_price: Decimal,
     pub upper_price: Decimal,

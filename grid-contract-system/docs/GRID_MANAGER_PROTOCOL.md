@@ -30,6 +30,10 @@ The design does not protect against:
   allowlist or equivalent governance policy.
 - CL8Y pair governance pausing cancellation and claims, changing the wire
   interface, or maliciously violating its documented custody behavior.
+- Pair migration. The vault pins the pair code ID at bot creation and rejects
+  reconcile/cancel/allocate/deposit interactions after a code change, but the
+  admin must re-pin the replacement code ID only after independently verifying
+  the new implementation.
 - Temporary inability to distinguish a missing order from an unrelated pair query
   error. Emergency processing is owner-only and should be retried after pair/RPC
   health is restored.
@@ -58,7 +62,9 @@ its native gas reserve.
 
 The vault admits only a factory-registered CL8Y CW20/CW20 pair with distinct
 assets, equal decimals, nonzero reserves, compatible batch limits, valid price
-bounds, and at least one bid and ask rung.
+bounds, and at least one bid and ask rung. At bot creation it pins the pair's
+`contract_info.code_id`; every later pair interaction re-queries the code ID and
+rejects a mismatch.
 
 ## Lifecycle
 
@@ -125,6 +131,41 @@ the vault's actual liquid CW20 balances. Expired orders may require a CL8Y clean
 walk before their refund row becomes claimable. Pair pause can delay this flow but
 cannot redirect the funds.
 
+### Pair Code Pinning
+
+The vault stores the pair's code ID at bot creation. Deposit, allocate,
+reconcile, cancel, and emergency-cancel re-query `contract_info` and abort with
+`PairCodeMismatch` if the deployed code ID no longer matches. After a verified,
+governance-approved pair migration, the admin re-pins with:
+
+```json
+{"update_pair_code":{"bot_id":1,"code_id":<NEW_CODE_ID>}}
+```
+
+Until re-pinning, the owner's funds remain recoverable via the normal recovery
+paths, but pair interactions are intentionally disabled.
+
+### Solvency Monitoring
+
+`solvency` is a read-only query that cross-checks the accounting invariant per
+token:
+
+```json
+{"solvency":{"bot_id":1}}
+```
+
+```text
+expected = free_balance + sum(tracked order.remaining for that token)
+actual   = queried vault CW20 balance + sum(on-chain pair escrow for that token)
+```
+
+Each tracked order's escrow is re-queried on the pair; unverifiable or foreign
+escrow is reported as a warning string rather than failing the query. In-flight
+fills move value from escrow to the vault balance one-for-one, so the totals
+conserve. A nonzero difference between `expected` and `actual` signals drift in
+tracked state or custody and should be investigated. The query never blocks
+execution.
+
 ## State
 
 Manager state:
@@ -139,8 +180,8 @@ Vault state:
 
 - `Config`: designated owner, roles, CL8Y factory, timeout, and limits.
 - `VaultMode`: `Active`, `Paused`, or irreversible `Exit`.
-- `Bot`: pair, two assets, grid parameters, free balances, gas credit, shares,
-  active-order count, and pair batch limit.
+- `Bot`: pair and pinned pair code ID, two assets, grid parameters, free
+  balances, gas credit, shares, active-order count, and pair batch limit.
 - `Rung`: price and initial side.
 - `GridOrder`: pair-local ID key, rung, side, price, and last remaining escrow.
 - `PlacementPlan`: reply-scoped expected rungs and gross amounts.
@@ -159,6 +200,7 @@ Vault state:
 9. Exit is irreversible and keeps the owner recovery path available while normal
    maintenance is disabled.
 10. Repeated reconciliation cannot credit the same physical balance increase twice.
+11. Pair interactions require the deployed pair code ID to match the pinned ID.
 
 ## Migration From Pooled Custody
 
@@ -198,10 +240,11 @@ Migration must:
 2. Remove keeper-reported amounts and make reconciliation permissionless.
 3. Enforce observed-balance deposits and timed orders.
 4. Harden cancellation/claim replies and pair-query error classification.
-5. Add reviewed-token admission policy and code-ID/interface pinning.
+5. Add reviewed-token admission policy.
 6. Add multi-contract integration/property tests against the real CL8Y pair.
 7. Update the operator to discovery-only operation with durable monitoring.
 
-Items 1 through 3 are implemented in this workspace. Items 4 through 7 remain
-required before a production security review; this code is not declared mainnet
-ready.
+Items 1 through 3 and item 5's pair code/interface pinning are implemented in
+this workspace. Items 4, 6, and 7, plus reviewed-token admission and property
+tests for the liquid-plus-escrow invariant, remain required before a production
+security review; this code is not declared mainnet ready.

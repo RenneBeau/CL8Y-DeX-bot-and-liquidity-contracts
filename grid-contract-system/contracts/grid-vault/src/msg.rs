@@ -52,6 +52,10 @@ pub enum ExecuteMsg {
     UpdateKeeper {
         keeper: String,
     },
+    UpdatePairCode {
+        bot_id: u64,
+        code_id: u64,
+    },
     TransferAdmin {
         admin: String,
     },
@@ -187,6 +191,8 @@ pub enum QueryMsg {
     Orders { bot_id: u64 },
     #[returns(ShareResponse)]
     Shares { bot_id: u64, address: String },
+    #[returns(SolvencyResponse)]
+    Solvency { bot_id: u64 },
 }
 
 #[cw_serde]
@@ -218,6 +224,7 @@ pub struct BotResponse {
     pub bot_id: u64,
     pub owner: String,
     pub pair: String,
+    pub pair_code_id: u64,
     pub asset_tokens: [String; 2],
     pub lower_price: Decimal,
     pub upper_price: Decimal,
@@ -249,4 +256,13 @@ pub struct OrderResponse {
 #[cw_serde]
 pub struct ShareResponse {
     pub shares: Uint128,
+}
+
+#[cw_serde]
+pub struct SolvencyResponse {
+    pub token_0_expected: Uint128,
+    pub token_0_actual: Uint128,
+    pub token_1_expected: Uint128,
+    pub token_1_actual: Uint128,
+    pub warnings: Vec<String>,
 }
