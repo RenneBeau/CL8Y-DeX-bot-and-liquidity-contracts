@@ -103,14 +103,16 @@ Verdict: This is **by design, not a bug**. Finding retracted.
 
 ---
 
-### 2.4 MEDIUM — Keeper rebalance frontrunning
+### 2.4 ~~MEDIUM~~ (Removed — already mitigated by slippage bounds)
 
 **File:** `contracts/bot-vault/src/contract.rs:661`
-**Description:** `RebalancePlan` query is public. Anyone can observe the offer token, amount, min_return, and deadline. A MEV bot could front-run the keeper's swap transaction, manipulating the pool price before the keeper's swap executes. The `max_spread` and `execution_floor` (max_execution_deviation_bps) protect against worst-case slippage, but the keeper could receive worse execution than anticipated.
+**Description:** `RebalancePlan` query is public, but frontrunning is already fully mitigated:
+- `min_return` is computed **on-chain from TWAP**, not from keeper input.
+- `max_spread` is hard-capped at 10%.
+- Reply handler validates actual spend/output against the captured `PendingRebalance`.
+- A sandwich that pushes price beyond `min_return`, `max_spread`, or `max_execution_deviation_bps` causes the swap to revert.
 
-**Impact:** Economic loss for LP holders due to sandwich attacks.
-
-**Recommendation:** No on-chain mitigation without adding commit-reveal or a private mempool. Document as a known limitation and recommend MEV-aware keeper infrastructure (e.g., Flashbots, skip-protect).
+This is not a meaningful finding. Removed from issue tracker.
 
 ---
 
@@ -201,14 +203,13 @@ All enforced in `validate_risk_controls` and instantiation validation. Admin can
 
 ## 7. Summary
 
-2 findings (1 HIGH, 1 MEDIUM), 2 LOW, 1 INFO.
+1 finding (1 HIGH), 2 LOW, 1 INFO.
 
 | # | Severity | Description | Status |
 |---|----------|-------------|--------|
 | 2.1 | **HIGH** | Single-token withdrawal burns shares before swap — shares lost if swap fails | Open |
-| 2.4 | **MEDIUM** | Rebalance plan is public → frontrunning risk | Documented |
 | 2.5 | **LOW** | minimum_initial_deposit cannot be updated | Open |
 | 2.6 | **LOW** | TWAP window cannot be updated | Open |
-| 2.7 | **INFO** | One vault per proxy/pair | Documented |
+| 2.7 | **INFO** | One vault per pair per proxy (by design) | Documented |
 
 The highest-priority fix before mainnet is **2.1** (withdrawal share burn race). Consider `reply_always` for the pending-rebalance state in the vault contract as well.
