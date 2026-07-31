@@ -1,0 +1,40 @@
+name: LocalTerra E2E
+
+on:
+  schedule:
+    - cron: "41 3 * * 3"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  OPTIMIZER_IMAGE: cosmwasm/workspace-optimizer:0.16.1@sha256:b9c92b2900b7ebaab3499203615c1b8589592bc557355ed3432e48851ffde69e
+
+jobs:
+  localterra:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Run LocalTerra scenarios
+        run: |
+          mkdir -p evidence
+          timeout 50m make local-setup 2>&1 | tee evidence/setup.log
+          timeout 30m make local-e2e 2>&1 | tee evidence/e2e.log
+      - name: Collect container logs
+        if: always()
+        run: |
+          mkdir -p evidence/docker
+          docker ps -a --format '{{.ID}} {{.Names}} {{.Image}}' >evidence/docker/containers.txt
+          while read -r container; do
+            docker logs "$container" >"evidence/docker/$container.log" 2>&1 || true
+          done < <(docker ps -aq)
+      - name: Upload E2E evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: localterra-e2e-${{ github.run_id }}
+          path: evidence/
+          retention-days: 30
+          if-no-files-found: warn

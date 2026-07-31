@@ -1,0 +1,43 @@
+name: Reproducible Wasm
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  OPTIMIZER_IMAGE: cosmwasm/workspace-optimizer:0.16.1@sha256:b9c92b2900b7ebaab3499203615c1b8589592bc557355ed3432e48851ffde69e
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Build each workspace twice
+        run: |
+          mkdir -p evidence artifacts/release
+          SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)
+          export SOURCE_DATE_EPOCH
+          .github/scripts/reproducible-build.sh rebalancer-system artifacts/release 2>&1 | tee evidence/rebalancer-build.log
+          .github/scripts/reproducible-build.sh grid-contract-system artifacts/release 2>&1 | tee evidence/grid-build.log
+          (cd artifacts/release && sha256sum -- *.wasm | LC_ALL=C sort) | tee evidence/checksums.txt
+      - name: Upload optimized Wasm
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: optimized-wasm-${{ github.sha }}
+          path: artifacts/release/
+          retention-days: 30
+          if-no-files-found: warn
+      - name: Upload build evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: wasm-evidence-${{ github.run_id }}
+          path: evidence/
+          retention-days: 90
+          if-no-files-found: warn

@@ -1,0 +1,47 @@
+name: Dependency security
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_AUDIT_VERSION: 0.22.2
+  CARGO_DENY_VERSION: 0.20.2
+
+jobs:
+  audit-and-policy:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install pinned scanners
+        run: |
+          mkdir -p evidence
+          cargo +stable install cargo-audit --version "$CARGO_AUDIT_VERSION" --locked
+          cargo +stable install cargo-deny --version "$CARGO_DENY_VERSION" --locked
+          cargo +stable audit --version | tee evidence/cargo-audit-version.txt
+          cargo +stable deny --version | tee evidence/cargo-deny-version.txt
+      - name: Scan workspaces
+        run: |
+          mkdir -p evidence
+          status=0
+          for workspace in rebalancer-system grid-contract-system; do
+            cargo +stable audit --file "$workspace/Cargo.lock" --json >"evidence/$workspace-audit.json" || status=1
+            cargo +stable deny --manifest-path "$workspace/Cargo.toml" --all-features check \
+              2>&1 | tee "evidence/$workspace-deny.log" || status=1
+          done
+          exit "$status"
+      - name: Upload security evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dependency-security-${{ github.run_id }}
+          path: evidence/
+          retention-days: 90
+          if-no-files-found: warn

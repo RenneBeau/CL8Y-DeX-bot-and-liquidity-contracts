@@ -136,14 +136,14 @@ Verdict: This is **by design, not a bug**. Finding retracted.
 
 ---
 
-### 2.7 INFO — Proxy limits one vault per pair
+### 2.7 INFO — Proxy enforces one vault per pair (by design)
 
 **File:** `contracts/swap-proxy/src/contract.rs:68`
-**Description:** `PAIR_VAULTS` enforces a single vault per pair. New vaults cannot be registered without removing the old one.
+**Description:** `PAIR_VAULTS` enforces a single vault per CL8Y pair. This prevents two vaults from sharing the same pair through one proxy (avoiding conflicting orders). A single proxy can serve **many vaults**, each on a **different** pair.
 
-**Impact:** Prevents multiple bot vaults from sharing one proxy/pair combo. A separate proxy would be needed for each vault-pair combination.
+**Impact:** If you need two vaults trading the same pair, deploy a second proxy. This is by design.
 
-**Recommendation:** Document as a design choice. The `SwapProxy` is a shared routing contract — not every permutation needs cross-vault support.
+**Recommendation:** None needed. Documented as an intentional safety constraint.
 
 ---
 
