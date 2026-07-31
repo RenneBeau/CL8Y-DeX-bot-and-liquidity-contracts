@@ -11,6 +11,10 @@ Its optional duties are:
   `reconcile` calls containing only order IDs.
 - Detect parked/expired orders and prompt claims or owner exit.
 - Monitor pair pause, vault gas credit, order age, and transaction finality.
+- Run the read-only `solvency` query per vault and alert on expected/actual
+  liquid-plus-escrow drift or verification warnings.
+- Monitor `PairCodeMismatch` failures and pinned pair code ID changes, prompting
+  admin re-pinning only after independent verification.
 
 Payload:
 
