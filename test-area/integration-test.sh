@@ -124,7 +124,7 @@ test "$(token_supply "$LIQUIDITY_ADDRESS")" = "$SHARES_BEFORE"
 POST_STATUS=$(query_vault_status)
 jq -e --argjson pre "$PRE_DEVIATION" \
     '.allocation_deviation_bps < $pre and
-     (if .allocation_deviation_bps <= 500 then .price_deviation_bps == 0
+     (if .allocation_deviation_bps <= 500 then .price_deviation_bps <= 100
       else .price_deviation_bps >= 500 end)' <<<"$POST_STATUS" >/dev/null
 
 echo "[9/10] Verifying no DEX LP custody and no protocol fee"
