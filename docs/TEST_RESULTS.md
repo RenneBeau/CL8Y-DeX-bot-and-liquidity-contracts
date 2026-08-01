@@ -37,7 +37,38 @@ Result: PASS
 - Strict Clippy: passed with no warnings
 - Grid manager unit tests: 2 passed
 - Grid vault unit tests: 17 passed
+- Grid vault cw-multi-test integration tests: 8 passed
 - Keeper Python tests: 44 passed
+
+## Grid Vault cw-multi-test Integration
+
+Command:
+
+```sh
+cargo test --locked --manifest-path grid-contract-system/Cargo.toml --all-targets
+```
+
+Result: PASS
+
+Verified scenarios (mock factory, mock CL8Y pair with a full limit-order book,
+real cw20-base tokens, and a malicious CW20 that lies about its balance):
+
+1. Full lifecycle: deposit with auto-allocation, live reconcile against a
+   partially filled ask, cancel-all, withdrawal, and escrow reconciliation.
+2. Expired-limit-refund parking: an expired order parks its refund, dust
+   reconciles as a claim, and the refund is withdrawn.
+3. Pair pause blocks cancel, claim, and deposit placement until the pair
+   resumes, then reconciliation completes.
+4. A CW20 lying about its `Balance` is rejected on deposit via the
+   balance-delta check.
+5. A generic pair query error is treated as terminal (reconcile errors out)
+   without panicking the vault.
+6. Concurrent fills on a single order are credited exactly once on reconcile.
+7. Full manager flow: `CreateVault` from the grid manager, then deposit,
+   reconcile, cancel, and withdraw through the manager-owned vault.
+8. Conservation property: after a 200-step randomized walk (deposits,
+   withdraws, cancels, fills, expires, reconciles), each token's
+   `vault_balance + escrow_on_pair` equals the account's contribution.
 
 ## Optimized Wasm
 
