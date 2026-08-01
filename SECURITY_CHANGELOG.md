@@ -12,7 +12,7 @@ for the entries below.
 | `9daa295` | 2026-08-01 12:15:46 | rennebeau | Confirmation depth in both keepers; 8 files | Keeper and operator tests added; later source CI exists | Chain-specific finality assumptions remain operational |
 | `cc8b486` | 2026-08-01 12:20:48 | rennebeau | Bot-liquidity bootstrap minimum; contract/errors/docs | Contract tests added later; later source CI exists | Economic minimum remains deployment-specific |
 | `8806ee6` | 2026-08-01 12:43:55 | rennebeau | Grid parked-escrow solvency reporting; contract/message/docs | Unit coverage added; later source CI exists | Diagnostic inherited ambiguous active-query classification, corrected in current worktree |
-| Uncommitted issue #46 work | 2026-08-01 | OpenCode/user worktree | Bounded pair-first legacy vault inventory drain, empty rescan proof, stale-local cleanup and exact balance synchronization | Local invariant tests and release checks must pass before commit | Depends on pair API pinned from our fork (`RenneBeau/cl8y-dex-terraclassic` at `c1f669b06c98936005b665cf56d5540a33a49edd`); not deployable until the merged grid-workspace pin is verified and funded historical fixtures are rehearsed |
+| Uncommitted issue #46 work | 2026-08-01 | OpenCode/user worktree | Bounded pair-first legacy vault inventory drain, empty rescan proof, stale-local cleanup and exact balance synchronization | Local invariant tests and release checks must pass before commit | Depends on unmerged upstream PR #1; not deployable until a merged revision is pinned and funded historical fixtures are rehearsed |
 
 The commits were close in time and interacted with shared custody, keeper, and
 documentation surfaces. Observable evidence supports active remediation and later

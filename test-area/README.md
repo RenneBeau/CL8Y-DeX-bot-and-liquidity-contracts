@@ -1,8 +1,7 @@
 # LocalTerra Integration Area
 
 The harness pins CL8Y DEX revision
-`c1f669b06c98936005b665cf56d5540a33a49edd` (owner-inventory pair API branch of
-our fork `RenneBeau/cl8y-dex-terraclassic`), starts its official LocalTerra
+`fad801117fe54420d7529da04e485d67d511ef2c`, starts its official LocalTerra
 image, deploys the minimal EMBER/CORAL DEX, and then deploys the shared proxy,
 one isolated bot vault, and its CW20 bot-liquidity contract.
 The harness deploys the experimental grid manager and four one-owner,
@@ -46,6 +45,6 @@ The soak suite alternates price shocks and vault inventory rebalances. Every
 round verifies exact offer-token spending, unchanged bot LP supply, and the
 reply-based reference-price update.
 
-The pinned minimal deploy may fail in its optional indexer bootstrap
+The pinned upstream minimal deploy may fail in its optional indexer bootstrap
 after all DEX contracts are available. The setup accepts that post-deploy error
 only when the generated address file exists and the factory confirms the pool.

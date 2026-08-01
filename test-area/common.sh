@@ -2,8 +2,8 @@
 set -euo pipefail
 
 PROJECT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-DEX_REPO_URL="https://github.com/RenneBeau/cl8y-dex-terraclassic.git"
-DEX_REVISION="c1f669b06c98936005b665cf56d5540a33a49edd"
+DEX_REPO_URL="https://github.com/PlasticDigits/cl8y-dex-terraclassic.git"
+DEX_REVISION="fad801117fe54420d7529da04e485d67d511ef2c"
 DEX_DIR="${CL8Y_DEX_DIR:-$PROJECT_ROOT/test-area/.cache/cl8y-dex-terraclassic}"
 LOCAL_ENV="$PROJECT_ROOT/test-area/.env"
 COMPOSE_OVERRIDE="$PROJECT_ROOT/test-area/docker-compose.override.yml"

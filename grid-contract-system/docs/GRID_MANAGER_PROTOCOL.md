@@ -306,10 +306,9 @@ Migration must:
 
 Upgrade order is mandatory:
 
-1. Pin the pair API dependency from our fork
-   `RenneBeau/cl8y-dex-terraclassic` at
-   `c1f669b06c98936005b665cf56d5540a33a49edd` (owner-inventory branch
-   `fix/grid-owner-inventory`).
+1. Merge and pin the pair API dependency from
+   [PlasticDigits/cl8y-dex-terraclassic PR #1](https://github.com/PlasticDigits/cl8y-dex-terraclassic/pull/1)
+   (reviewed fork reference `c1f669b06c98936005b665cf56d5540a33a49edd`).
 2. Upgrade each pair and run its bounded owner-index backfill until protocol v1
    reports `owner_inventory_ready=true`. Do not migrate funded vaults before this.
 3. Verify the new pair runtime code ID, migrate the vault, and re-pin that code ID
@@ -351,5 +350,5 @@ quarantine, mocked multi-contract/property tests, signed LocalTerra scenarios,
 and the durable operator are implemented. Production readiness still requires
 adversarial validation against the production CL8Y runtime, an independent
 external audit, and staged testnet/limited-value rollout. The legacy inventory
-flow is not deployable until our fork pin is merged into the grid workspace and
-a funded historical-state fixture rehearsal completes successfully.
+flow is not deployable until upstream PR #1 is merged and pinned and a funded
+historical-state fixture rehearsal completes successfully.

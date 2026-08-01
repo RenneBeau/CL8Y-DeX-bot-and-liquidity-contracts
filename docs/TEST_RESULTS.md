@@ -10,7 +10,7 @@ definition is not proof that it ran, and source tests are not a security audit.
 - Repository baseline: `b1e943de8da888330d6c0c825b8d702ad03e8d48`
 - Reported security corrections: uncommitted working-tree changes after that baseline
 - Rust toolchain: `1.81.0`
-- CL8Y fixture revision: `c1f669b06c98936005b665cf56d5540a33a49edd` (our fork `RenneBeau/cl8y-dex-terraclassic`, owner-inventory branch)
+- CL8Y fixture revision: `fad801117fe54420d7529da04e485d67d511ef2c`
 
 No GitHub Actions run can yet represent the uncommitted working tree. After these
 changes are committed, all workflows must be rerun for that exact commit.
