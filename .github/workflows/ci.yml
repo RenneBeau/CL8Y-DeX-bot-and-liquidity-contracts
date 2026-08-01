@@ -53,6 +53,9 @@ jobs:
         run: |
           mkdir -p evidence
           python -m unittest discover -v -s rebalancer-system/examples/keeper -p 'test_*.py' 2>&1 | tee evidence/keeper.log
+      - name: Test grid operator
+        run: |
+          python -m unittest discover -v -s grid-contract-system/services/grid-operator/tests -p 'test_*.py' 2>&1 | tee evidence/grid-operator.log
       - name: Validate operator shell
         run: |
           for script in test-area/*.sh rebalancer-system/examples/keeper/*.sh; do

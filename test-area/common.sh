@@ -57,19 +57,38 @@ terrad_tx() {
 terrad_tx_from() {
     local signer="$1"
     shift
-    local container
+    local container attempt output err rc
     container=$(localterra_container)
-    docker exec "$container" terrad tx "$@" \
-        --from "$signer" \
-        --keyring-backend test \
-        --chain-id "$CHAIN_ID" \
-        --gas auto \
-        --gas-adjustment 1.4 \
-        --gas-prices 28.325uluna \
-        --node http://127.0.0.1:26657 \
-        --broadcast-mode sync \
-        --yes \
-        --output json
+    for attempt in $(seq 1 10); do
+        err=$(mktemp)
+        output=$(docker exec "$container" terrad tx "$@" \
+            --from "$signer" \
+            --keyring-backend test \
+            --chain-id "$CHAIN_ID" \
+            --gas auto \
+            --gas-adjustment 1.4 \
+            --gas-prices 28.325uluna \
+            --node http://127.0.0.1:26657 \
+            --broadcast-mode sync \
+            --yes \
+            --output json 2>"$err")
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            if ! grep -q "account sequence mismatch" "$err"; then
+                cat "$err" >&2
+                rm -f "$err"
+                return "$rc"
+            fi
+            rm -f "$err"
+            sleep 1
+            continue
+        fi
+        rm -f "$err"
+        printf '%s\n' "$output"
+        return 0
+    done
+    cat "$err" >&2
+    return 1
 }
 
 terrad_query() {

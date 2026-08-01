@@ -129,6 +129,24 @@ Verified scenarios:
 See [Grid Indexer Protocol](../grid-contract-system/docs/GRID_INDEXER.md) for
 indexed event aggregation and checkpoint requirements.
 
+## Grid Manager/Vault Integration
+
+Command:
+
+```sh
+make local-setup
+make local-grid
+```
+
+Result: PASS (manager/vault architecture)
+
+The 10-step signed suite redeploys the grid manager and four dedicated vaults,
+then verifies per-vault ownership and gas credit, deposit and automatic
+allocation, partial CL8Y fill, reconcile from pair state, cross-vault isolation,
+bounded cancellation and withdrawal, a second pair with the same keeper, and
+final pooled solvency. Deployment robustness now retries account sequence races
+(back-to-back broadcast-mode transactions) instead of failing the deploy.
+
 ## Extended Soak
 
 Command:

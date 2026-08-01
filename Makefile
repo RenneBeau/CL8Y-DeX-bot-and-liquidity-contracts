@@ -13,6 +13,7 @@ test:
 	cargo +$(RUST_TOOLCHAIN) fmt --manifest-path grid-contract-system/Cargo.toml --all -- --check
 	cargo +$(RUST_TOOLCHAIN) test --locked --manifest-path grid-contract-system/Cargo.toml --all-targets
 	python3 -m unittest discover -s rebalancer-system/examples/keeper -p 'test_*.py'
+	python3 -m unittest discover -s grid-contract-system/services/grid-operator/tests -p 'test_*.py'
 
 clippy:
 	cargo +$(RUST_TOOLCHAIN) clippy --locked --manifest-path rebalancer-system/Cargo.toml --all-targets -- -D warnings

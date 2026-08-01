@@ -5,7 +5,7 @@ input amount, output amount, fill count, price, or recipient.
 
 Its optional duties are:
 
-- Discover vaults from manager `register_grid_vault` events.
+- Discover vaults from the `GRID_VAULTS` list and manager `create_vault` events.
 - Discover order IDs from vault placement events and `orders` queries.
 - Detect changes to active remaining escrow and submit bounded permissionless
   `reconcile` calls containing only order IDs.
