@@ -2,9 +2,10 @@
 
 ## 1. Build The Shared Types
 
-Start in `packages/bot-types`. Define the instantiate, execute, query, and reply
-messages shared by the three contracts. Keep pair addresses, keeper authority,
-and token denominations explicit so every vault can be validated independently.
+Start in `packages/bot-types`. Define cross-contract wire types such as vault
+queries/execution, swap parameters, proxy hooks, and withdrawal modes. Each
+contract retains its own complete instantiate/execute/query schema. Keep pair
+addresses, keeper authority, and token denominations explicit.
 
 ## 2. Implement The Swap Proxy
 

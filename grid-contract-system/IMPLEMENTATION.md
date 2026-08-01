@@ -6,7 +6,7 @@
 - One designated owner and one bot per vault address.
 - Factory registration of vault addresses by owner.
 - Pair/factory validation and pair-owned maker verification.
-- Pair code-ID pinning at bot creation and validation before every pair
+- Pair code-ID pinning at bot creation and validation before every mutating pair
   interaction, with an admin re-pin message after verified migrations.
 - Read-only liquid-plus-escrow `solvency` query that reports drift and
   verification warnings without blocking execution.
@@ -16,18 +16,18 @@
 - Pair-level expiry on every newly placed order.
 - Irreversible owner exit and physical-balance emergency withdrawal.
 - Bounded reconciliation, cancellation, and expired-refund claims.
+- Reply-confirmed cancellation and parked-refund claims with per-page rollback.
+- Fail-closed pair-token admission plus admin allowlist and quarantine controls.
+- `cw-multi-test` lifecycle, malicious-token, pause, concurrent-fill, parked
+  refund, isolation, exact-accounting, and randomized conservation coverage.
+- Manager-created vault deployment and a durable production grid operator.
 
 ## Required Before Production
 
-1. Replace optimistic cancellation/claim accounting with dedicated reply state so
-   every state transition is confirmed independently.
-2. Add an on-chain reviewed-token allowlist and operational quarantine process.
-3. Add `cw-multi-test` and real CL8Y integration tests for concurrent fills,
-   parking, pair pause, query failures, and malicious CW20s.
-4. Add property tests for liquid-plus-escrow conservation per vault (the
-   `solvency` query is the runtime monitor for this invariant).
-5. Update deployment scripts and operator payloads for manager-created vaults.
-6. Complete external audit and staged testnet/limited-value rollout.
+1. Complete adversarial testing against the production CL8Y pair/runtime,
+   including chain upgrades, fee policy, archive-provider failure, and load.
+2. Complete an independent external audit.
+3. Perform a staged testnet and limited-value rollout with monitored limits.
 
 The complete lifecycle, threat model, invariants, migration plan, and external
 pair limitations are in [the protocol](docs/GRID_MANAGER_PROTOCOL.md).

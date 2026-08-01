@@ -17,6 +17,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
+StateDirectory=grid-operator
 ReadWritePaths=/var/lib/grid-operator
 
 [Install]

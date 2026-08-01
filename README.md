@@ -16,9 +16,10 @@ CL8Y fee tier.
 ### Grid
 
 [`grid-contract-system`](grid-contract-system/README.md) is the experimental
-multi-user limit-order grid system. It runs on standard CL8Y pairs and uses one
-trusted indexer and one dedicated trusted keeper to reconcile fills for every
-managed bot.
+one-owner, one-bot-per-vault limit-order grid system. It runs on standard CL8Y
+pairs. Reconciliation is permissionless and derives amounts on-chain; the
+indexer/operator is optional automation, and only its configured keeper address
+is eligible for useful-reconciliation reimbursement.
 
 ## Verification
 

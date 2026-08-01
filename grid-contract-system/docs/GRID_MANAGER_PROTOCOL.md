@@ -44,17 +44,17 @@ The design does not protect against:
 
 At first bot creation, a previously unconfigured vault enables its token policy
 and atomically allowlists only the two assets returned by the factory-verified
-pair. The admin may add operational tokens such as CL8Y later. Once enabled, an
-empty allowlist denies every token; removing the final entry never reopens the
-policy.
+pair. The allowlist governs pair admission at bot creation; removing an entry
+does not disable an existing bot. Runtime deposits and allocation remain limited
+to the bot's pair assets, and quarantine is the runtime disable control.
 
 ## Roles And Trust
 
 - `owner`: controls deposits, allocation, cancellation, exit, and recipients.
 - `keeper`: optional reimbursed operator. It has no exclusive reconciliation
   authority and supplies no accounting amounts.
-- `admin`: configures the factory/vault fleet and pause state. It cannot withdraw
-  vault CW20 balances.
+- `admin`: configures the manager template and each vault's administrative
+  controls. It cannot withdraw vault CW20 balances.
 - `indexer`: optional availability and discovery service. Its data is advisory.
 - `CL8Y pair`: trusted to enforce maker ownership and transfer correct fills and
   refunds. This is the unavoidable external custody dependency.
@@ -67,11 +67,16 @@ limits, and `order_timeout_seconds`. `create_vault` instantiates a vault with th
 caller as its designated owner and Wasm migration admin. The owner then creates the sole bot and prepays
 its native gas reserve.
 
+Manager configuration is a creation-time template. Updating the manager keeper
+or vault code ID affects only subsequently created vaults; existing vaults retain
+independent admin, keeper, and pinned-code state and must be updated separately.
+
 The vault admits only a factory-registered CL8Y CW20/CW20 pair with distinct
 assets, equal decimals, nonzero reserves, compatible batch limits, valid price
 bounds, and at least one bid and ask rung. At bot creation it pins the pair's
-`contract_info.code_id`; every later pair interaction re-queries the code ID and
-rejects a mismatch.
+`contract_info.code_id`; every later mutating pair interaction re-queries the
+code ID and rejects a mismatch. Monitoring should compare the reported pinned
+ID independently before trusting read-only pair-derived diagnostics.
 
 ## Lifecycle
 
@@ -81,6 +86,10 @@ Only the designated bot owner may use the CW20 `deposit` hook. During the callba
 the vault queries its own CW20 balance. The observed liquid balance must equal the
 previous free balance plus the callback amount; otherwise the transaction rejects
 the token behavior. Accepted assets are divided over the applicable initial rungs.
+
+Unsolicited pair-token transfers are not deposits and mint no shares. The owner
+can explicitly credit physical excess with `{"sync_balances":{"bot_id":1}}`;
+this changes free accounting only and places no orders.
 
 ### Order Creation
 
@@ -171,10 +180,12 @@ refund. Owner, order ID, side, immutable price (when active), and nonincreasing
 remaining amount are validated before custody is counted. The response reports
 `active_escrow_orders`, `parked_refund_orders`, `terminal_orders`, and
 `unverifiable_orders`; invalid or unqueryable escrow also produces a warning.
-In-flight fills move value from escrow to the vault balance one-for-one, so the
-totals conserve. A nonzero difference between `expected` and `actual` signals
-drift in tracked state or custody and should be investigated. The query never
-blocks execution.
+Fills consume one token's escrow and credit the opposite token's liquid balance.
+This query is therefore a custody/reconciliation diagnostic, not a same-token
+profit invariant: equality is expected after complete reconciliation, while a
+difference can represent an unreconciled fill, terminal row, invalid escrow, or
+actual custody drift. Warnings and escrow-state categories distinguish these
+cases. The query never blocks execution.
 
 ## State
 
@@ -233,8 +244,9 @@ Migration must:
 ## Failure And Recovery
 
 - Keeper unavailable: owner or any third party reconciles; owner cancels/exits.
-- Indexer database lost: rediscover tracked IDs from vault queries; no fill amounts
-  or historical records are needed for accounting or exit.
+- Indexer database lost: on-chain accounting and owner exit need no fill history,
+  but the included operator must archive-rescan from deployment height to rebuild
+  its automated event queue.
 - Partial fill before cancellation: permissionless reconciliation updates current
   escrow and observed proceeds, then cancellation can retry.
 - Pair paused: retain order records and retry after governance restores pair
@@ -244,17 +256,11 @@ Migration must:
 - Vault-specific accounting failure: only that vault is affected; no other vault's
   address, orders, or balances can subsidize it.
 
-## Implementation Priority
+## Production Status
 
-1. Address-level custody split and non-custodial factory.
-2. Remove keeper-reported amounts and make reconciliation permissionless.
-3. Enforce observed-balance deposits and timed orders.
-4. Harden cancellation/claim replies and pair-query error classification.
-5. Add reviewed-token admission policy.
-6. Add multi-contract integration/property tests against the real CL8Y pair.
-7. Update the operator to discovery-only operation with durable monitoring.
-
-Items 1 through 3 and item 5's pair code/interface pinning are implemented in
-this workspace. Items 4, 6, and 7, plus reviewed-token admission and property
-tests for the liquid-plus-escrow invariant, remain required before a production
-security review; this code is not declared mainnet ready.
+Address-level custody, permissionless amount-free reconciliation, observed
+balance accounting, timed orders, reply-confirmed pages, token admission and
+quarantine, mocked multi-contract/property tests, signed LocalTerra scenarios,
+and the durable operator are implemented. Production readiness still requires
+adversarial validation against the production CL8Y runtime, an independent
+external audit, and staged testnet/limited-value rollout.

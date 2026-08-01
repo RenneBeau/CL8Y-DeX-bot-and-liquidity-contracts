@@ -4,7 +4,8 @@ The harness pins CL8Y DEX revision
 `fad801117fe54420d7529da04e485d67d511ef2c`, starts its official LocalTerra
 image, deploys the minimal EMBER/CORAL DEX, and then deploys the shared proxy,
 one isolated bot vault, and its CW20 bot-liquidity contract.
-The harness deploys the experimental multi-user grid manager against the
+The harness deploys the experimental grid manager and four one-owner,
+one-bot-per-vault instances against the
 unchanged pinned CL8Y pairs. The upstream `wallet` seed supplies
 `EMBER/CORAL`, `LUNC-C/EMBER`, and `USTC-C/CORAL`; grid E2E uses the first two.
 LocalTerra uses a dedicated `gridkeeper` key; rebalance operations continue to
@@ -26,6 +27,11 @@ make local-all    # one deploy followed by E2E and soak suites
 make local-stop   # stop services while retaining state
 make local-reset  # delete local chain and database state
 ```
+
+`local-reset` retains the managed source checkout and Docker optimizer caches.
+Remove those separately only when intentionally forcing a cold rebuild. Signed
+E2E sets confirmation depth to zero for runtime speed; shallow-reorg and nonzero
+confirmation behavior is covered by keeper/operator unit tests.
 
 Use `SOAK_ROUNDS=100 make local-soak` for an extended run.
 

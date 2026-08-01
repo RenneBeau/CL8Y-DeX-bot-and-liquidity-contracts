@@ -279,6 +279,13 @@ for owner_bot in \
     execute_grid_from "$signer" "$manager" "$withdraw" >/dev/null
     test "$(query_grid "$manager" \
         "{\"shares\":{\"bot_id\":$bot_id,\"address\":\"$owner_address\"}}" | jq -r '.shares')" = "0"
+    solvency=$(query_grid "$manager" "{\"solvency\":{\"bot_id\":$bot_id}}")
+    jq -e '
+      .token_0_expected == .token_0_actual and
+      .token_1_expected == .token_1_actual and
+      .unverifiable_orders == 0 and
+      (.warnings | length) == 0
+    ' <<<"$solvency" >/dev/null
 done
 
 echo "Grid-manager signed integration suite passed."

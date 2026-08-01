@@ -17,7 +17,7 @@ Manager example:
 ```json
 {
   "admin":"<MULTISIG>",
-  "keeper":"<OPTIONAL_KEEPER>",
+  "keeper":"<REIMBURSED_KEEPER_ADDRESS>",
   "dex_factory":"<CL8Y_FACTORY>",
   "vault_code_id":123,
   "gas_denom":"uluna",
@@ -30,6 +30,12 @@ Manager example:
 }
 ```
 
+The keeper address is required, but reconciliation remains permissionless; only
+that configured address receives reimbursement. Hard ranges are
+`max_grid_count: 2..=100`, `max_orders_per_reconcile: 1..=100`, and
+`max_active_orders_per_vault: max_grid_count..=500`. Keeper reward and order
+timeout must be nonzero.
+
 ## Maintenance
 
 Reconciliation is permissionless:
@@ -40,6 +46,13 @@ Reconciliation is permissionless:
 
 No off-chain amounts are accepted. After reconciliation, the owner may call
 `{"allocate":{"bot_id":1}}` to place verified free proceeds.
+
+If unsolicited pair-token transfers make physical balances exceed accounting,
+the owner can credit them without minting shares or placing orders:
+
+```json
+{"sync_balances":{"bot_id":1}}
+```
 
 If a CL8Y pair is migrated to new code after an approved upgrade, the vault
 aborts pair interactions until the admin re-pins the verified code ID:
@@ -75,12 +88,16 @@ retry after pair health is restored.
 - Vault creation and fee-tier registration.
 - Oldest active order versus configured timeout.
 - Pair pause, blacklist, and code migration state.
-- `solvency` per vault: `expected` versus `actual` liquid-plus-escrow totals and
-  any verification warnings.
+- `solvency` per vault after reconciliation: `expected` versus `actual`
+  liquid-plus-escrow totals, escrow-state categories, and warnings. Before
+  reconciliation, opposite-token fill conversion can legitimately create drift.
 - Vault gas credit and active-order count.
 - CW20 balance-delta mismatch errors.
 - Reconciliation/cancellation query errors and unresolved exits.
 - Manager/vault admin and code-ID changes.
 
-Do not deploy arbitrary CW20 assets. Exact-transfer, non-rebasing behavior and
-honest balance queries are mandatory until an explicit token allowlist is added.
+Do not deploy arbitrary CW20 assets. First bot creation enables a fail-closed
+policy and admits only its factory-verified pair tokens. Admin allowlist changes
+govern future pair admission; quarantine is the runtime disable control for an
+existing bot. Exact-transfer, non-rebasing behavior and honest balance queries
+remain mandatory.

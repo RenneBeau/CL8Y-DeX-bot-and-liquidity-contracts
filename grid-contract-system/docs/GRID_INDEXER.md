@@ -3,18 +3,17 @@
 The indexer is no longer an accounting authority. Contracts never accept its
 input amount, output amount, fill count, price, or recipient.
 
-Its optional duties are:
+The included operator currently:
 
-- Discover vaults from the `GRID_VAULTS` list and manager `create_vault` events.
-- Discover order IDs from vault placement events and `orders` queries.
-- Detect changes to active remaining escrow and submit bounded permissionless
-  `reconcile` calls containing only order IDs.
-- Detect parked/expired orders and prompt claims or owner exit.
-- Monitor pair pause, vault gas credit, order age, and transaction finality.
-- Run the read-only `solvency` query per vault and alert on expected/actual
-  liquid-plus-escrow drift or verification warnings.
-- Monitor `PairCodeMismatch` failures and pinned pair code ID changes, prompting
-  admin re-pinning only after independent verification.
+- Registers vaults listed in `GRID_VAULTS` and refreshes their current order IDs.
+- Scans archive Tendermint blocks for authenticated pair fill events.
+- Freezes bounded, durable order-ID batches and submits permissionless
+  `reconcile` calls through one fail-closed signing key.
+- Persists reorg/finality checkpoints, signed attempts, and confirmation cursors.
+
+Manager-event discovery, parked-order prompting, solvency/pause/gas/order-age
+alerts, and pair-code migration alerts are operator responsibilities not yet
+automated by this service.
 
 Payload:
 
@@ -22,10 +21,11 @@ Payload:
 {"reconcile":{"bot_id":1,"order_ids":[77,78]}}
 ```
 
-Durable persistence, reorg handling, finality checkpoints, and event deduplication
-remain operationally useful, but database loss cannot create an accounting loss.
-The service can rebuild current work from manager/vault state and active pair
-queries. Historical fill events are optional analytics only.
+Database loss cannot create an on-chain accounting loss or block owner recovery.
+However, this service currently builds reconciliation batches from stored fill
+events, so rebuilding its automated queue requires an archive rescan from
+`GRID_DEPLOYMENT_HEIGHT`; current vault/order discovery alone does not recreate
+past batches.
 
 The configured keeper receives reimbursement only for a useful reconciliation.
 Any other address can perform the same state transition without reimbursement,

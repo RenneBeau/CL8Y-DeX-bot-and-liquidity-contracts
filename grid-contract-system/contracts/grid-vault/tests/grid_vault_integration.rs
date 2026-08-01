@@ -1024,7 +1024,7 @@ fn full_lifecycle_with_fill_reconcile_cancel_withdraw() {
 }
 
 #[test]
-fn independent_bots_realize_exact_round_trip_spread_profit() {
+fn independent_vaults_account_exact_fixture_round_trip_outputs() {
     fn run_round_trip(h: &mut Harness, sold_base: Uint128) -> Uint128 {
         h.create_bot();
         h.deposit(1, &h.token_0.clone(), Uint128::new(1_000));

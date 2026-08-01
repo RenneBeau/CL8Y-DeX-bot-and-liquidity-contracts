@@ -77,7 +77,7 @@ pub fn instantiate(
         .unwrap_or(DEFAULT_ALLOCATION_TOLERANCE_BPS);
     validate_threshold(rebalance_threshold_bps)?;
     validate_allocation_tolerance(allocation_tolerance_bps)?;
-    if msg.twap_window_seconds == 0 {
+    if !valid_twap_window(msg.twap_window_seconds) {
         return Err(ContractError::InvalidTwapWindow);
     }
     let max_trade_bps = msg.max_trade_bps.unwrap_or(DEFAULT_MAX_TRADE_BPS);
@@ -416,7 +416,7 @@ fn execute_update_thresholds(
         config.allocation_tolerance_bps = value;
     }
     if let Some(value) = twap_window_seconds {
-        if value == 0 || value > MAX_TWAP_WINDOW_SECONDS {
+        if !valid_twap_window(value) {
             return Err(ContractError::InvalidTwapWindow);
         }
         let mut proposed = config.clone();
@@ -755,6 +755,10 @@ fn validate_threshold(value: u16) -> Result<(), ContractError> {
     Ok(())
 }
 
+fn valid_twap_window(value: u32) -> bool {
+    (1..=MAX_TWAP_WINDOW_SECONDS).contains(&value)
+}
+
 fn validate_allocation_tolerance(value: u16) -> Result<(), ContractError> {
     if value == 0 || value > MAX_ALLOCATION_TOLERANCE_BPS {
         return Err(ContractError::InvalidThreshold);
@@ -843,6 +847,9 @@ mod tests {
     fn thresholds_are_bounded() {
         assert_eq!(validate_threshold(0), Err(ContractError::InvalidThreshold));
         assert!(validate_threshold(500).is_ok());
+        assert!(!valid_twap_window(0));
+        assert!(valid_twap_window(MAX_TWAP_WINDOW_SECONDS));
+        assert!(!valid_twap_window(MAX_TWAP_WINDOW_SECONDS + 1));
         assert_eq!(
             validate_threshold(10_001),
             Err(ContractError::InvalidThreshold)

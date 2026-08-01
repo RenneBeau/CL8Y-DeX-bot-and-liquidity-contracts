@@ -42,17 +42,17 @@ Scope: `bot-vault`, `bot-liquidity`, `swap-proxy`, `bot-types`, `cl8y-dex`
 
 ---
 
-### 2.2 MEDIUM — No emergency withdrawal mechanism
+### 2.2 MEDIUM — No admin migration or emergency-drain mechanism
 
 **Files:** `contracts/bot-vault/src/contract.rs`, `contracts/bot-vault/src/state.rs`
-**Description:** The vault holds all deposited tokens directly. If the keeper goes offline or becomes malicious, the admin can replace the keeper but there is no `WithdrawAll`, `EmergencyExit`, or `Migrate` function for the admin. The vault assets are only accessible via:
+**Description:** The vault holds deposited tokens directly. The admin can replace a keeper but cannot force-migrate or drain LP custody to a replacement vault. Assets remain accessible through:
 1. The liquidity contract (`TransferTo` is permissioned to liquidity contract)
 2. The keeper rebalance flow (swaps via the proxy)
 3. The reference sync (keeper only)
 
-**Impact:** If the keeper disappears AND the admin cannot find a replacement, vault funds are stuck indefinitely.
+**Impact:** Keeper loss stops automated rebalancing but does not block normal LP redemption: pro-rata and single-token withdrawals are initiated through the liquidity contract and are keeper-independent. The limitation matters when governance needs to migrate the entire vault fleet during an incident.
 
-**Recommendation:** Add an admin-gated `WithdrawAll` that returns proportionally to LP holders, or implement a migration pattern where the admin can drain to a new vault.
+**Recommendation:** Prefer an audited LP-controlled migration design rather than an unrestricted admin drain. Until then, treat redeployment and user redemption as the incident path.
 
 ---
 
@@ -108,13 +108,16 @@ Verdict: This is **by design, not a bug**. Finding retracted.
 ### 2.4 ~~MEDIUM~~ (Removed — already mitigated by slippage bounds)
 
 **File:** `contracts/bot-vault/src/contract.rs:661`
-**Description:** `RebalancePlan` query is public, but frontrunning is already fully mitigated:
+**Description:** `RebalancePlan` is public. Adverse execution is bounded, not eliminated:
 - `min_return` is computed **on-chain from TWAP**, not from keeper input.
 - `max_spread` is hard-capped at 10%.
 - Reply handler validates actual spend/output against the captured `PendingRebalance`.
 - A sandwich that pushes price beyond `min_return`, `max_spread`, or `max_execution_deviation_bps` causes the swap to revert.
 
-This is not a meaningful finding. Removed from issue tracker.
+Execution can still move adversely within configured limits. The accepted threat
+model bounds damage through TWAP-derived minimum return, spread, pool-depth,
+execution-deviation, and post-settlement checks. Removed from issue tracker as
+an accepted bounded market-execution risk.
 
 ---
 
@@ -127,7 +130,7 @@ This is not a meaningful finding. Removed from issue tracker.
 
 **Recommendation:** Add an admin `UpdateConfig` message.
 
-**Resolution:** Added an `admin` field to the liquidity contract config and an admin-gated `UpdateConfig { minimum_initial_deposit }` message in `contracts/bot-liquidity`. The deploy script passes the admin at instantiation.
+**Resolution:** Added an `admin` field and admin-gated `UpdateConfig { minimum_initial_deposit }`. The value must exceed the permanently locked 1,000 shares and can change only before the first mint; post-bootstrap updates are rejected as ineffective.
 
 ---
 
@@ -140,7 +143,7 @@ This is not a meaningful finding. Removed from issue tracker.
 
 **Recommendation:** Add an admin update function.
 
-**Resolution:** Added `twap_window_seconds` to the existing admin-gated `UpdateThresholds` message in `contracts/bot-vault`, validated to be greater than zero.
+**Resolution:** Added `twap_window_seconds` to the existing admin-gated `UpdateThresholds` message in `contracts/bot-vault`. Instantiate and updates enforce `1..=86,400`; updates query the complete proposed history and atomically reset the reference to the validated new-window TWAP.
 
 ---
 
@@ -159,11 +162,11 @@ This is not a meaningful finding. Removed from issue tracker.
 
 | Metric | Status |
 |--------|--------|
-| All tests pass | ✅ (14 Rust unit, 44 Python keeper, 10-step e2e) |
+| All tests pass | Yes (20 Rust, 48 Python keeper, 10-step rebalancer E2E) |
 | Clippy (-D warnings) | ✅ |
 | Formatting (cargo fmt --check) | ✅ |
 | Logical overflow protection | ✅ (`overflow-checks=true` in release profile) |
-| Test coverage | Moderate — cw-multi-test integration not yet present |
+| Test coverage | Unit plus signed LocalTerra integration; independent external review remains required |
 | Unused code | One `use` removed in prior commit |
 | Panic paths | `unwrap()` only in tests; production code uses `?` |
 | Decimal precision | All prices in 18-decimal `Decimal` |
@@ -191,7 +194,9 @@ All enforced in `validate_risk_controls` and instantiation validation. Admin can
 - **No keeper-reported input/output:** `execute_rebalance` accepts only `deadline`. Offer/amount/min_return computed in `rebalance_plan`.
 - **Settlement verified:** `validate_settlement` checks exact offer spend and minimum return. `validate_rebalance_outcome` ensures allocation improved.
 - **Reference cannot walk:** Updated only if `within_tolerance` (allocation ≤ tolerance after rebalance). Partial improvement leaves old reference intact.
-- **No dead rebalance state:** `PENDING_REBALANCE` is always cleared on reply (success or error doesn't fire for `reply_on_success`, but a failed reply doesn't clear). **Risk**: if the submessage fails (e.g., swap reverts), `reply_on_success` never fires and the vault is stuck with a pending rebalance. The keeper could call `execute_rebalance` only after the failed pending expires, but `RebalancePending` check prevents new rebalances. **Mitigation**: Use `reply_always` instead of `reply_on_success`, or add a admin-clear for stuck pending state.
+- **No dead rebalance state:** the swap uses `reply_on_success`; if the submessage
+  fails, CosmWasm rolls back the complete transaction, including the pending
+  write. A successful submessage invokes reply and clears pending state.
 
 ---
 
@@ -214,8 +219,10 @@ All enforced in `validate_risk_controls` and instantiation validation. Admin can
 | # | Severity | Description | Status |
 |---|----------|-------------|--------|
 | 2.1 | **HIGH** | Single-token withdrawal burns shares before swap — shares lost if swap fails | Fixed |
+| 2.2 | **MEDIUM** | No admin fleet-migration path; LP withdrawals remain available | Accepted operational limitation |
 | 2.5 | **LOW** | minimum_initial_deposit cannot be updated | Fixed |
 | 2.6 | **LOW** | TWAP window cannot be updated | Fixed |
 | 2.7 | **INFO** | One vault per pair per proxy (by design) | Documented |
 
-The highest-priority fix before mainnet is **2.1** (withdrawal share burn race). Consider `reply_always` for the pending-rebalance state in the vault contract as well.
+The recorded findings are fixed, but independent audit and mainnet-equivalent
+oracle/liquidity validation remain required before economic deployment.

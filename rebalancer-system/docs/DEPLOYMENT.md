@@ -34,7 +34,7 @@ docker run --rm \
   -v "$PWD:/code" \
   --mount type=volume,source=cl8y_bot_target_cache,target=/code/target \
   --mount type=volume,source=registry_cache,target=/usr/local/cargo/registry \
-  cosmwasm/workspace-optimizer:0.16.1
+  cosmwasm/workspace-optimizer:0.16.1@sha256:b9c92b2900b7ebaab3499203615c1b8589592bc557355ed3432e48851ffde69e
 ```
 
 The Wasm files are written to `artifacts/`. Upload each one with `terrad` and
