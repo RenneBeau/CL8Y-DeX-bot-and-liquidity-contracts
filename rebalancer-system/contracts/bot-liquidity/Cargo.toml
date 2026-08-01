@@ -11,7 +11,7 @@ crate-type = ["cdylib", "rlib"]
 library = []
 
 [dependencies]
-bot-types = { path = "../../packages/bot-types" }
+bot-types = { path = "../../packages/bot-types", version = "0.1.0" }
 base64ct.workspace = true
 cosmwasm-schema.workspace = true
 cosmwasm-std.workspace = true

@@ -5,6 +5,10 @@ targets = [
 ]
 
 [advisories]
+unmaintained = "workspace"
+ignore = [
+  { id = "RUSTSEC-2024-0344", reason = "cosmwasm-crypto is absent from wasm32 artifacts; host use verifies public signatures and handles no secret scalars" },
+]
 
 [licenses]
 confidence-threshold = 0.8

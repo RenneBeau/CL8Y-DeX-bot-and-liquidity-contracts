@@ -21,3 +21,9 @@ Key deployment requirements:
 - Use a dedicated grid keeper key separate from rebalance keeper keys.
 - Support for unrelated grid depositors requires live NAV share accounting.
 - Independently audit the experimental grid manager before economic deployment.
+
+Dependency scanning ignores `RUSTSEC-2024-0344` only for the pinned CosmWasm
+1.5 host dependency. `curve25519-dalek` is absent from the
+`wasm32-unknown-unknown` contract graph, and the host path verifies public
+signatures without handling secret scalars. Reassess and remove this exception
+when upgrading the CosmWasm dependency family.

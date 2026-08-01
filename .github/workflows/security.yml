@@ -12,8 +12,8 @@ permissions:
   contents: read
 
 env:
-  CARGO_AUDIT_VERSION: 0.22.2
-  CARGO_DENY_VERSION: 0.20.2
+  RUSTSEC_REV: 3889e79597f5a8f42b6b8c2fe2db521d0f255991
+  CARGO_DENY_REV: bca0dde53651ee946720e4540b5ce2610bec8f06
 
 jobs:
   audit-and-policy:
@@ -23,8 +23,9 @@ jobs:
       - name: Install pinned scanners
         run: |
           mkdir -p evidence
-          cargo +stable install cargo-audit --version "$CARGO_AUDIT_VERSION" --locked
-          cargo +stable install cargo-deny --version "$CARGO_DENY_VERSION" --locked
+          .github/scripts/install-security-tools.sh
+          echo "$RUSTSEC_REV" | tee evidence/rustsec-revision.txt
+          echo "$CARGO_DENY_REV" | tee evidence/cargo-deny-revision.txt
           cargo +stable audit --version | tee evidence/cargo-audit-version.txt
           cargo +stable deny --version | tee evidence/cargo-deny-version.txt
       - name: Scan workspaces
@@ -32,7 +33,8 @@ jobs:
           mkdir -p evidence
           status=0
           for workspace in rebalancer-system grid-contract-system; do
-            cargo +stable audit --file "$workspace/Cargo.lock" --json >"evidence/$workspace-audit.json" || status=1
+            cargo +stable audit --file "$workspace/Cargo.lock" --ignore RUSTSEC-2024-0344 \
+              --json >"evidence/$workspace-audit.json" || status=1
             cargo +stable deny --manifest-path "$workspace/Cargo.toml" --all-features check \
               2>&1 | tee "evidence/$workspace-deny.log" || status=1
           done

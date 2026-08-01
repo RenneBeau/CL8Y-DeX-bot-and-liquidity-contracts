@@ -1,7 +1,5 @@
 RUST_TOOLCHAIN := 1.81.0
 OPTIMIZER_IMAGE := cosmwasm/workspace-optimizer:0.16.1@sha256:b9c92b2900b7ebaab3499203615c1b8589592bc557355ed3432e48851ffde69e
-CARGO_AUDIT_VERSION := 0.22.2
-CARGO_DENY_VERSION := 0.20.2
 
 .PHONY: ci test clippy security optimize reproducible test-keeper local-setup local-test local-grid local-e2e local-soak local-all local-stop local-reset
 
@@ -20,10 +18,9 @@ clippy:
 	cargo +$(RUST_TOOLCHAIN) clippy --locked --manifest-path grid-contract-system/Cargo.toml --all-targets -- -D warnings
 
 security:
-	cargo +stable install cargo-audit --version $(CARGO_AUDIT_VERSION) --locked
-	cargo +stable install cargo-deny --version $(CARGO_DENY_VERSION) --locked
-	cargo +stable audit --file rebalancer-system/Cargo.lock
-	cargo +stable audit --file grid-contract-system/Cargo.lock
+	.github/scripts/install-security-tools.sh
+	cargo +stable audit --file rebalancer-system/Cargo.lock --ignore RUSTSEC-2024-0344
+	cargo +stable audit --file grid-contract-system/Cargo.lock --ignore RUSTSEC-2024-0344
 	cargo +stable deny --manifest-path rebalancer-system/Cargo.toml --all-features check
 	cargo +stable deny --manifest-path grid-contract-system/Cargo.toml --all-features check
 
