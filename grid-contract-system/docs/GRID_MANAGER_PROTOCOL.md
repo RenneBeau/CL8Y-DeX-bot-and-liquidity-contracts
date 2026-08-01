@@ -119,11 +119,18 @@ query interface.
 
 ### Terminal And Parked Orders
 
-If the active query is absent, the vault queries `expired_limit_refund`. A valid
-owned refund is credited and claimed atomically. If neither active nor parked
-state exists, the local record is terminal and removed; any maker output is still
-credited only from the vault's physical balance. Historical fill events are not
-required.
+If the active query fails, the vault queries `expired_limit_refund`. A valid owned
+refund is claimed through a reply-confirmed page. `Err + None` is indeterminate,
+not terminal: the transaction returns `OrderStatusUnverifiable`, preserves the
+local row and counter, and must be retried. A zero-remaining active response is a
+positive completion proof and may retire the row. The current pair API cannot
+otherwise distinguish genuine absence from contract/query/schema failure.
+
+An owner can submit `recover_order` with a known pair order ID and rung. The vault
+adopts it only after positively verifying active ownership, side, price and
+remaining amount, or positively verifying an owned parked refund. It cannot be
+used to declare an order terminal. This recovers known IDs from placement records,
+but does not prove that the owner supplied a complete inventory.
 
 ### Cancellation
 
@@ -141,8 +148,9 @@ can transfer only tokens held at its own address.
 
 The owner can irreversibly enter exit mode, disabling deposits and placements.
 Bounded `emergency_cancel` pages use current pair state rather than indexed fill
-history or stale recorded remaining values. They cancel active rows, claim parked
-refunds, and retire terminal rows. `emergency_withdraw` then queries and transfers
+history or stale recorded remaining values. They cancel active rows and claim
+positively verified parked refunds. Any ambiguous query aborts the complete call
+without deleting rows. `emergency_withdraw` then queries and transfers
 the vault's actual liquid CW20 balances. Expired orders may require a CL8Y cleanup
 walk before their refund row becomes claimable. Pair pause can delay this flow but
 cannot redirect the funds.
@@ -179,7 +187,8 @@ Each tracked order is first queried as active escrow, then as an expired parked
 refund. Owner, order ID, side, immutable price (when active), and nonincreasing
 remaining amount are validated before custody is counted. The response reports
 `active_escrow_orders`, `parked_refund_orders`, `terminal_orders`, and
-`unverifiable_orders`; invalid or unqueryable escrow also produces a warning.
+`unverifiable_orders`; `Err + None`, invalid, or unqueryable escrow produces a warning
+rather than being counted as terminal.
 Fills consume one token's escrow and credit the opposite token's liquid balance.
 This query is therefore a custody/reconciliation diagnostic, not a same-token
 profit invariant: equality is expected after complete reconciliation, while a
@@ -222,6 +231,7 @@ Vault state:
    maintenance is disabled.
 10. Repeated reconciliation cannot credit the same physical balance increase twice.
 11. Pair interactions require the deployed pair code ID to match the pinned ID.
+12. No local order is removed solely because an active or parked query failed.
 
 ## Migration From Pooled Custody
 
@@ -234,12 +244,19 @@ Migration must:
 1. Pause pooled deposits and new placement.
 2. Reconcile where possible, cancel every active order, and claim every parked
    refund under the old manager address.
-3. Withdraw each user's settled assets from the old contract using audited
-   accounting and an independently verified custody snapshot.
+3. Withdraw each user's settled assets from the old contract using independently
+   reviewed accounting and a verified custody snapshot.
 4. Deploy the new manager and vault code, create one vault per owner/bot, and
    deposit directly into those addresses.
 5. Register each vault independently for any CL8Y fee tier.
 6. Keep the old contract recoverable until every old pair-owned order is resolved.
+
+Upgrading a vault from a release containing ambiguous terminal classification sets
+`inventory_reconciliation_required=true`. Normal and emergency withdrawals then
+fail closed. The flag cannot be administratively cleared in this release because
+the pair exposes no bounded owner-order inventory proof. Known active or parked IDs
+can be recovered, but deployment remains blocked until a pair upgrade provides a
+complete owner inventory/status query and a later migration verifies it.
 
 ## Failure And Recovery
 

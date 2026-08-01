@@ -49,4 +49,20 @@ pub enum ContractError {
     UnknownReply,
     #[error("pool or price history is empty")]
     EmptyPrice,
+    #[error("liquidity contract configuration does not match this vault")]
+    InvalidLiquidityContract,
+    #[error("liquidity contract points to a different vault")]
+    LiquidityVaultMismatch,
+    #[error("liquidity contract assets differ from the vault assets")]
+    LiquidityAssetsMismatch,
+    #[error("liquidity contract implementation no longer matches its pinned code id")]
+    LiquidityCodeMismatch,
+    #[error("liquidity operation is not authorized by the current LP state")]
+    LiquidityOperationNotAuthorized,
+    #[error("arithmetic result is outside the supported range")]
+    ArithmeticOutOfRange,
+    #[error("contract is paused")]
+    Paused,
+    #[error("contract is not paused")]
+    NotPaused,
 }

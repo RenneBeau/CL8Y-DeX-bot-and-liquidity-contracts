@@ -16,10 +16,18 @@ pub struct InstantiateMsg {
 }
 
 #[cw_serde]
+pub struct MigrateMsg {}
+
+#[cw_serde]
 pub enum ExecuteMsg {
     UpdateConfig {
         minimum_initial_deposit: Option<Uint128>,
     },
+    TransferAdmin {
+        admin: String,
+    },
+    AcceptAdmin {},
+    CancelAdminTransfer {},
     Deposit {
         amounts: [Uint128; 2],
         min_shares: Uint128,
@@ -82,6 +90,8 @@ pub enum ExecuteMsg {
 pub enum QueryMsg {
     #[returns(ConfigResponse)]
     Config {},
+    #[returns(bot_types::LiquidityAuthorizationResponse)]
+    Authorization {},
     #[returns(cw20::BalanceResponse)]
     Balance { address: String },
     #[returns(cw20::TokenInfoResponse)]
@@ -116,6 +126,7 @@ pub enum QueryMsg {
 #[cw_serde]
 pub struct ConfigResponse {
     pub admin: String,
+    pub pending_admin: Option<String>,
     pub vault: String,
     pub asset_tokens: [String; 2],
     pub minimum_initial_deposit: Uint128,

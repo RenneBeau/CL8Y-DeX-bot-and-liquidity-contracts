@@ -4,12 +4,12 @@ use cosmwasm_std::{
     entry_point, from_json, to_json_binary, Addr, Binary, Decimal, Deps, DepsMut, Env, MessageInfo,
     Response, StdResult, Uint128, WasmMsg,
 };
-use cw2::set_contract_version;
+use cw2::{get_contract_version, set_contract_version};
 use cw20::{Cw20ExecuteMsg, Cw20ReceiveMsg};
 
 use crate::error::ContractError;
-use crate::msg::{ConfigResponse, ExecuteMsg, InstantiateMsg, QueryMsg, RouteResponse};
-use crate::state::{Config, Route, CONFIG, PAIR_VAULTS, ROUTES};
+use crate::msg::{ConfigResponse, ExecuteMsg, InstantiateMsg, MigrateMsg, QueryMsg, RouteResponse};
+use crate::state::{Config, Route, CONFIG, PAIR_VAULTS, PENDING_ADMIN, ROUTES};
 
 const CONTRACT_NAME: &str = "crates.io:cl8y-swap-proxy";
 const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -35,6 +35,21 @@ pub fn instantiate(
 }
 
 #[entry_point]
+pub fn migrate(deps: DepsMut, _env: Env, _msg: MigrateMsg) -> Result<Response, ContractError> {
+    let previous = get_contract_version(deps.storage)?;
+    if previous.contract != CONTRACT_NAME {
+        return Err(ContractError::Std(cosmwasm_std::StdError::generic_err(
+            "unsupported migration source",
+        )));
+    }
+    PENDING_ADMIN.remove(deps.storage);
+    set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
+    Ok(Response::new()
+        .add_attribute("action", "migrate_swap_proxy")
+        .add_attribute("from_version", previous.version))
+}
+
+#[entry_point]
 pub fn execute(
     deps: DepsMut,
     env: Env,
@@ -51,6 +66,8 @@ pub fn execute(
             execute_withdraw_cl8y(deps, info, amount, recipient)
         }
         ExecuteMsg::TransferAdmin { admin } => execute_transfer_admin(deps, info, admin),
+        ExecuteMsg::AcceptAdmin {} => execute_accept_admin(deps, info),
+        ExecuteMsg::CancelAdminTransfer {} => execute_cancel_admin_transfer(deps, info),
     }
 }
 
@@ -211,13 +228,40 @@ fn execute_transfer_admin(
     info: MessageInfo,
     admin: String,
 ) -> Result<Response, ContractError> {
-    let mut config = CONFIG.load(deps.storage)?;
+    let config = CONFIG.load(deps.storage)?;
     assert_admin(&config, &info.sender)?;
-    config.admin = deps.api.addr_validate(&admin)?;
-    CONFIG.save(deps.storage, &config)?;
+    let pending = deps.api.addr_validate(&admin)?;
+    PENDING_ADMIN.save(deps.storage, &pending)?;
     Ok(Response::new()
-        .add_attribute("action", "transfer_admin")
-        .add_attribute("admin", config.admin))
+        .add_attribute("action", "propose_admin")
+        .add_attribute("current_admin", config.admin)
+        .add_attribute("pending_admin", pending))
+}
+
+fn execute_accept_admin(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractError> {
+    if PENDING_ADMIN.may_load(deps.storage)?.as_ref() != Some(&info.sender) {
+        return Err(ContractError::Unauthorized);
+    }
+    let previous = CONFIG.load(deps.storage)?.admin;
+    CONFIG.update(deps.storage, |mut config| -> Result<_, ContractError> {
+        config.admin = info.sender.clone();
+        Ok(config)
+    })?;
+    PENDING_ADMIN.remove(deps.storage);
+    Ok(Response::new()
+        .add_attribute("action", "accept_admin")
+        .add_attribute("previous_admin", previous)
+        .add_attribute("admin", info.sender))
+}
+
+fn execute_cancel_admin_transfer(
+    deps: DepsMut,
+    info: MessageInfo,
+) -> Result<Response, ContractError> {
+    let config = CONFIG.load(deps.storage)?;
+    assert_admin(&config, &info.sender)?;
+    PENDING_ADMIN.remove(deps.storage);
+    Ok(Response::new().add_attribute("action", "cancel_admin_transfer"))
 }
 
 #[entry_point]
@@ -227,6 +271,9 @@ pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
             let config = CONFIG.load(deps.storage)?;
             to_json_binary(&ConfigResponse {
                 admin: config.admin.to_string(),
+                pending_admin: PENDING_ADMIN
+                    .may_load(deps.storage)?
+                    .map(|admin| admin.to_string()),
                 cl8y_token: config.cl8y_token.to_string(),
                 fee_registry: config.fee_registry.to_string(),
             })
@@ -319,5 +366,45 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error, ContractError::UnregisteredVault);
+    }
+
+    #[test]
+    fn admin_transfer_is_two_step_and_replaceable() {
+        let mut deps = setup();
+        execute_transfer_admin(deps.as_mut(), mock_info("admin", &[]), "wrong".into()).unwrap();
+        execute_transfer_admin(deps.as_mut(), mock_info("admin", &[]), "next".into()).unwrap();
+        assert_eq!(
+            CONFIG.load(&deps.storage).unwrap().admin,
+            Addr::unchecked("admin")
+        );
+        assert_eq!(
+            execute_accept_admin(deps.as_mut(), mock_info("wrong", &[])).unwrap_err(),
+            ContractError::Unauthorized
+        );
+        execute_accept_admin(deps.as_mut(), mock_info("next", &[])).unwrap();
+        assert_eq!(
+            CONFIG.load(&deps.storage).unwrap().admin,
+            Addr::unchecked("next")
+        );
+    }
+
+    #[test]
+    fn migration_preserves_routes_and_config() {
+        let mut deps = setup();
+        let config = CONFIG.load(&deps.storage).unwrap();
+        ROUTES
+            .save(
+                deps.as_mut().storage,
+                &Addr::unchecked("vault"),
+                &Route {
+                    pair: Addr::unchecked("pair"),
+                    asset_tokens: [Addr::unchecked("token0"), Addr::unchecked("token1")],
+                },
+            )
+            .unwrap();
+        set_contract_version(deps.as_mut().storage, CONTRACT_NAME, "0.0.1").unwrap();
+        migrate(deps.as_mut(), mock_env(), MigrateMsg {}).unwrap();
+        assert_eq!(CONFIG.load(&deps.storage).unwrap(), config);
+        assert!(ROUTES.has(&deps.storage, &Addr::unchecked("vault")));
     }
 }

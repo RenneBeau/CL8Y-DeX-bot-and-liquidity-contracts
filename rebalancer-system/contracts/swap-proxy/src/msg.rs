@@ -10,12 +10,17 @@ pub struct InstantiateMsg {
 }
 
 #[cw_serde]
+pub struct MigrateMsg {}
+
+#[cw_serde]
 pub enum ExecuteMsg {
     Receive(Cw20ReceiveMsg),
     RegisterVault { vault: String, pair: String },
     RemoveVault { vault: String },
     WithdrawCl8y { amount: Uint128, recipient: String },
     TransferAdmin { admin: String },
+    AcceptAdmin {},
+    CancelAdminTransfer {},
 }
 
 #[cw_serde]
@@ -30,6 +35,7 @@ pub enum QueryMsg {
 #[cw_serde]
 pub struct ConfigResponse {
     pub admin: String,
+    pub pending_admin: Option<String>,
     pub cl8y_token: String,
     pub fee_registry: String,
 }

@@ -3,10 +3,10 @@ use std::{cmp::Ordering as CmpOrdering, collections::BTreeSet};
 use cl8y_grid_manager::limits::valid_vault_limits;
 use cosmwasm_std::{
     entry_point, from_json, to_json_binary, Addr, BankMsg, Binary, Coin, Decimal, Deps, DepsMut,
-    Env, Fraction, MessageInfo, Order, Reply, Response, StdError, StdResult, SubMsg,
-    SubMsgResponse, Uint128, WasmMsg,
+    Env, MessageInfo, Order, Reply, Response, StdError, StdResult, SubMsg, SubMsgResponse, Uint128,
+    Uint256, WasmMsg,
 };
-use cw2::set_contract_version;
+use cw2::{get_contract_version, set_contract_version};
 use cw20::{BalanceResponse, Cw20ExecuteMsg, Cw20QueryMsg, Cw20ReceiveMsg, TokenInfoResponse};
 use cw_storage_plus::Bound;
 
@@ -14,14 +14,15 @@ use crate::error::ContractError;
 use crate::msg::{
     AssetInfo, BotResponse, ConfigResponse, ExecuteMsg, ExpiredLimitRefundResponse,
     FactoryQueryMsg, InstantiateMsg, LimitOrderConfigResponse, LimitOrderPlacementItem,
-    LimitOrderResponse, LimitOrderSide, OrderResponse, PairCw20HookMsg, PairExecuteMsg, PairInfo,
-    PairQueryMsg, PairResponse, PoolResponse, QueryMsg, ReceiveMsg, RungResponse, ShareResponse,
-    SolvencyResponse, TokenPolicyResponse, VaultModeResponse,
+    LimitOrderResponse, LimitOrderSide, MigrateMsg, OrderResponse, PairCw20HookMsg, PairExecuteMsg,
+    PairInfo, PairQueryMsg, PairResponse, PoolResponse, QueryMsg, ReceiveMsg, RungResponse,
+    ShareResponse, SolvencyResponse, TokenPolicyResponse, VaultModeResponse,
 };
 use crate::state::{
     Bot, Config, GridOrder, PageKind, PendingPage, PendingPageEntry, PlacementPlan, Rung,
-    VaultMode, ALLOWED_TOKENS, BOTS, CONFIG, NEXT_BOT_ID, NEXT_REPLY_ID, ORDERS, PENDING_PAGES,
-    PLACEMENTS, QUARANTINE, RUNGS, SHARES, TOKEN_POLICY_ENABLED, VAULT_MODE,
+    VaultMode, ALLOWED_TOKENS, BOTS, CONFIG, INVENTORY_RECONCILIATION_REQUIRED, NEXT_BOT_ID,
+    NEXT_REPLY_ID, ORDERS, PENDING_PAGES, PLACEMENTS, QUARANTINE, RUNGS, SHARES,
+    TOKEN_POLICY_ENABLED, VAULT_MODE,
 };
 
 const CONTRACT_NAME: &str = "crates.io:cl8y-grid-vault";
@@ -71,6 +72,7 @@ pub fn instantiate(
     NEXT_REPLY_ID.save(deps.storage, &FIRST_REPLY_ID)?;
     VAULT_MODE.save(deps.storage, &VaultMode::Active)?;
     TOKEN_POLICY_ENABLED.save(deps.storage, &false)?;
+    INVENTORY_RECONCILIATION_REQUIRED.save(deps.storage, &false)?;
     Ok(Response::new().add_attribute("action", "instantiate"))
 }
 
@@ -100,6 +102,11 @@ pub fn execute(
         ExecuteMsg::Reconcile { bot_id, order_ids } => {
             execute_reconcile(deps, env, info, bot_id, order_ids)
         }
+        ExecuteMsg::RecoverOrder {
+            bot_id,
+            order_id,
+            rung_index,
+        } => execute_recover_order(deps, env, info, bot_id, order_id, rung_index),
         ExecuteMsg::CancelAll { bot_id } => execute_cancel_all(deps, env, info, bot_id),
         ExecuteMsg::Withdraw {
             bot_id,
@@ -124,6 +131,25 @@ pub fn execute(
             execute_emergency_withdraw(deps, env, info, bot_id, recipient)
         }
     }
+}
+
+#[entry_point]
+pub fn migrate(deps: DepsMut, _env: Env, _msg: MigrateMsg) -> Result<Response, ContractError> {
+    let previous = get_contract_version(deps.storage)?;
+    if previous.contract != CONTRACT_NAME {
+        return Err(ContractError::Std(StdError::generic_err(
+            "unsupported migration source",
+        )));
+    }
+    // Vulnerable releases may already have deleted the only local order reference.
+    // The current pair API cannot prove a complete owner inventory, so withdrawals
+    // remain disabled until a future pair-backed inventory migration clears this flag.
+    INVENTORY_RECONCILIATION_REQUIRED.save(deps.storage, &true)?;
+    set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
+    Ok(Response::new()
+        .add_attribute("action", "migrate_grid_vault")
+        .add_attribute("from_version", previous.version)
+        .add_attribute("inventory_reconciliation_required", "true"))
 }
 
 fn execute_sync_balances(
@@ -535,15 +561,22 @@ fn execute_reconcile(
         let (current_remaining, terminal, parked_refund) = match active {
             Ok(on_chain) => {
                 validate_order(&env.contract.address, *order_id, &order, &on_chain)?;
-                (on_chain.remaining, false, Uint128::zero())
+                (
+                    on_chain.remaining,
+                    on_chain.remaining.is_zero(),
+                    Uint128::zero(),
+                )
             }
             Err(_) => {
-                let parked: Option<ExpiredLimitRefundResponse> = deps.querier.query_wasm_smart(
-                    &bot.pair,
-                    &PairQueryMsg::ExpiredLimitRefund {
-                        order_id: *order_id,
-                    },
-                )?;
+                let parked: Option<ExpiredLimitRefundResponse> = deps
+                    .querier
+                    .query_wasm_smart(
+                        &bot.pair,
+                        &PairQueryMsg::ExpiredLimitRefund {
+                            order_id: *order_id,
+                        },
+                    )
+                    .map_err(|_| ContractError::OrderStatusUnverifiable)?;
                 if let Some(refund) = parked {
                     if refund.owner != env.contract.address
                         || refund.order_id != *order_id
@@ -554,7 +587,9 @@ fn execute_reconcile(
                     }
                     (refund.remaining, true, refund.remaining)
                 } else {
-                    (Uint128::zero(), true, Uint128::zero())
+                    // The pair uses an untyped error for active-order absence. It is
+                    // indistinguishable here from a contract/query/schema failure.
+                    return Err(ContractError::OrderStatusUnverifiable);
                 }
             }
         };
@@ -619,6 +654,101 @@ fn execute_reconcile(
                 amount: vec![Coin::new(config.keeper_reward.u128(), config.gas_denom)],
             })
             .add_attribute("keeper_reward", config.keeper_reward);
+    }
+    Ok(response)
+}
+
+fn execute_recover_order(
+    mut deps: DepsMut,
+    env: Env,
+    info: MessageInfo,
+    bot_id: u64,
+    order_id: u64,
+    rung_index: u32,
+) -> Result<Response, ContractError> {
+    assert_no_funds(&info)?;
+    let mut bot = BOTS.load(deps.storage, bot_id)?;
+    if info.sender != bot.owner {
+        return Err(ContractError::Unauthorized);
+    }
+    if ORDERS.has(deps.storage, (bot_id, order_id)) {
+        return Err(ContractError::InvalidOrder);
+    }
+    assert_pair_code(deps.as_ref(), &bot)?;
+    let rung = RUNGS.load(deps.storage, (bot_id, rung_index))?;
+    let side = rung.side.ok_or(ContractError::InvalidOrder)?;
+    let active: StdResult<LimitOrderResponse> = deps
+        .querier
+        .query_wasm_smart(&bot.pair, &PairQueryMsg::LimitOrder { order_id });
+    let (remaining, parked) = match active {
+        Ok(on_chain) => {
+            let recovered = GridOrder {
+                rung_index,
+                side: side.clone(),
+                price: rung.price,
+                remaining: on_chain.remaining,
+            };
+            validate_order(&env.contract.address, order_id, &recovered, &on_chain)?;
+            if on_chain.remaining.is_zero() {
+                return Err(ContractError::InvalidOrder);
+            }
+            (on_chain.remaining, false)
+        }
+        Err(_) => {
+            let refund: Option<ExpiredLimitRefundResponse> = deps
+                .querier
+                .query_wasm_smart(&bot.pair, &PairQueryMsg::ExpiredLimitRefund { order_id })
+                .map_err(|_| ContractError::OrderStatusUnverifiable)?;
+            let refund = refund.ok_or(ContractError::OrderStatusUnverifiable)?;
+            if refund.owner != env.contract.address
+                || refund.order_id != order_id
+                || refund.side != side
+                || refund.remaining.is_zero()
+            {
+                return Err(ContractError::InvalidOrder);
+            }
+            (refund.remaining, true)
+        }
+    };
+    ORDERS.save(
+        deps.storage,
+        (bot_id, order_id),
+        &GridOrder {
+            rung_index,
+            side: side.clone(),
+            price: rung.price,
+            remaining,
+        },
+    )?;
+    bot.active_orders = bot
+        .active_orders
+        .checked_add(1)
+        .ok_or(ContractError::ArithmeticOutOfRange)?;
+    BOTS.save(deps.storage, bot_id, &bot)?;
+
+    let mut response = Response::new()
+        .add_attribute("action", "recover_grid_order")
+        .add_attribute("bot_id", bot_id.to_string())
+        .add_attribute("order_id", order_id.to_string())
+        .add_attribute("status", if parked { "parked" } else { "active" });
+    if parked {
+        let token_index = match side {
+            LimitOrderSide::Ask => 0,
+            LimitOrderSide::Bid => 1,
+        };
+        response = add_confirmable_pages(
+            &mut deps,
+            response,
+            bot_id,
+            &bot.pair,
+            &[],
+            &[PendingPageEntry {
+                order_id,
+                token_index,
+                refund: remaining,
+            }],
+            bot.pair_batch_limit,
+        )?;
     }
     Ok(response)
 }
@@ -689,6 +819,7 @@ fn execute_withdraw(
     if VAULT_MODE.load(deps.storage)? == VaultMode::Exit {
         return Err(ContractError::InvalidMode);
     }
+    require_reconciled_inventory(deps.as_ref())?;
     let mut bot = BOTS.load(deps.storage, bot_id)?;
     if info.sender != bot.owner {
         return Err(ContractError::Unauthorized);
@@ -871,7 +1002,6 @@ fn execute_emergency_cancel(
         .collect::<StdResult<_>>()?;
     let mut cancel_entries = vec![];
     let mut claim_entries = vec![];
-    let mut vanished = 0u32;
     for (order_id, order) in &tracked {
         let active: StdResult<LimitOrderResponse> = deps.querier.query_wasm_smart(
             &bot.pair,
@@ -893,12 +1023,15 @@ fn execute_emergency_cancel(
                 });
             }
             Err(_) => {
-                let parked: Option<ExpiredLimitRefundResponse> = deps.querier.query_wasm_smart(
-                    &bot.pair,
-                    &PairQueryMsg::ExpiredLimitRefund {
-                        order_id: *order_id,
-                    },
-                )?;
+                let parked: Option<ExpiredLimitRefundResponse> = deps
+                    .querier
+                    .query_wasm_smart(
+                        &bot.pair,
+                        &PairQueryMsg::ExpiredLimitRefund {
+                            order_id: *order_id,
+                        },
+                    )
+                    .map_err(|_| ContractError::OrderStatusUnverifiable)?;
                 if let Some(refund) = parked {
                     if refund.owner != env.contract.address
                         || refund.order_id != *order_id
@@ -917,18 +1050,10 @@ fn execute_emergency_cancel(
                         refund: refund.remaining,
                     });
                 } else {
-                    ORDERS.remove(deps.storage, (bot_id, *order_id));
-                    vanished += 1;
+                    return Err(ContractError::OrderStatusUnverifiable);
                 }
             }
         }
-    }
-    if vanished != 0 {
-        BOTS.update(deps.storage, bot_id, |bot| -> Result<_, ContractError> {
-            let mut bot = bot.ok_or_else(|| StdError::not_found("bot"))?;
-            bot.active_orders = bot.active_orders.saturating_sub(vanished);
-            Ok(bot)
-        })?;
     }
     let has_more = ORDERS
         .prefix(bot_id)
@@ -963,6 +1088,7 @@ fn execute_emergency_withdraw(
     if VAULT_MODE.load(deps.storage)? != VaultMode::Exit {
         return Err(ContractError::InvalidMode);
     }
+    require_reconciled_inventory(deps.as_ref())?;
     let mut bot = BOTS.load(deps.storage, bot_id)?;
     if info.sender != bot.owner {
         return Err(ContractError::Unauthorized);
@@ -1293,6 +1419,9 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
                 max_orders_per_reconcile: config.max_orders_per_reconcile,
                 max_active_orders_per_bot: config.max_active_orders_per_bot,
                 mode,
+                inventory_reconciliation_required: INVENTORY_RECONCILIATION_REQUIRED
+                    .may_load(deps.storage)?
+                    .unwrap_or(true),
             })
         }
         QueryMsg::Bot { bot_id } => {
@@ -1384,10 +1513,13 @@ fn pool_price(pool: &PoolResponse) -> Result<Decimal, ContractError> {
     if pool.assets[0].amount.is_zero() || pool.assets[1].amount.is_zero() {
         return Err(ContractError::InvalidPair);
     }
-    Ok(Decimal::from_ratio(
+    let atomics = checked_ratio(
         pool.assets[1].amount,
+        Decimal::one().atomics(),
         pool.assets[0].amount,
-    ))
+    )?;
+    Decimal::from_atomics(atomics, Decimal::DECIMAL_PLACES)
+        .map_err(|_| ContractError::ArithmeticOutOfRange)
 }
 
 fn grid_prices(lower: Decimal, upper: Decimal, count: u32) -> Result<Vec<Decimal>, ContractError> {
@@ -1460,8 +1592,35 @@ fn deposit_shares(
     if token_index == 0 {
         Ok(amount)
     } else {
-        Ok(amount * price.inv().ok_or(ContractError::InvalidPair)?)
+        if price.is_zero() {
+            return Err(ContractError::InvalidPair);
+        }
+        checked_ratio(amount, Decimal::one().atomics(), price.atomics())
     }
+}
+
+fn checked_ratio(
+    value: Uint128,
+    numerator: Uint128,
+    denominator: Uint128,
+) -> Result<Uint128, ContractError> {
+    if denominator.is_zero() {
+        return Err(ContractError::ArithmeticOutOfRange);
+    }
+    let result = Uint256::from(value) * Uint256::from(numerator) / Uint256::from(denominator);
+    result
+        .try_into()
+        .map_err(|_| ContractError::ArithmeticOutOfRange)
+}
+
+fn require_reconciled_inventory(deps: Deps) -> Result<(), ContractError> {
+    if INVENTORY_RECONCILIATION_REQUIRED
+        .may_load(deps.storage)?
+        .unwrap_or(true)
+    {
+        return Err(ContractError::InventoryReconciliationRequired);
+    }
+    Ok(())
 }
 
 fn next_reply_id(storage: &mut dyn cosmwasm_std::Storage) -> StdResult<u64> {
@@ -1617,7 +1776,7 @@ fn check_solvency(deps: Deps, env: &Env, bot_id: u64) -> StdResult<SolvencyRespo
     let mut on_chain_escrow = [Uint128::zero(), Uint128::zero()];
     let mut active_escrow_orders = 0u32;
     let mut parked_refund_orders = 0u32;
-    let mut terminal_orders = 0u32;
+    let terminal_orders = 0u32;
     let mut unverifiable_orders = 0u32;
     let mut warnings = Vec::new();
     for item in ORDERS
@@ -1669,7 +1828,12 @@ fn check_solvency(deps: Deps, env: &Env, bot_id: u64) -> StdResult<SolvencyRespo
                     unverifiable_orders += 1;
                     warnings.push(format!("order {order_id} parked refund fields are invalid"));
                 }
-                Ok(None) => terminal_orders += 1,
+                Ok(None) => {
+                    unverifiable_orders += 1;
+                    warnings.push(format!(
+                        "order {order_id} is absent from parked refunds but active status failed"
+                    ));
+                }
                 Err(_) => {
                     unverifiable_orders += 1;
                     warnings.push(format!("order {order_id} escrow could not be verified"));
@@ -1944,6 +2108,97 @@ mod tests {
     }
 
     #[test]
+    fn deposit_share_conversion_reports_overflow_without_panicking() {
+        let minimum_price = Decimal::from_atomics(Uint128::one(), 18).unwrap();
+        assert_eq!(
+            deposit_shares(Uint128::MAX, 1, minimum_price).unwrap_err(),
+            ContractError::ArithmeticOutOfRange
+        );
+        assert_eq!(
+            deposit_shares(Uint128::zero(), 1, Decimal::one()).unwrap(),
+            Uint128::zero()
+        );
+        assert_eq!(
+            deposit_shares(Uint128::new(25), 1, Decimal::percent(50)).unwrap(),
+            Uint128::new(50)
+        );
+    }
+
+    #[test]
+    fn migration_blocks_withdrawals_until_pair_inventory_can_be_proven() {
+        let mut deps = mock_dependencies();
+        instantiate_default(deps.as_mut());
+        migrate(deps.as_mut(), mock_env(), MigrateMsg {}).unwrap();
+        assert!(INVENTORY_RECONCILIATION_REQUIRED
+            .load(&deps.storage)
+            .unwrap());
+        assert_eq!(
+            require_reconciled_inventory(deps.as_ref()).unwrap_err(),
+            ContractError::InventoryReconciliationRequired
+        );
+    }
+
+    #[test]
+    fn owner_can_recover_a_positively_verified_forgotten_active_order() {
+        let mut deps = mock_dependencies();
+        instantiate_default(deps.as_mut());
+        BOTS.save(deps.as_mut().storage, BOT_ID, &test_bot("alice", 0))
+            .unwrap();
+        RUNGS
+            .save(
+                deps.as_mut().storage,
+                (BOT_ID, 3),
+                &Rung {
+                    price: Decimal::percent(250),
+                    side: Some(LimitOrderSide::Ask),
+                },
+            )
+            .unwrap();
+        deps.querier.update_wasm(|query| match query {
+            WasmQuery::ContractInfo { contract_addr } if contract_addr == "pair" => {
+                SystemResult::Ok(ContractResult::Ok(
+                    to_json_binary(&contract_info(7)).unwrap(),
+                ))
+            }
+            WasmQuery::Smart { contract_addr, msg } if contract_addr == "pair" => {
+                match from_json::<PairQueryMsg>(msg).unwrap() {
+                    PairQueryMsg::LimitOrder { order_id: 77 } => {
+                        SystemResult::Ok(ContractResult::Ok(
+                            to_json_binary(&LimitOrderResponse {
+                                order_id: 77,
+                                owner: mock_env().contract.address.to_string(),
+                                side: LimitOrderSide::Ask,
+                                price: Decimal::percent(250),
+                                remaining: Uint128::new(90),
+                                expires_at: None,
+                                prev: None,
+                                next: None,
+                            })
+                            .unwrap(),
+                        ))
+                    }
+                    _ => SystemResult::Ok(ContractResult::Err("unsupported".into())),
+                }
+            }
+            _ => SystemResult::Ok(ContractResult::Err("unsupported".into())),
+        });
+        execute_recover_order(
+            deps.as_mut(),
+            mock_env(),
+            mock_info("alice", &[]),
+            BOT_ID,
+            77,
+            3,
+        )
+        .unwrap();
+        assert_eq!(
+            ORDERS.load(&deps.storage, (BOT_ID, 77)).unwrap().remaining,
+            Uint128::new(90)
+        );
+        assert_eq!(BOTS.load(&deps.storage, BOT_ID).unwrap().active_orders, 1);
+    }
+
+    #[test]
     fn failed_single_opposite_placement_returns_free_balance() {
         let mut deps = mock_dependencies();
         BOTS.save(
@@ -2159,7 +2414,7 @@ mod tests {
     }
 
     #[test]
-    fn emergency_exit_ignores_stale_remaining_and_withdraws_physical_balances() {
+    fn emergency_exit_retains_all_orders_when_one_status_is_indeterminate() {
         let mut deps = mock_dependencies();
         instantiate_default(deps.as_mut());
         let mut bot = test_bot("alice", 3);
@@ -2254,35 +2509,25 @@ mod tests {
                 .unwrap_err(),
             ContractError::Unauthorized
         );
-        let cancel =
+        let error =
             execute_emergency_cancel(deps.as_mut(), mock_env(), mock_info("alice", &[]), BOT_ID)
-                .unwrap();
-        assert_eq!(cancel.messages.len(), 2);
+                .unwrap_err();
+        assert_eq!(error, ContractError::OrderStatusUnverifiable);
         assert!(ORDERS.has(&deps.storage, (BOT_ID, 77)));
-        assert!(!ORDERS.has(&deps.storage, (BOT_ID, 78)));
+        assert!(ORDERS.has(&deps.storage, (BOT_ID, 78)));
         assert!(ORDERS.has(&deps.storage, (BOT_ID, 79)));
-        settle_replies(&mut deps.as_mut(), cancel, true);
-        assert!(ORDERS.prefix(BOT_ID).is_empty(&deps.storage));
-        let closed = BOTS.load(&deps.storage, BOT_ID).unwrap();
-        assert_eq!(closed.active_orders, 0);
+        assert_eq!(BOTS.load(&deps.storage, BOT_ID).unwrap().active_orders, 3);
         assert_eq!(
-            closed.free_balances,
-            [Uint128::new(999_999 + 25 + 40), Uint128::new(999_999)]
+            execute_emergency_withdraw(
+                deps.as_mut(),
+                mock_env(),
+                mock_info("alice", &[]),
+                BOT_ID,
+                None,
+            )
+            .unwrap_err(),
+            ContractError::ExitOrdersRemain
         );
-
-        let withdraw = execute_emergency_withdraw(
-            deps.as_mut(),
-            mock_env(),
-            mock_info("alice", &[]),
-            BOT_ID,
-            None,
-        )
-        .unwrap();
-        assert_eq!(withdraw.messages.len(), 2);
-        let closed = BOTS.load(&deps.storage, BOT_ID).unwrap();
-        assert_eq!(closed.total_shares, Uint128::zero());
-        assert_eq!(closed.free_balances, [Uint128::zero(), Uint128::zero()]);
-        assert!(!SHARES.has(&deps.storage, (BOT_ID, &Addr::unchecked("alice"))));
     }
 
     fn test_bot(owner: &str, active_orders: u32) -> Bot {

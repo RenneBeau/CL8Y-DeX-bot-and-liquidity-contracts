@@ -1,24 +1,26 @@
 use bot_types::{
-    RebalanceStatusResponse, SwapParams, VaultBalancesResponse, VaultConfigResponse,
-    VaultExecuteMsg, VaultPriceResponse, VaultQueryMsg, WithdrawalType,
+    AuthorizedTransfer, LiquidityAuthorizationResponse, RebalanceStatusResponse, SwapParams,
+    VaultBalancesResponse, VaultConfigResponse, VaultExecuteMsg, VaultPriceResponse, VaultQueryMsg,
+    WithdrawalType,
 };
 use cosmwasm_std::{
     entry_point, to_json_binary, Addr, Binary, Decimal, Deps, DepsMut, Env, MessageInfo, Reply,
     Response, StdError, StdResult, SubMsg, Uint128, Uint256, WasmMsg,
 };
-use cw2::set_contract_version;
+use cw2::{get_contract_version, set_contract_version};
 use cw20::{Cw20ExecuteMsg, Cw20QueryMsg, MinterResponse};
 use cw20_base::msg::{ExecuteMsg as BaseExecuteMsg, InstantiateMsg as BaseInstantiateMsg};
 use cw20_base::state::{BALANCES, TOKEN_INFO};
 
 use crate::error::ContractError;
-use crate::msg::{ConfigResponse, ExecuteMsg, InstantiateMsg, QueryMsg};
-use crate::state::{Config, PendingOperation, CONFIG, PENDING};
+use crate::msg::{ConfigResponse, ExecuteMsg, InstantiateMsg, MigrateMsg, QueryMsg};
+use crate::state::{Config, PendingOperation, CONFIG, PENDING, PENDING_ADMIN};
 
 const CONTRACT_NAME: &str = "crates.io:cl8y-bot-liquidity";
 const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const DEPOSIT_REPLY_ID: u64 = 1;
 const WITHDRAW_REPLY_ID: u64 = 2;
+const TRANSFER_REPLY_ID: u64 = 3;
 const LOCKED_INITIAL_SHARES: Uint128 = Uint128::new(1_000);
 
 #[entry_point]
@@ -74,6 +76,22 @@ pub fn instantiate(
 }
 
 #[entry_point]
+pub fn migrate(deps: DepsMut, _env: Env, _msg: MigrateMsg) -> Result<Response, ContractError> {
+    let previous = get_contract_version(deps.storage)?;
+    if previous.contract != CONTRACT_NAME {
+        return Err(ContractError::Std(StdError::generic_err(
+            "unsupported migration source",
+        )));
+    }
+    assert_no_pending(deps.as_ref())?;
+    PENDING_ADMIN.remove(deps.storage);
+    set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
+    Ok(Response::new()
+        .add_attribute("action", "migrate_bot_liquidity")
+        .add_attribute("from_version", previous.version))
+}
+
+#[entry_point]
 pub fn execute(
     deps: DepsMut,
     env: Env,
@@ -96,6 +114,9 @@ pub fn execute(
         ExecuteMsg::UpdateConfig {
             minimum_initial_deposit,
         } => execute_update_config(deps, info, minimum_initial_deposit),
+        ExecuteMsg::TransferAdmin { admin } => execute_transfer_admin(deps, info, admin),
+        ExecuteMsg::AcceptAdmin {} => execute_accept_admin(deps, info),
+        ExecuteMsg::CancelAdminTransfer {} => execute_cancel_admin_transfer(deps, info),
         other => execute_cw20(deps, env, info, other),
     }
 }
@@ -141,6 +162,7 @@ fn execute_deposit(
             pre_supply,
             price: price.token1_per_token0,
             min_shares,
+            swap: swap.clone(),
         },
     )?;
     let mut response = Response::new()
@@ -199,8 +221,8 @@ fn execute_withdraw(
     let supply = TOKEN_INFO.load(deps.storage)?.total_supply;
     let vault_balances = vault_balances(deps.as_ref(), &config)?;
     let claims = [
-        vault_balances[0].multiply_ratio(shares, supply),
-        vault_balances[1].multiply_ratio(shares, supply),
+        checked_ratio(vault_balances[0], shares, supply)?,
+        checked_ratio(vault_balances[1], shares, supply)?,
     ];
     let recipient = deps
         .api
@@ -210,13 +232,39 @@ fn execute_withdraw(
             if claims[0] < min_assets[0] || claims[1] < min_assets[1] {
                 return Err(ContractError::MinimumNotMet);
             }
+            let transfers: Vec<AuthorizedTransfer> = config
+                .asset_tokens
+                .iter()
+                .zip(claims)
+                .filter(|(_, amount)| !amount.is_zero())
+                .map(|(token, amount)| AuthorizedTransfer {
+                    token: token.to_string(),
+                    amount,
+                    recipient: recipient.to_string(),
+                })
+                .collect();
+            if transfers.is_empty() {
+                return Err(ContractError::ZeroAmount);
+            }
+            PENDING.save(
+                deps.storage,
+                &PendingOperation::AuthorizedTransfers {
+                    replies_remaining: transfers.len() as u8,
+                    transfers: transfers.clone(),
+                },
+            )?;
             burn_shares(deps.branch(), env.clone(), info.clone(), shares)?;
             let mut response = Response::new().add_attribute("action", "withdraw_pro_rata");
-            for (token, amount) in config.asset_tokens.iter().zip(claims) {
-                if !amount.is_zero() {
-                    response =
-                        response.add_message(vault_transfer(&config, token, amount, &recipient)?);
-                }
+            for transfer in transfers {
+                response = response.add_submessage(SubMsg::reply_on_success(
+                    vault_transfer(
+                        &config,
+                        &Addr::unchecked(transfer.token),
+                        transfer.amount,
+                        &recipient,
+                    )?,
+                    TRANSFER_REPLY_ID,
+                ));
             }
             Ok(response)
         }
@@ -247,6 +295,47 @@ fn execute_update_config(
     }
     CONFIG.save(deps.storage, &config)?;
     Ok(Response::new().add_attribute("action", "update_config"))
+}
+
+fn execute_transfer_admin(
+    deps: DepsMut,
+    info: MessageInfo,
+    admin: String,
+) -> Result<Response, ContractError> {
+    let config = CONFIG.load(deps.storage)?;
+    assert_admin(&config, &info.sender)?;
+    let pending = deps.api.addr_validate(&admin)?;
+    PENDING_ADMIN.save(deps.storage, &pending)?;
+    Ok(Response::new()
+        .add_attribute("action", "propose_admin")
+        .add_attribute("current_admin", config.admin)
+        .add_attribute("pending_admin", pending))
+}
+
+fn execute_accept_admin(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractError> {
+    if PENDING_ADMIN.may_load(deps.storage)?.as_ref() != Some(&info.sender) {
+        return Err(ContractError::Unauthorized);
+    }
+    let previous = CONFIG.load(deps.storage)?.admin;
+    CONFIG.update(deps.storage, |mut config| -> Result<_, ContractError> {
+        config.admin = info.sender.clone();
+        Ok(config)
+    })?;
+    PENDING_ADMIN.remove(deps.storage);
+    Ok(Response::new()
+        .add_attribute("action", "accept_admin")
+        .add_attribute("previous_admin", previous)
+        .add_attribute("admin", info.sender))
+}
+
+fn execute_cancel_admin_transfer(
+    deps: DepsMut,
+    info: MessageInfo,
+) -> Result<Response, ContractError> {
+    let config = CONFIG.load(deps.storage)?;
+    assert_admin(&config, &info.sender)?;
+    PENDING_ADMIN.remove(deps.storage);
+    Ok(Response::new().add_attribute("action", "cancel_admin_transfer"))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -281,6 +370,7 @@ fn execute_single_withdraw(
             base_amount: claims[payout_index],
             pre_payout_balance,
             min_amount,
+            swap: swap.clone(),
         },
     )?;
     Ok(Response::new()
@@ -300,6 +390,7 @@ pub fn reply(deps: DepsMut, env: Env, reply: Reply) -> Result<Response, Contract
     match reply.id {
         DEPOSIT_REPLY_ID => complete_deposit(deps, env),
         WITHDRAW_REPLY_ID => complete_single_withdraw(deps, env, reply),
+        TRANSFER_REPLY_ID => complete_authorized_transfer(deps),
         _ => Err(ContractError::UnknownReply),
     }
 }
@@ -312,6 +403,7 @@ fn complete_deposit(mut deps: DepsMut, env: Env) -> Result<Response, ContractErr
         pre_supply,
         price,
         min_shares,
+        swap: _,
     } = pending
     else {
         return Err(ContractError::UnknownReply);
@@ -382,6 +474,7 @@ fn complete_single_withdraw(
         base_amount,
         pre_payout_balance,
         min_amount,
+        swap: _,
     } = pending
     else {
         return Err(ContractError::UnknownReply);
@@ -412,12 +505,55 @@ fn complete_single_withdraw(
         },
         shares,
     )?;
-    PENDING.remove(deps.storage);
+    let transfer = AuthorizedTransfer {
+        token: payout_token.to_string(),
+        amount: payout,
+        recipient: recipient.to_string(),
+    };
+    PENDING.save(
+        deps.storage,
+        &PendingOperation::AuthorizedTransfers {
+            transfers: vec![transfer],
+            replies_remaining: 1,
+        },
+    )?;
     Ok(Response::new()
-        .add_message(vault_transfer(&config, &payout_token, payout, &recipient)?)
+        .add_submessage(SubMsg::reply_on_success(
+            vault_transfer(&config, &payout_token, payout, &recipient)?,
+            TRANSFER_REPLY_ID,
+        ))
         .add_attribute("action", "complete_single_withdraw")
         .add_attribute("recipient", recipient)
         .add_attribute("amount", payout))
+}
+
+fn complete_authorized_transfer(deps: DepsMut) -> Result<Response, ContractError> {
+    let PendingOperation::AuthorizedTransfers {
+        transfers: _,
+        replies_remaining,
+    } = PENDING.load(deps.storage)?
+    else {
+        return Err(ContractError::UnknownReply);
+    };
+    let remaining = replies_remaining
+        .checked_sub(1)
+        .ok_or(ContractError::UnknownReply)?;
+    if remaining == 0 {
+        PENDING.remove(deps.storage);
+    } else {
+        PENDING.update(deps.storage, |pending| -> Result<_, ContractError> {
+            let PendingOperation::AuthorizedTransfers { transfers, .. } = pending else {
+                return Err(ContractError::UnknownReply);
+            };
+            Ok(PendingOperation::AuthorizedTransfers {
+                transfers,
+                replies_remaining: remaining,
+            })
+        })?;
+    }
+    Ok(Response::new()
+        .add_attribute("action", "complete_authorized_transfer")
+        .add_attribute("remaining", remaining.to_string()))
 }
 
 fn execute_cw20(
@@ -426,6 +562,7 @@ fn execute_cw20(
     info: MessageInfo,
     msg: ExecuteMsg,
 ) -> Result<Response, ContractError> {
+    assert_no_pending(deps.as_ref())?;
     let msg = match msg {
         ExecuteMsg::Transfer { recipient, amount } => {
             BaseExecuteMsg::Transfer { recipient, amount }
@@ -490,9 +627,12 @@ fn execute_cw20(
         },
         ExecuteMsg::UploadLogo(logo) => BaseExecuteMsg::UploadLogo(logo),
         ExecuteMsg::UpdateConfig { .. }
+        | ExecuteMsg::TransferAdmin { .. }
+        | ExecuteMsg::AcceptAdmin {}
+        | ExecuteMsg::CancelAdminTransfer {}
         | ExecuteMsg::Deposit { .. }
         | ExecuteMsg::Withdraw { .. } => {
-            unreachable!()
+            return Err(ContractError::UnsupportedMessage);
         }
     };
     cw20_base::contract::execute(deps, env, info, msg).map_err(cw20_error)
@@ -505,11 +645,15 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
             let config = CONFIG.load(deps.storage)?;
             to_json_binary(&ConfigResponse {
                 admin: config.admin.to_string(),
+                pending_admin: PENDING_ADMIN
+                    .may_load(deps.storage)?
+                    .map(|admin| admin.to_string()),
                 vault: config.vault.to_string(),
                 asset_tokens: config.asset_tokens.map(|addr| addr.to_string()),
                 minimum_initial_deposit: config.minimum_initial_deposit,
             })
         }
+        QueryMsg::Authorization {} => to_json_binary(&liquidity_authorization(deps)?),
         QueryMsg::Balance { address } => {
             cw20_query(deps, env, cw20_base::msg::QueryMsg::Balance { address })
         }
@@ -560,6 +704,34 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
     }
 }
 
+fn liquidity_authorization(deps: Deps) -> StdResult<LiquidityAuthorizationResponse> {
+    let authorization = match PENDING.may_load(deps.storage)? {
+        Some(PendingOperation::Deposit { swap, .. }) => LiquidityAuthorizationResponse {
+            finalize: swap.is_none(),
+            swap,
+            transfers: vec![],
+        },
+        Some(PendingOperation::WithdrawSingle { swap, .. }) => LiquidityAuthorizationResponse {
+            swap: Some(swap),
+            transfers: vec![],
+            finalize: false,
+        },
+        Some(PendingOperation::AuthorizedTransfers { transfers, .. }) => {
+            LiquidityAuthorizationResponse {
+                swap: None,
+                transfers,
+                finalize: false,
+            }
+        }
+        None => LiquidityAuthorizationResponse {
+            swap: None,
+            transfers: vec![],
+            finalize: false,
+        },
+    };
+    Ok(authorization)
+}
+
 fn cw20_query(deps: Deps, env: Env, msg: cw20_base::msg::QueryMsg) -> StdResult<Binary> {
     cw20_base::contract::query(deps, env, msg)
 }
@@ -598,9 +770,23 @@ fn proportional_deposit_shares(
     let added_1 = post_balances[1]
         .checked_sub(pre_balances[1])
         .map_err(|_| ContractError::InvalidDepositSettlement)?;
-    Ok(added_0
-        .multiply_ratio(supply, pre_balances[0])
-        .min(added_1.multiply_ratio(supply, pre_balances[1])))
+    Ok(
+        checked_ratio(added_0, supply, pre_balances[0])?.min(checked_ratio(
+            added_1,
+            supply,
+            pre_balances[1],
+        )?),
+    )
+}
+
+fn checked_ratio(value: Uint128, numerator: Uint128, denominator: Uint128) -> StdResult<Uint128> {
+    if denominator.is_zero() {
+        return Err(StdError::generic_err("arithmetic denominator is zero"));
+    }
+    let result = Uint256::from(value) * Uint256::from(numerator) / Uint256::from(denominator);
+    result
+        .try_into()
+        .map_err(|_| StdError::generic_err("arithmetic result overflow"))
 }
 
 fn vault_transfer(
@@ -726,6 +912,116 @@ mod tests {
     }
 
     #[test]
+    fn proportional_shares_reports_overflow_without_panicking() {
+        assert!(proportional_deposit_shares(
+            [Uint128::one(), Uint128::one()],
+            [Uint128::MAX, Uint128::MAX],
+            Uint128::MAX,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn admin_transfer_requires_acceptance_and_can_be_cancelled() {
+        let mut deps = mock_dependencies();
+        CONFIG.save(deps.as_mut().storage, &test_config()).unwrap();
+        execute_transfer_admin(deps.as_mut(), mock_info("admin", &[]), "next".into()).unwrap();
+        assert_eq!(
+            CONFIG.load(&deps.storage).unwrap().admin,
+            Addr::unchecked("admin")
+        );
+        assert_eq!(
+            execute_accept_admin(deps.as_mut(), mock_info("other", &[])).unwrap_err(),
+            ContractError::Unauthorized
+        );
+        execute_cancel_admin_transfer(deps.as_mut(), mock_info("admin", &[])).unwrap();
+        assert!(PENDING_ADMIN.may_load(&deps.storage).unwrap().is_none());
+        execute_transfer_admin(deps.as_mut(), mock_info("admin", &[]), "next".into()).unwrap();
+        execute_accept_admin(deps.as_mut(), mock_info("next", &[])).unwrap();
+        assert_eq!(
+            CONFIG.load(&deps.storage).unwrap().admin,
+            Addr::unchecked("next")
+        );
+        assert_eq!(
+            execute_update_config(deps.as_mut(), mock_info("admin", &[]), None).unwrap_err(),
+            ContractError::Unauthorized
+        );
+    }
+
+    #[test]
+    fn authorization_is_scoped_to_pending_operation_and_cleared_by_reply() {
+        let mut deps = mock_dependencies();
+        let transfer = AuthorizedTransfer {
+            token: "token0".into(),
+            amount: Uint128::new(25),
+            recipient: "recipient".into(),
+        };
+        PENDING
+            .save(
+                deps.as_mut().storage,
+                &PendingOperation::AuthorizedTransfers {
+                    transfers: vec![transfer.clone()],
+                    replies_remaining: 1,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            liquidity_authorization(deps.as_ref()).unwrap(),
+            LiquidityAuthorizationResponse {
+                swap: None,
+                transfers: vec![transfer],
+                finalize: false,
+            }
+        );
+        assert_eq!(
+            execute_cw20(
+                deps.as_mut(),
+                mock_env(),
+                mock_info("holder", &[]),
+                ExecuteMsg::Transfer {
+                    recipient: "other".into(),
+                    amount: Uint128::one(),
+                },
+            )
+            .unwrap_err(),
+            ContractError::OperationPending
+        );
+        complete_authorized_transfer(deps.as_mut()).unwrap();
+        assert!(PENDING.may_load(&deps.storage).unwrap().is_none());
+        assert_eq!(
+            liquidity_authorization(deps.as_ref()).unwrap(),
+            LiquidityAuthorizationResponse {
+                swap: None,
+                transfers: vec![],
+                finalize: false,
+            }
+        );
+    }
+
+    #[test]
+    fn migration_preserves_config_and_rejects_pending_settlement() {
+        let mut deps = mock_dependencies();
+        CONFIG.save(deps.as_mut().storage, &test_config()).unwrap();
+        set_contract_version(deps.as_mut().storage, CONTRACT_NAME, "0.0.1").unwrap();
+        migrate(deps.as_mut(), mock_env(), MigrateMsg {}).unwrap();
+        assert_eq!(CONFIG.load(&deps.storage).unwrap(), test_config());
+
+        PENDING
+            .save(
+                deps.as_mut().storage,
+                &PendingOperation::AuthorizedTransfers {
+                    transfers: vec![],
+                    replies_remaining: 1,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            migrate(deps.as_mut(), mock_env(), MigrateMsg {}).unwrap_err(),
+            ContractError::OperationPending
+        );
+    }
+
+    #[test]
     fn update_config_is_admin_gated_and_updates_minimum() {
         let mut deps = mock_dependencies();
         CONFIG.save(deps.as_mut().storage, &test_config()).unwrap();
@@ -814,6 +1110,13 @@ mod tests {
                     base_amount: Uint128::new(50),
                     pre_payout_balance: Uint128::new(1_000),
                     min_amount: Uint128::new(40),
+                    swap: SwapParams {
+                        offer_token: "token1".into(),
+                        amount: Uint128::new(50),
+                        min_return: Uint128::new(40),
+                        max_spread: Decimal::percent(5),
+                        deadline: u64::MAX,
+                    },
                 },
             )
             .unwrap();

@@ -10,8 +10,9 @@ and sends proportional assets to users through its liquidity contract.
 
 ## Roles
 
-- `admin`: configures the liquidity controller once, updates keeper, thresholds,
-  and the TWAP observation window, and transfers administration.
+- `admin`: configures or revokes the liquidity controller, updates keeper,
+  thresholds and the TWAP observation window, pauses/resumes, and proposes
+  administration changes.
 - `liquidity_contract`: the only caller allowed to perform user-flow swaps or
   transfer underlying assets to withdrawal recipients.
 - `keeper`: may perform threshold-gated inventory rebalances or synchronize a
@@ -22,8 +23,9 @@ and sends proportional assets to users through its liquidity contract.
 
 The vault queries pair metadata and both CW20 token records. It rejects native
 assets, duplicate assets, mismatched token decimals, a zero TWAP window, and
-invalid threshold or risk-control values. The liquidity-controller address can be assigned
-only once.
+invalid threshold or risk-control values. Initial liquidity-controller binding
+requires a deployed contract whose configured vault and ordered assets match the
+vault and whose code ID equals `liquidity_code_id` approved at vault instantiation.
 
 ## Configuration Updates
 
@@ -39,9 +41,12 @@ rebalance trigger.
 
 ## User Operations
 
-The assigned liquidity contract may request a swap with a fixed offer token,
-amount, minimum return, maximum spread, and deadline. It may transfer only the
-two configured assets. There is no generic token withdrawal method.
+The assigned liquidity contract may request a swap or transfer only when its
+queryable pending operation authorizes the exact token, amount, recipient, minimum
+return, spread, and deadline. The vault rejects standing or modified requests and
+keeps keeper rebalances mutually exclusive with LP settlement. Every privileged
+call also checks that the controller still uses its pinned code ID; the admin can
+revoke it.
 
 ## Rebalancing
 
@@ -69,14 +74,21 @@ updates the reference to the captured TWAP.
 - User withdrawals can be initiated only by the assigned liquidity contract.
 - Keeper swap output returns directly to the vault.
 - Bot LP minting, burning, and transfers remain under the liquidity contract.
+- Vault swaps and transfers exactly match the current liquidity pending state.
 - Failed swaps or post-swap checks roll back all nested messages atomically.
 - Foreign CW20 donations are ignored because only configured assets are queried.
+- Admin transfer requires proposal and acceptance by the proposed address; the
+  current admin can cancel before acceptance.
+- Pause blocks deposits, swaps and keeper maintenance while preserving exact
+  authorized transfer settlement for pro-rata exits.
 
 ## Trust Assumptions
 
 - Admin and keeper keys must be separately controlled.
 - Each vault reads price from its single registered CL8Y pair.
 - The keeper supplies only a deadline; all economic parameters are on-chain.
+- The initially selected bot-liquidity implementation and its Wasm migration admin
+  remain trusted. A code-ID change halts calls but cannot prove initial code safety.
 
 Deployment and configuration examples are in
 [`docs/DEPLOYMENT.md`](../DEPLOYMENT.md) and

@@ -65,4 +65,10 @@ pub enum ContractError {
     InvalidMode,
     #[error("emergency exit still has tracked orders")]
     ExitOrdersRemain,
+    #[error("pair order status is indeterminate; retain the order and retry")]
+    OrderStatusUnverifiable,
+    #[error("legacy vault order inventory has not been positively reconciled")]
+    InventoryReconciliationRequired,
+    #[error("arithmetic result is outside the supported range")]
+    ArithmeticOutOfRange,
 }

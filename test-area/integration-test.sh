@@ -144,5 +144,17 @@ expect_execute_failure test1 "$LIQUIDITY_ADDRESS" \
     '{"deposit":{"amounts":["0","0"],"min_shares":"1","deadline":9999999999,"swap":null}}'
 expect_execute_failure attacker "$PROXY_ADDRESS" \
     "{\"withdraw_cl8y\":{\"amount\":\"1\",\"recipient\":\"$ATTACKER_ADDRESS\"}}"
+expect_execute_failure attacker "$VAULT_ADDRESS" '{"pause":{}}'
+execute_wait "$VAULT_ADDRESS" '{"pause":{}}'
+VAULT_CONFIG=$(terrad_query wasm contract-state smart "$VAULT_ADDRESS" '{"config":{}}')
+jq -e '.data.paused == true' <<<"$VAULT_CONFIG" >/dev/null
+expect_execute_failure test1 "$VAULT_ADDRESS" "$(vault_rebalance_message)"
+PAUSED_WITHDRAW=$(jq -nc --argjson deadline "$(($(date +%s) + 600))" \
+    '{withdraw:{shares:"1000",recipient:null,deadline:$deadline,
+      output:{pro_rata:{min_assets:["0","0"]}}}}')
+execute_wait "$LIQUIDITY_ADDRESS" "$PAUSED_WITHDRAW"
+execute_wait "$VAULT_ADDRESS" '{"resume":{}}'
+VAULT_CONFIG=$(terrad_query wasm contract-state smart "$VAULT_ADDRESS" '{"config":{}}')
+jq -e '.data.paused == false' <<<"$VAULT_CONFIG" >/dev/null
 
 echo "Clean bot-vault integration suite passed."

@@ -1,21 +1,25 @@
 use bot_types::{
-    RebalancePlanResponse, RebalanceStatusResponse, SwapParams, SwapProxyHookMsg,
-    VaultBalancesResponse, VaultConfigResponse, VaultExecuteMsg, VaultPriceResponse, VaultQueryMsg,
+    AuthorizedTransfer, LiquidityAuthorizationResponse, RebalancePlanResponse,
+    RebalanceStatusResponse, SwapParams, SwapProxyHookMsg, VaultBalancesResponse,
+    VaultConfigResponse, VaultExecuteMsg, VaultPriceResponse, VaultQueryMsg,
 };
 use cl8y_dex::{
     Asset, AssetInfo, HybridSimulationResponse, HybridSwapParams, ObserveResponse, PairInfo,
     PairQueryMsg, PoolResponse,
 };
+use cosmwasm_schema::cw_serde;
 use cosmwasm_std::{
     entry_point, to_json_binary, Addr, Binary, Decimal, Deps, DepsMut, Env, MessageInfo, Reply,
     Response, StdError, StdResult, SubMsg, Uint128, Uint256, WasmMsg,
 };
-use cw2::set_contract_version;
+use cw2::{get_contract_version, set_contract_version};
 use cw20::{BalanceResponse, Cw20ExecuteMsg, Cw20QueryMsg, TokenInfoResponse};
 
 use crate::error::ContractError;
-use crate::msg::InstantiateMsg;
-use crate::state::{Config, PendingRebalance, CONFIG, PENDING_REBALANCE};
+use crate::msg::{InstantiateMsg, MigrateMsg};
+use crate::state::{
+    Config, PendingRebalance, CONFIG, LIQUIDITY_CODE_ID, PAUSED, PENDING_ADMIN, PENDING_REBALANCE,
+};
 
 const CONTRACT_NAME: &str = "crates.io:cl8y-bot-vault";
 const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -37,6 +41,22 @@ const MAX_ALLOCATION_TOLERANCE_BPS: u16 = 2_000;
 const MAX_TWAP_WINDOW_SECONDS: u32 = 86_400;
 const REBALANCE_REPLY_ID: u64 = 1;
 
+#[cw_serde]
+enum LiquidityQueryMsg {
+    Config {},
+    Authorization {},
+}
+
+#[cw_serde]
+#[allow(dead_code)]
+struct LiquidityConfigResponse {
+    admin: String,
+    pending_admin: Option<String>,
+    vault: String,
+    asset_tokens: [String; 2],
+    minimum_initial_deposit: Uint128,
+}
+
 #[entry_point]
 pub fn instantiate(
     deps: DepsMut,
@@ -44,6 +64,9 @@ pub fn instantiate(
     _info: MessageInfo,
     msg: InstantiateMsg,
 ) -> Result<Response, ContractError> {
+    if msg.liquidity_code_id == 0 {
+        return Err(ContractError::InvalidLiquidityContract);
+    }
     set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
     let pair = deps.api.addr_validate(&msg.pair)?;
     let pair_info: PairInfo = deps
@@ -119,9 +142,41 @@ pub fn instantiate(
     };
     config.reference_price = query_price(deps.as_ref(), &env, &config)?;
     CONFIG.save(deps.storage, &config)?;
+    LIQUIDITY_CODE_ID.save(deps.storage, &msg.liquidity_code_id)?;
+    PAUSED.save(deps.storage, &false)?;
     Ok(Response::new()
         .add_attribute("action", "instantiate")
         .add_attribute("vault", env.contract.address))
+}
+
+#[entry_point]
+pub fn migrate(deps: DepsMut, _env: Env, msg: MigrateMsg) -> Result<Response, ContractError> {
+    let previous = get_contract_version(deps.storage)?;
+    if previous.contract != CONTRACT_NAME {
+        return Err(ContractError::Std(StdError::generic_err(
+            "unsupported migration source",
+        )));
+    }
+    if msg.liquidity_code_id == 0 {
+        return Err(ContractError::InvalidLiquidityContract);
+    }
+    if PENDING_REBALANCE.may_load(deps.storage)?.is_some() {
+        return Err(ContractError::RebalancePending);
+    }
+    // Legacy bindings were not reciprocally checked or code-pinned. Requiring an
+    // explicit rebind is safer than silently preserving custodial authority.
+    CONFIG.update(deps.storage, |mut config| -> StdResult<_> {
+        config.liquidity_contract = None;
+        Ok(config)
+    })?;
+    LIQUIDITY_CODE_ID.save(deps.storage, &msg.liquidity_code_id)?;
+    PAUSED.save(deps.storage, &true)?;
+    PENDING_ADMIN.remove(deps.storage);
+    set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
+    Ok(Response::new()
+        .add_attribute("action", "migrate_bot_vault")
+        .add_attribute("from_version", previous.version)
+        .add_attribute("liquidity_rebind_required", "true"))
 }
 
 #[entry_point]
@@ -133,7 +188,7 @@ pub fn execute(
 ) -> Result<Response, ContractError> {
     match msg {
         VaultExecuteMsg::SetLiquidityContract { liquidity_contract } => {
-            execute_set_liquidity(deps, info, liquidity_contract)
+            execute_set_liquidity(deps, env, info, liquidity_contract)
         }
         VaultExecuteMsg::LiquiditySwap { params } => {
             execute_liquidity_swap(deps, env, info, params)
@@ -172,11 +227,17 @@ pub fn execute(
             twap_window_seconds,
         ),
         VaultExecuteMsg::TransferAdmin { admin } => execute_transfer_admin(deps, info, admin),
+        VaultExecuteMsg::AcceptAdmin {} => execute_accept_admin(deps, info),
+        VaultExecuteMsg::CancelAdminTransfer {} => execute_cancel_admin_transfer(deps, info),
+        VaultExecuteMsg::RevokeLiquidityContract {} => execute_revoke_liquidity(deps, info),
+        VaultExecuteMsg::Pause {} => execute_pause(deps, info),
+        VaultExecuteMsg::Resume {} => execute_resume(deps, info),
     }
 }
 
 fn execute_set_liquidity(
     deps: DepsMut,
+    env: Env,
     info: MessageInfo,
     liquidity_contract: String,
 ) -> Result<Response, ContractError> {
@@ -185,7 +246,23 @@ fn execute_set_liquidity(
     if config.liquidity_contract.is_some() {
         return Err(ContractError::LiquidityAlreadyConfigured);
     }
-    config.liquidity_contract = Some(deps.api.addr_validate(&liquidity_contract)?);
+    let candidate = deps.api.addr_validate(&liquidity_contract)?;
+    let binding: LiquidityConfigResponse = deps
+        .querier
+        .query_wasm_smart(&candidate, &LiquidityQueryMsg::Config {})
+        .map_err(|_| ContractError::InvalidLiquidityContract)?;
+    if binding.vault != env.contract.address.as_str() {
+        return Err(ContractError::LiquidityVaultMismatch);
+    }
+    if binding.asset_tokens != config.asset_tokens.clone().map(|token| token.to_string()) {
+        return Err(ContractError::LiquidityAssetsMismatch);
+    }
+    let info = deps.querier.query_wasm_contract_info(&candidate)?;
+    let approved_code_id = LIQUIDITY_CODE_ID.load(deps.storage)?;
+    if info.code_id != approved_code_id {
+        return Err(ContractError::LiquidityCodeMismatch);
+    }
+    config.liquidity_contract = Some(candidate);
     CONFIG.save(deps.storage, &config)?;
     Ok(Response::new()
         .add_attribute("action", "set_liquidity_contract")
@@ -199,7 +276,15 @@ fn execute_liquidity_swap(
     params: SwapParams,
 ) -> Result<Response, ContractError> {
     let config = CONFIG.load(deps.storage)?;
-    assert_liquidity(&config, &info.sender)?;
+    assert_liquidity(deps.as_ref(), &config, &info.sender)?;
+    assert_not_paused(deps.as_ref())?;
+    if PENDING_REBALANCE.may_load(deps.storage)?.is_some() {
+        return Err(ContractError::RebalancePending);
+    }
+    let authorization = query_liquidity_authorization(deps.as_ref(), &config)?;
+    if authorization.swap.as_ref() != Some(&params) {
+        return Err(ContractError::LiquidityOperationNotAuthorized);
+    }
     validate_swap(deps.as_ref(), &env, &config, &params)?;
     Ok(Response::new()
         .add_message(proxy_swap_message(&config, params.clone())?)
@@ -216,7 +301,10 @@ fn execute_transfer(
     recipient: String,
 ) -> Result<Response, ContractError> {
     let config = CONFIG.load(deps.storage)?;
-    assert_liquidity(&config, &info.sender)?;
+    assert_liquidity(deps.as_ref(), &config, &info.sender)?;
+    if PENDING_REBALANCE.may_load(deps.storage)?.is_some() {
+        return Err(ContractError::RebalancePending);
+    }
     let token = deps.api.addr_validate(&token)?;
     if !config.asset_tokens.contains(&token) {
         return Err(ContractError::UnsupportedToken);
@@ -225,6 +313,17 @@ fn execute_transfer(
         return Err(ContractError::ZeroAmount);
     }
     let recipient = deps.api.addr_validate(&recipient)?;
+    let requested = AuthorizedTransfer {
+        token: token.to_string(),
+        amount,
+        recipient: recipient.to_string(),
+    };
+    if !query_liquidity_authorization(deps.as_ref(), &config)?
+        .transfers
+        .contains(&requested)
+    {
+        return Err(ContractError::LiquidityOperationNotAuthorized);
+    }
     Ok(Response::new()
         .add_message(WasmMsg::Execute {
             contract_addr: token.to_string(),
@@ -240,7 +339,14 @@ fn execute_transfer(
 
 fn execute_finalize(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractError> {
     let config = CONFIG.load(deps.storage)?;
-    assert_liquidity(&config, &info.sender)?;
+    assert_liquidity(deps.as_ref(), &config, &info.sender)?;
+    assert_not_paused(deps.as_ref())?;
+    if PENDING_REBALANCE.may_load(deps.storage)?.is_some() {
+        return Err(ContractError::RebalancePending);
+    }
+    if !query_liquidity_authorization(deps.as_ref(), &config)?.finalize {
+        return Err(ContractError::LiquidityOperationNotAuthorized);
+    }
     Ok(Response::new().add_attribute("action", "finalize_liquidity_operation"))
 }
 
@@ -254,9 +360,11 @@ fn execute_rebalance(
     if info.sender != config.keeper {
         return Err(ContractError::Unauthorized);
     }
+    assert_not_paused(deps.as_ref())?;
     if PENDING_REBALANCE.may_load(deps.storage)?.is_some() {
         return Err(ContractError::RebalancePending);
     }
+    ensure_no_liquidity_operation(deps.as_ref(), &config)?;
     if deadline < env.block.time.seconds() {
         return Err(ContractError::Expired);
     }
@@ -320,6 +428,8 @@ fn execute_sync_reference(
     if info.sender != config.keeper {
         return Err(ContractError::Unauthorized);
     }
+    assert_not_paused(deps.as_ref())?;
+    ensure_no_liquidity_operation(deps.as_ref(), &config)?;
     let status = rebalance_status(deps.as_ref(), &env, &config)?;
     if !status.should_rebalance {
         return Err(ContractError::RebalanceNotRequired);
@@ -453,11 +563,81 @@ fn execute_transfer_admin(
     info: MessageInfo,
     admin: String,
 ) -> Result<Response, ContractError> {
-    let mut config = CONFIG.load(deps.storage)?;
+    let config = CONFIG.load(deps.storage)?;
     assert_admin(&config, &info.sender)?;
-    config.admin = deps.api.addr_validate(&admin)?;
-    CONFIG.save(deps.storage, &config)?;
-    Ok(Response::new().add_attribute("action", "transfer_admin"))
+    let pending = deps.api.addr_validate(&admin)?;
+    PENDING_ADMIN.save(deps.storage, &pending)?;
+    Ok(Response::new()
+        .add_attribute("action", "propose_admin")
+        .add_attribute("current_admin", config.admin)
+        .add_attribute("pending_admin", pending))
+}
+
+fn execute_accept_admin(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractError> {
+    let pending = PENDING_ADMIN
+        .may_load(deps.storage)?
+        .ok_or(ContractError::Unauthorized)?;
+    if info.sender != pending {
+        return Err(ContractError::Unauthorized);
+    }
+    let previous = CONFIG.load(deps.storage)?.admin;
+    CONFIG.update(deps.storage, |mut config| -> Result<_, ContractError> {
+        config.admin = info.sender.clone();
+        Ok(config)
+    })?;
+    PENDING_ADMIN.remove(deps.storage);
+    Ok(Response::new()
+        .add_attribute("action", "accept_admin")
+        .add_attribute("previous_admin", previous)
+        .add_attribute("admin", info.sender))
+}
+
+fn execute_cancel_admin_transfer(
+    deps: DepsMut,
+    info: MessageInfo,
+) -> Result<Response, ContractError> {
+    let config = CONFIG.load(deps.storage)?;
+    assert_admin(&config, &info.sender)?;
+    PENDING_ADMIN.remove(deps.storage);
+    Ok(Response::new().add_attribute("action", "cancel_admin_transfer"))
+}
+
+fn execute_revoke_liquidity(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractError> {
+    CONFIG.update(deps.storage, |mut config| -> Result<_, ContractError> {
+        assert_admin(&config, &info.sender)?;
+        config.liquidity_contract = None;
+        Ok(config)
+    })?;
+    PAUSED.save(deps.storage, &true)?;
+    Ok(Response::new().add_attribute("action", "revoke_liquidity_contract"))
+}
+
+fn execute_pause(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractError> {
+    let config = CONFIG.load(deps.storage)?;
+    assert_admin(&config, &info.sender)?;
+    if PAUSED.may_load(deps.storage)?.unwrap_or(true) {
+        return Err(ContractError::Paused);
+    }
+    PAUSED.save(deps.storage, &true)?;
+    Ok(Response::new().add_attribute("action", "pause"))
+}
+
+fn execute_resume(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractError> {
+    let config = CONFIG.load(deps.storage)?;
+    assert_admin(&config, &info.sender)?;
+    if !PAUSED.may_load(deps.storage)?.unwrap_or(true) {
+        return Err(ContractError::NotPaused);
+    }
+    let liquidity = config
+        .liquidity_contract
+        .as_ref()
+        .ok_or(ContractError::LiquidityNotConfigured)?;
+    let expected = LIQUIDITY_CODE_ID.load(deps.storage)?;
+    if deps.querier.query_wasm_contract_info(liquidity)?.code_id != expected {
+        return Err(ContractError::LiquidityCodeMismatch);
+    }
+    PAUSED.save(deps.storage, &false)?;
+    Ok(Response::new().add_attribute("action", "resume"))
 }
 
 #[entry_point]
@@ -466,8 +646,13 @@ pub fn query(deps: Deps, env: Env, msg: VaultQueryMsg) -> StdResult<Binary> {
     match msg {
         VaultQueryMsg::Config {} => to_json_binary(&VaultConfigResponse {
             admin: config.admin.to_string(),
+            pending_admin: PENDING_ADMIN
+                .may_load(deps.storage)?
+                .map(|admin| admin.to_string()),
             keeper: config.keeper.to_string(),
             liquidity_contract: config.liquidity_contract.map(|addr| addr.to_string()),
+            liquidity_code_id: LIQUIDITY_CODE_ID.may_load(deps.storage)?,
+            paused: PAUSED.may_load(deps.storage)?.unwrap_or(true),
             proxy: config.proxy.to_string(),
             pair: config.pair.to_string(),
             asset_tokens: config.asset_tokens.map(|addr| addr.to_string()),
@@ -501,7 +686,7 @@ fn rebalance_status(deps: Deps, env: &Env, config: &Config) -> StdResult<Rebalan
     let allocation_deviation_bps = allocation_deviation(holdings, current_price)?;
     let price_deviation_bps = relative_deviation(current_price, config.reference_price)?;
     Ok(RebalanceStatusResponse {
-        should_rebalance: price_deviation_bps >= config.rebalance_threshold_bps,
+        should_rebalance: rebalance_required(price_deviation_bps, allocation_deviation_bps, config),
         price_deviation_bps,
         allocation_deviation_bps,
         reference_price: config.reference_price,
@@ -514,7 +699,8 @@ fn rebalance_plan(deps: Deps, env: &Env, config: &Config) -> StdResult<Rebalance
     let holdings = balances(deps, &env.contract.address, config)?;
     let price_deviation_bps = relative_deviation(captured_twap, config.reference_price)?;
     let allocation_deviation_bps = allocation_deviation(holdings, captured_twap)?;
-    let should_rebalance = price_deviation_bps >= config.rebalance_threshold_bps;
+    let should_rebalance =
+        rebalance_required(price_deviation_bps, allocation_deviation_bps, config);
     let offer = if should_rebalance {
         planned_offer(holdings, captured_twap, config.max_trade_bps)?
     } else {
@@ -637,9 +823,9 @@ fn planned_offer(
 
 fn expected_return(amount: Uint128, offer_index: usize, price: Decimal) -> StdResult<Uint128> {
     if offer_index == 0 {
-        Ok(price * amount)
+        checked_ratio(amount, price.atomics(), Decimal::one().atomics())
     } else {
-        Ok(amount.multiply_ratio(Decimal::one().atomics(), price.atomics()))
+        checked_ratio(amount, Decimal::one().atomics(), price.atomics())
     }
 }
 
@@ -659,7 +845,13 @@ fn ratio_deviation(actual: Uint256, expected: Uint256) -> StdResult<u16> {
     } else {
         expected - actual
     };
-    let value = (difference * Uint256::from(10_000u16) / expected).min(Uint256::from(10_000u16));
+    if difference >= expected {
+        return Ok(10_000);
+    }
+    let value = difference
+        .checked_multiply_ratio(Uint256::from(10_000u16), expected)
+        .map_err(|_| StdError::generic_err("deviation overflow"))?
+        .min(Uint256::from(10_000u16));
     value
         .to_string()
         .parse()
@@ -737,7 +929,14 @@ fn assert_admin(config: &Config, sender: &Addr) -> Result<(), ContractError> {
     Ok(())
 }
 
-fn assert_liquidity(config: &Config, sender: &Addr) -> Result<(), ContractError> {
+fn assert_not_paused(deps: Deps) -> Result<(), ContractError> {
+    if PAUSED.may_load(deps.storage)?.unwrap_or(true) {
+        return Err(ContractError::Paused);
+    }
+    Ok(())
+}
+
+fn assert_liquidity(deps: Deps, config: &Config, sender: &Addr) -> Result<(), ContractError> {
     let liquidity = config
         .liquidity_contract
         .as_ref()
@@ -745,7 +944,57 @@ fn assert_liquidity(config: &Config, sender: &Addr) -> Result<(), ContractError>
     if sender != liquidity {
         return Err(ContractError::Unauthorized);
     }
+    let expected = LIQUIDITY_CODE_ID
+        .may_load(deps.storage)?
+        .ok_or(ContractError::LiquidityCodeMismatch)?;
+    if deps.querier.query_wasm_contract_info(liquidity)?.code_id != expected {
+        return Err(ContractError::LiquidityCodeMismatch);
+    }
     Ok(())
+}
+
+fn query_liquidity_authorization(
+    deps: Deps,
+    config: &Config,
+) -> Result<LiquidityAuthorizationResponse, ContractError> {
+    let liquidity = config
+        .liquidity_contract
+        .as_ref()
+        .ok_or(ContractError::LiquidityNotConfigured)?;
+    deps.querier
+        .query_wasm_smart(liquidity, &LiquidityQueryMsg::Authorization {})
+        .map_err(ContractError::from)
+}
+
+fn ensure_no_liquidity_operation(deps: Deps, config: &Config) -> Result<(), ContractError> {
+    if config.liquidity_contract.is_none() {
+        return Ok(());
+    }
+    let authorization = query_liquidity_authorization(deps, config)?;
+    if authorization.swap.is_some() || !authorization.transfers.is_empty() || authorization.finalize
+    {
+        return Err(ContractError::RebalancePending);
+    }
+    Ok(())
+}
+
+fn checked_ratio(value: Uint128, numerator: Uint128, denominator: Uint128) -> StdResult<Uint128> {
+    if denominator.is_zero() {
+        return Err(StdError::generic_err("arithmetic denominator is zero"));
+    }
+    let result = Uint256::from(value) * Uint256::from(numerator) / Uint256::from(denominator);
+    result
+        .try_into()
+        .map_err(|_| StdError::generic_err("arithmetic result overflow"))
+}
+
+fn rebalance_required(
+    price_deviation_bps: u16,
+    allocation_deviation_bps: u16,
+    config: &Config,
+) -> bool {
+    price_deviation_bps >= config.rebalance_threshold_bps
+        || allocation_deviation_bps > config.allocation_tolerance_bps
 }
 
 fn validate_threshold(value: u16) -> Result<(), ContractError> {
@@ -802,7 +1051,9 @@ fn validate_pool_safety(
     if reserves[0].is_zero() || reserves[1].is_zero() {
         return Err(ContractError::InsufficientPoolDepth);
     }
-    let spot = Decimal::from_ratio(reserves[1], reserves[0]);
+    let spot_atomics = checked_ratio(reserves[1], Decimal::one().atomics(), reserves[0])?;
+    let spot = Decimal::from_atomics(spot_atomics, Decimal::DECIMAL_PLACES)
+        .map_err(|_| ContractError::ArithmeticOutOfRange)?;
     if relative_deviation(spot, twap)? > max_spot_twap_deviation_bps {
         return Err(ContractError::UnsafePoolPrice);
     }
@@ -829,7 +1080,7 @@ fn validate_rebalance_outcome(
 mod tests {
     use super::*;
     use cosmwasm_std::testing::{mock_dependencies, mock_env, mock_info};
-    use cosmwasm_std::{from_json, ContractResult, SystemResult, WasmQuery};
+    use cosmwasm_std::{from_json, ContractInfoResponse, ContractResult, SystemResult, WasmQuery};
 
     #[test]
     fn ratio_deviation_uses_reference_basis() {
@@ -1108,6 +1359,168 @@ mod tests {
             expected_return(Uint128::new(100), 1, Decimal::percent(200)).unwrap(),
             Uint128::new(50)
         );
+    }
+
+    #[test]
+    fn expected_return_reports_extreme_overflow_without_panicking() {
+        let maximum_price = Decimal::from_atomics(Uint128::MAX, 18).unwrap();
+        assert!(expected_return(Uint128::MAX, 0, maximum_price).is_err());
+        let minimum_price = Decimal::from_atomics(Uint128::one(), 18).unwrap();
+        assert!(expected_return(Uint128::MAX, 1, minimum_price).is_err());
+        assert_eq!(
+            expected_return(Uint128::zero(), 0, maximum_price).unwrap(),
+            Uint128::zero()
+        );
+    }
+
+    #[test]
+    fn deviation_caps_extreme_intermediate_without_panicking() {
+        assert_eq!(
+            ratio_deviation(Uint256::MAX, Uint256::one()).unwrap(),
+            10_000
+        );
+    }
+
+    #[test]
+    fn liquidity_authority_is_rejected_after_unapproved_migration() {
+        let mut deps = mock_dependencies();
+        let config = Config {
+            admin: Addr::unchecked("admin"),
+            keeper: Addr::unchecked("keeper"),
+            liquidity_contract: Some(Addr::unchecked("liquidity")),
+            proxy: Addr::unchecked("proxy"),
+            pair: Addr::unchecked("pair"),
+            asset_tokens: [Addr::unchecked("token0"), Addr::unchecked("token1")],
+            decimals: 6,
+            twap_window_seconds: 60,
+            rebalance_threshold_bps: 500,
+            allocation_tolerance_bps: 500,
+            max_trade_bps: 2_500,
+            max_execution_deviation_bps: 500,
+            quote_slippage_bps: 200,
+            max_spot_twap_deviation_bps: 500,
+            max_trade_pool_bps: 1_000,
+            max_spread: Decimal::percent(5),
+            reference_price: Decimal::one(),
+        };
+        CONFIG.save(deps.as_mut().storage, &config).unwrap();
+        LIQUIDITY_CODE_ID.save(deps.as_mut().storage, &7).unwrap();
+        PAUSED.save(deps.as_mut().storage, &false).unwrap();
+        deps.querier.update_wasm(|query| match query {
+            WasmQuery::ContractInfo { .. } => {
+                let mut response = ContractInfoResponse::default();
+                response.code_id = 8;
+                SystemResult::Ok(ContractResult::Ok(to_json_binary(&response).unwrap()))
+            }
+            _ => SystemResult::Ok(ContractResult::Err("unsupported".into())),
+        });
+        assert_eq!(
+            assert_liquidity(deps.as_ref(), &config, &Addr::unchecked("liquidity")).unwrap_err(),
+            ContractError::LiquidityCodeMismatch
+        );
+        deps.querier.update_wasm(|query| match query {
+            WasmQuery::ContractInfo { .. } => {
+                let mut response = ContractInfoResponse::default();
+                response.code_id = 7;
+                SystemResult::Ok(ContractResult::Ok(to_json_binary(&response).unwrap()))
+            }
+            WasmQuery::Smart { .. } => SystemResult::Ok(ContractResult::Ok(
+                to_json_binary(&LiquidityAuthorizationResponse {
+                    swap: None,
+                    transfers: vec![AuthorizedTransfer {
+                        token: "token0".into(),
+                        amount: Uint128::new(10),
+                        recipient: "approved".into(),
+                    }],
+                    finalize: false,
+                })
+                .unwrap(),
+            )),
+            _ => SystemResult::Ok(ContractResult::Err("unsupported".into())),
+        });
+        assert_eq!(
+            execute_transfer(
+                deps.as_mut(),
+                mock_info("liquidity", &[]),
+                "token0".into(),
+                Uint128::new(10),
+                "attacker".into(),
+            )
+            .unwrap_err(),
+            ContractError::LiquidityOperationNotAuthorized
+        );
+        let valid = execute_transfer(
+            deps.as_mut(),
+            mock_info("liquidity", &[]),
+            "token0".into(),
+            Uint128::new(10),
+            "approved".into(),
+        )
+        .unwrap();
+        assert_eq!(valid.messages.len(), 1);
+        assert_eq!(
+            execute_pause(deps.as_mut(), mock_info("attacker", &[])).unwrap_err(),
+            ContractError::Unauthorized
+        );
+        execute_pause(deps.as_mut(), mock_info("admin", &[])).unwrap();
+        assert_eq!(
+            assert_not_paused(deps.as_ref()).unwrap_err(),
+            ContractError::Paused
+        );
+        execute_resume(deps.as_mut(), mock_info("admin", &[])).unwrap();
+        assert!(!PAUSED.load(&deps.storage).unwrap());
+        execute_revoke_liquidity(deps.as_mut(), mock_info("admin", &[])).unwrap();
+        assert!(CONFIG
+            .load(&deps.storage)
+            .unwrap()
+            .liquidity_contract
+            .is_none());
+        assert_eq!(LIQUIDITY_CODE_ID.load(&deps.storage).unwrap(), 7);
+        assert!(PAUSED.load(&deps.storage).unwrap());
+        assert!(rebalance_required(500, 0, &config));
+        assert!(rebalance_required(0, 501, &config));
+        assert!(!rebalance_required(499, 500, &config));
+    }
+
+    #[test]
+    fn migration_revokes_liquidity_and_starts_paused() {
+        let mut deps = mock_dependencies();
+        let config = Config {
+            admin: Addr::unchecked("admin"),
+            keeper: Addr::unchecked("keeper"),
+            liquidity_contract: Some(Addr::unchecked("legacy_liquidity")),
+            proxy: Addr::unchecked("proxy"),
+            pair: Addr::unchecked("pair"),
+            asset_tokens: [Addr::unchecked("token0"), Addr::unchecked("token1")],
+            decimals: 6,
+            twap_window_seconds: 60,
+            rebalance_threshold_bps: 500,
+            allocation_tolerance_bps: 500,
+            max_trade_bps: 2_500,
+            max_execution_deviation_bps: 500,
+            quote_slippage_bps: 200,
+            max_spot_twap_deviation_bps: 500,
+            max_trade_pool_bps: 1_000,
+            max_spread: Decimal::percent(5),
+            reference_price: Decimal::one(),
+        };
+        CONFIG.save(deps.as_mut().storage, &config).unwrap();
+        set_contract_version(deps.as_mut().storage, CONTRACT_NAME, "0.0.1").unwrap();
+        migrate(
+            deps.as_mut(),
+            mock_env(),
+            MigrateMsg {
+                liquidity_code_id: 42,
+            },
+        )
+        .unwrap();
+        assert!(CONFIG
+            .load(&deps.storage)
+            .unwrap()
+            .liquidity_contract
+            .is_none());
+        assert_eq!(LIQUIDITY_CODE_ID.load(&deps.storage).unwrap(), 42);
+        assert!(PAUSED.load(&deps.storage).unwrap());
     }
 
     #[test]

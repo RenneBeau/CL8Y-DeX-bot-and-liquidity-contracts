@@ -6,6 +6,8 @@ Dry-run is the default. Pass --broadcast to sign with a terrad keyring entry.
 
 import argparse
 import base64
+import decimal
+import hashlib
 import json
 import os
 import subprocess
@@ -94,17 +96,43 @@ def smart_query(lcd, contract, message):
     return get_json(url)["data"]
 
 
-def plan_fingerprint(plan, message):
-    return json.dumps(
-        {
-            "captured_twap": plan["captured_twap"],
-            "balances": plan["balances"],
-            "reference_price": plan["reference_price"],
-            "action": next(iter(message)),
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    )
+FINGERPRINT_VERSION = 2
+
+
+def _canonical_value(value, key=""):
+    if isinstance(value, dict):
+        return {name: _canonical_value(item, name) for name, item in sorted(value.items())}
+    if isinstance(value, list):
+        return [_canonical_value(item, key) for item in value]
+    if isinstance(value, str):
+        if any(marker in key for marker in ("address", "token", "recipient", "pair", "vault")):
+            return value.strip().lower()
+        try:
+            number = decimal.Decimal(value)
+        except decimal.InvalidOperation:
+            return value
+        if not number.is_finite():
+            return value
+        normalized = format(number.normalize(), "f")
+        return "0" if normalized in ("-0", "") else normalized
+    return value
+
+
+def plan_fingerprint(plan, message, vault="", chain_id="", config_version="",
+                     deadline_seconds=None):
+    identity = {
+        "version": FINGERPRINT_VERSION,
+        "chain_id": chain_id.strip().lower(),
+        "vault": vault.strip().lower(),
+        "config_version": str(config_version),
+        "deadline_seconds": deadline_seconds,
+        "action": next(iter(message)),
+        "plan": plan,
+    }
+    canonical = json.dumps(
+        _canonical_value(identity), sort_keys=True, separators=(",", ":")
+    ).encode()
+    return f"v{FINGERPRINT_VERSION}:" + hashlib.sha256(canonical).hexdigest()
 
 
 def build_rebalance(plan, deadline):
@@ -271,7 +299,14 @@ def run_once(args, tracker):
 
     deadline = int(time.time()) + args.deadline_seconds
     message = build_rebalance(plan, deadline)
-    fingerprint = plan_fingerprint(plan, message)
+    fingerprint = plan_fingerprint(
+        plan,
+        message,
+        vault=args.vault,
+        chain_id=args.chain_id,
+        config_version=args.config_version,
+        deadline_seconds=args.deadline_seconds,
+    )
     if tracker.suppressed_plan == fingerprint:
         print("rebalance suppressed after deterministic failure; plan is unchanged")
         return
@@ -318,6 +353,7 @@ def parse_args():
     parser.add_argument("--tx-poll-seconds", type=float, default=float(os.getenv("KEEPER_TX_POLL_SECONDS", "2")))
     parser.add_argument("--tx-timeout-seconds", type=float, default=float(os.getenv("KEEPER_TX_TIMEOUT_SECONDS", "60")))
     parser.add_argument("--confirmation-blocks", type=int, default=int(os.getenv("KEEPER_CONFIRMATION_BLOCKS", "2")))
+    parser.add_argument("--config-version", default=os.getenv("KEEPER_CONFIG_VERSION", "1"))
     parser.add_argument("--state-file", default=os.getenv("KEEPER_STATE_FILE", ".keeper-state.json"))
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--broadcast", action="store_true")

@@ -157,6 +157,52 @@ class PlanFingerprintTests(unittest.TestCase):
             plan_fingerprint(plan, msg_reb),
         )
 
+    def test_all_economic_parameters_change_identity(self):
+        base = {
+            "should_rebalance": True,
+            "captured_twap": "1.5",
+            "balances": ["100", "200"],
+            "reference_price": "1",
+            "price_deviation_bps": 500,
+            "allocation_deviation_bps": 250,
+            "offer_token": "token0",
+            "ask_token": "token1",
+            "amount": "10",
+            "min_return": "9",
+            "max_spread": "0.05",
+            "recipient": "vault1",
+            "route": ["pair1"],
+            "pair": "pair1",
+            "risk": {"max_trade_bps": 2500},
+        }
+        message = {"rebalance": {"deadline": 1000}}
+        original = plan_fingerprint(base, message, "vault1", "chain1", "7", 120)
+        for field, value in (
+            ("amount", "11"), ("min_return", "8"), ("max_spread", "0.06"),
+            ("offer_token", "token2"), ("ask_token", "token2"),
+            ("recipient", "vault2"), ("route", ["pair2"]), ("pair", "pair2"),
+            ("risk", {"max_trade_bps": 2000}),
+        ):
+            changed = dict(base)
+            changed[field] = value
+            self.assertNotEqual(
+                original, plan_fingerprint(changed, message, "vault1", "chain1", "7", 120),
+                field,
+            )
+        self.assertNotEqual(original, plan_fingerprint(base, message, "vault2", "chain1", "7", 120))
+        self.assertNotEqual(original, plan_fingerprint(base, message, "vault1", "chain2", "7", 120))
+        self.assertNotEqual(original, plan_fingerprint(base, message, "vault1", "chain1", "8", 120))
+        self.assertNotEqual(original, plan_fingerprint(base, message, "vault1", "chain1", "7", 60))
+
+    def test_key_order_numbers_and_addresses_are_canonical(self):
+        first = {"amount": "1.00", "offer_token": " TOKEN0 ", "risk": {"b": 2, "a": 1}}
+        second = {"risk": {"a": 1, "b": 2}, "offer_token": "token0", "amount": "1"}
+        message = {"rebalance": {"deadline": 1000}}
+        self.assertEqual(
+            plan_fingerprint(first, message, "VAULT1", "CHAIN1", "1", 120),
+            plan_fingerprint(second, message, "vault1", "chain1", "1", 120),
+        )
+
 
 class QueryFinalTxTests(unittest.TestCase):
     def test_returns_lcd_response_when_available(self):
@@ -329,6 +375,7 @@ def _make_args(**overrides):
         gas_adjustment="1.4",
         gas_prices="28.325uluna",
         state_file=".keeper-state.json",
+        config_version="1",
         once=False,
     )
     base.update(overrides)
@@ -375,7 +422,14 @@ class RunOnceTests(unittest.TestCase):
                 with patch("builtins.print"):
                     run_once(args, tracker)
 
-        fp = plan_fingerprint(plan, {"rebalance": {"deadline": 1000 + 120}})
+        fp = plan_fingerprint(
+            plan,
+            {"rebalance": {"deadline": 1000 + 120}},
+            args.vault,
+            args.chain_id,
+            args.config_version,
+            args.deadline_seconds,
+        )
         tracker.suppressed_plan = fp
         tracker.save.reset_mock()
 

@@ -11,6 +11,20 @@ pub struct SwapParams {
 }
 
 #[cw_serde]
+pub struct AuthorizedTransfer {
+    pub token: String,
+    pub amount: Uint128,
+    pub recipient: String,
+}
+
+#[cw_serde]
+pub struct LiquidityAuthorizationResponse {
+    pub swap: Option<SwapParams>,
+    pub transfers: Vec<AuthorizedTransfer>,
+    pub finalize: bool,
+}
+
+#[cw_serde]
 pub enum SwapProxyHookMsg {
     Swap {
         pair: String,
@@ -55,6 +69,11 @@ pub enum VaultExecuteMsg {
     TransferAdmin {
         admin: String,
     },
+    AcceptAdmin {},
+    CancelAdminTransfer {},
+    RevokeLiquidityContract {},
+    Pause {},
+    Resume {},
 }
 
 #[cw_serde]
@@ -69,8 +88,11 @@ pub enum VaultQueryMsg {
 #[cw_serde]
 pub struct VaultConfigResponse {
     pub admin: String,
+    pub pending_admin: Option<String>,
     pub keeper: String,
     pub liquidity_contract: Option<String>,
+    pub liquidity_code_id: Option<u64>,
+    pub paused: bool,
     pub proxy: String,
     pub pair: String,
     pub asset_tokens: [String; 2],

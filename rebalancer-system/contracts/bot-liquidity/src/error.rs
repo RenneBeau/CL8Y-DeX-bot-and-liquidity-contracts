@@ -39,4 +39,6 @@ pub enum ContractError {
     InvalidVault,
     #[error("unknown reply id")]
     UnknownReply,
+    #[error("unsupported liquidity message")]
+    UnsupportedMessage,
 }

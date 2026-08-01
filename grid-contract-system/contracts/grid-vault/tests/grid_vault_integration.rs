@@ -197,11 +197,9 @@ fn mock_pair_execute(
                     return Err(StdError::generic_err("fill input token mismatch"));
                 }
                 order.remaining = order.remaining.checked_sub(fill.fill_amount)?;
-                if order.remaining.is_zero() {
-                    PAIR_ORDERS.remove(deps.storage, fill.order_id);
-                } else {
-                    PAIR_ORDERS.save(deps.storage, fill.order_id, &order)?;
-                }
+                // Keep a zero-remaining status queryable until the maker has
+                // positively observed completion. This models typed terminality.
+                PAIR_ORDERS.save(deps.storage, fill.order_id, &order)?;
                 let output_token = match order.side {
                     LimitOrderSide::Ask => PAIR_TOKEN_1.load(deps.storage)?,
                     LimitOrderSide::Bid => PAIR_TOKEN_0.load(deps.storage)?,
@@ -516,7 +514,8 @@ fn vault_code() -> Box<dyn Contract<Empty, Empty>> {
         cl8y_grid_vault::contract::instantiate,
         cl8y_grid_vault::contract::query,
     )
-    .with_reply(cl8y_grid_vault::contract::reply);
+    .with_reply(cl8y_grid_vault::contract::reply)
+    .with_migrate(cl8y_grid_vault::contract::migrate);
     Box::new(contract)
 }
 
@@ -1292,7 +1291,7 @@ fn unsolicited_transfer_can_be_synchronized_without_minting_shares() {
 }
 
 #[test]
-fn generic_pair_query_error_treated_as_terminal_without_panic() {
+fn generic_pair_query_error_retains_order_and_blocks_withdrawal() {
     let mut h = Harness::new();
     h.create_bot();
     h.deposit(1, &h.token_0.clone(), Uint128::new(1_000));
@@ -1302,15 +1301,52 @@ fn generic_pair_query_error_treated_as_terminal_without_panic() {
     let target = orders.first().unwrap();
     h.set_limit_order_error(target.order_id, Some("query reverted".to_string()));
 
-    // Reconcile must not panic: the generic error is treated as a terminal
-    // order with no refund (matching the pair-trust design).
+    // An untyped pair failure is not evidence that the order is terminal.
     let ids: Vec<u64> = h.orders(1).iter().map(|order| order.order_id).collect();
-    h.reconcile(1, ids);
+    let error = h
+        .app
+        .execute_contract(
+            h.keeper.clone(),
+            h.vault.clone(),
+            &VaultExecuteMsg::Reconcile {
+                bot_id: 1,
+                order_ids: ids,
+            },
+            &[],
+        )
+        .unwrap_err();
+    assert!(!error.to_string().is_empty());
 
     let bot = h.bot(1);
-    assert_eq!(bot.active_orders, 1);
-    assert_eq!(h.orders(1).len(), 1);
+    assert_eq!(bot.active_orders, 2);
+    assert_eq!(h.orders(1).len(), 2);
     assert_eq!(bot.free_balances[0], Uint128::zero());
+
+    let withdraw = h.app.execute_contract(
+        h.alice.clone(),
+        h.vault.clone(),
+        &VaultExecuteMsg::Withdraw {
+            bot_id: 1,
+            shares: Uint128::new(1),
+            recipient: None,
+        },
+        &[],
+    );
+    assert!(withdraw.is_err());
+
+    h.set_limit_order_error(target.order_id, None);
+    let retry_ids: Vec<u64> = h.orders(1).iter().map(|order| order.order_id).collect();
+    let retry = h.app.execute_contract(
+        h.keeper.clone(),
+        h.vault.clone(),
+        &VaultExecuteMsg::Reconcile {
+            bot_id: 1,
+            order_ids: retry_ids,
+        },
+        &[],
+    );
+    assert!(retry.is_err()); // No change is safe and reported explicitly.
+    assert_eq!(h.orders(1).len(), 2);
 }
 
 #[test]

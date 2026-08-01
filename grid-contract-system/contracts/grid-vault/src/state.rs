@@ -78,6 +78,9 @@ pub const PLACEMENTS: Map<u64, PlacementPlan> = Map::new("placements");
 pub const ALLOWED_TOKENS: Map<&Addr, ()> = Map::new("allowed_tokens");
 pub const TOKEN_POLICY_ENABLED: Item<bool> = Item::new("token_policy_enabled");
 pub const QUARANTINE: Map<&Addr, ()> = Map::new("quarantine");
+// A legacy vault cannot prove that vulnerable versions did not forget pair orders.
+pub const INVENTORY_RECONCILIATION_REQUIRED: Item<bool> =
+    Item::new("inventory_reconciliation_required");
 
 #[cw_serde]
 pub enum PageKind {

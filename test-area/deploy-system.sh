@@ -155,7 +155,8 @@ PROXY_ADDRESS=$(instantiate_contract "$PROXY_CODE_ID" "$PROXY_INIT" cl8y-shared-
 
 VAULT_INIT=$(jq -nc --arg admin "$TEST_ADDRESS" --arg keeper "$TEST_ADDRESS" \
     --arg proxy "$PROXY_ADDRESS" --arg pair "$PAIR_ADDRESS" \
-    '{admin:$admin,keeper:$keeper,proxy:$proxy,pair:$pair,twap_window_seconds:1,
+    --argjson liquidity_code_id "$LIQUIDITY_CODE_ID" \
+    '{admin:$admin,keeper:$keeper,proxy:$proxy,pair:$pair,liquidity_code_id:$liquidity_code_id,twap_window_seconds:1,
       rebalance_threshold_bps:500,allocation_tolerance_bps:500,max_trade_bps:2500,
       max_execution_deviation_bps:500,quote_slippage_bps:200,
       max_spot_twap_deviation_bps:500,max_trade_pool_bps:1000,max_spread:"0.05"}')

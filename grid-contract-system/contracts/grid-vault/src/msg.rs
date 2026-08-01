@@ -44,6 +44,11 @@ pub enum ExecuteMsg {
         bot_id: u64,
         order_ids: Vec<u64>,
     },
+    RecoverOrder {
+        bot_id: u64,
+        order_id: u64,
+        rung_index: u32,
+    },
     CancelAll {
         bot_id: u64,
     },
@@ -227,7 +232,11 @@ pub struct ConfigResponse {
     pub max_orders_per_reconcile: u32,
     pub max_active_orders_per_bot: u32,
     pub mode: VaultModeResponse,
+    pub inventory_reconciliation_required: bool,
 }
+
+#[cw_serde]
+pub struct MigrateMsg {}
 
 #[cw_serde]
 pub enum VaultModeResponse {

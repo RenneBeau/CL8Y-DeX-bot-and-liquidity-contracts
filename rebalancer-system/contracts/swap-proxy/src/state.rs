@@ -18,3 +18,4 @@ pub struct Route {
 pub const CONFIG: Item<Config> = Item::new("config");
 pub const ROUTES: Map<&Addr, Route> = Map::new("routes");
 pub const PAIR_VAULTS: Map<&Addr, Addr> = Map::new("pair_vaults");
+pub const PENDING_ADMIN: Item<Addr> = Item::new("pending_admin");

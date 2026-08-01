@@ -35,3 +35,6 @@ pub struct PendingRebalance {
 
 pub const CONFIG: Item<Config> = Item::new("config");
 pub const PENDING_REBALANCE: Item<PendingRebalance> = Item::new("pending_rebalance");
+pub const PENDING_ADMIN: Item<Addr> = Item::new("pending_admin");
+pub const LIQUIDITY_CODE_ID: Item<u64> = Item::new("liquidity_code_id");
+pub const PAUSED: Item<bool> = Item::new("paused");

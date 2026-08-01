@@ -101,6 +101,12 @@ rejected because this bootstrap-only setting can no longer affect deposits.
 }
 ```
 
+`transfer_admin` only proposes. The current admin remains active until the exact
+candidate executes `{"accept_admin":{}}`. Before acceptance, the current admin may
+execute `{"cancel_admin_transfer":{}}` or replace the proposal. Apply the same
+two-step process independently to bot-vault, bot-liquidity, and swap-proxy. This
+does not transfer the chain-level Wasm migration admin.
+
 ## Add Or Remove A Proxy Route
 
 Add:
@@ -148,6 +154,27 @@ Transfer proxy administration:
   }
 }
 ```
+
+The proposed proxy admin must execute `{"accept_admin":{}}`; the current proxy
+admin may execute `{"cancel_admin_transfer":{}}` first.
+
+## Emergency Pause
+
+The vault admin pauses new deposits, swaps and keeper maintenance with:
+
+```json
+{"pause":{}}
+```
+
+Pro-rata transfer settlement remains available. Single-token withdrawals that
+require a swap fail without burning shares. `revoke_liquidity_contract` also pauses
+the vault. After verifying and rebinding the approved controller, resume with:
+
+```json
+{"resume":{}}
+```
+
+Follow [`RELEASE_READINESS.md`](RELEASE_READINESS.md) before resuming.
 
 ## Keeper Rebalance
 

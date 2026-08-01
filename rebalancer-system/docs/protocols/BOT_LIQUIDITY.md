@@ -21,6 +21,8 @@ The contract delegates standard transfer, send, burn, allowance, delegated
 transfer, marketing, and CW20 query behavior to `cw20-base`. Only the contract
 itself is configured as minter. Each vault receives its own liquidity-token
 instance, keeping every bot's shares tied to that bot's portfolio.
+Balance- or supply-mutating CW20 operations are rejected while an LP settlement
+is pending.
 
 ## Deposits
 
@@ -29,7 +31,8 @@ an optional swap. Transfers go directly from the user to the vault. A deposit
 swap can spend only the offer token and amount included in that deposit, which
 prevents a depositor from rebalancing incumbent assets for personal benefit.
 
-The contract stores one pending operation and uses a reply after all nested
+The contract stores one pending operation, exposes its exact authorization to the
+vault, and uses a reply after all nested
 messages settle. It measures actual vault balance changes and checks final
 allocation. The first mint uses a price snapshot; established-vault mints use
 the smaller proportional contribution across both assets. No shares are minted
@@ -38,8 +41,9 @@ before settlement.
 ## Withdrawals
 
 Claims use vault balances and total supply before shares are burned. Pro-rata
-withdrawals burn shares and transfer both claims at the vault's current A/B
-ratio atomically. Token-0-only and token-1-only withdrawals require a swap
+withdrawals record both authorized transfers, burn shares and transfer both claims
+at the vault's current A/B ratio atomically. Transfer replies clear the authorization
+only after every leg succeeds. Token-0-only and token-1-only withdrawals require a swap
 spending exactly the user's unwanted-token claim and use an escrow pattern:
 the shares are **not** burned up front. The swap is dispatched as a
 `reply_always` submessage. On success the reply burns the owner's shares and
@@ -60,6 +64,7 @@ owner keeps their shares — a failed swap can never strand a position.
 ## Invariants
 
 - At most one pending deposit or single-token withdrawal per transaction.
+- Each vault transfer or swap must exactly match the pending operation.
 - Share minting occurs only after settled balance and allocation checks.
 - Withdrawal claims are proportional to pre-burn supply.
 - A single-token withdrawal swaps only that owner's proportional claim.

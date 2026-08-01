@@ -1,3 +1,4 @@
+use bot_types::{AuthorizedTransfer, SwapParams};
 use cosmwasm_schema::cw_serde;
 use cosmwasm_std::{Addr, Decimal, Uint128};
 use cw_storage_plus::Item;
@@ -18,6 +19,7 @@ pub enum PendingOperation {
         pre_supply: Uint128,
         price: Decimal,
         min_shares: Uint128,
+        swap: Option<SwapParams>,
     },
     WithdrawSingle {
         owner: Addr,
@@ -27,8 +29,14 @@ pub enum PendingOperation {
         base_amount: Uint128,
         pre_payout_balance: Uint128,
         min_amount: Uint128,
+        swap: SwapParams,
+    },
+    AuthorizedTransfers {
+        transfers: Vec<AuthorizedTransfer>,
+        replies_remaining: u8,
     },
 }
 
 pub const CONFIG: Item<Config> = Item::new("config");
 pub const PENDING: Item<PendingOperation> = Item::new("pending");
+pub const PENDING_ADMIN: Item<Addr> = Item::new("pending_admin");

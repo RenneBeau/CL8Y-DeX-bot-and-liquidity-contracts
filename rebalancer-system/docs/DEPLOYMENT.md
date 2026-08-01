@@ -6,11 +6,18 @@ change the bot settings later.
 
 ## Upgrade Policy
 
-The current contracts have no funded legacy deployment and do not expose a
-`migrate` entry point. Releases that change stored state require fresh contract
-instantiation and configuration; do not replace code on an older instance.
-Add and test an explicit versioned migration before any future in-place upgrade
-of a funded deployment.
+The contracts expose guarded `migrate` entry points that verify the cw2 contract
+identity and preserve existing storage. Rebalancer vault migration deliberately
+revokes the legacy liquidity binding because older releases did not verify it;
+the admin must bind the deployed bot-liquidity contract again after migration.
+Pending admin proposals are cleared. Internal admin migration does not transfer
+the chain-level Wasm admin. Migrated vaults start paused and require a verified
+liquidity rebind before `resume`. Rehearse the exact source version and funded-state
+fixture before any production upgrade; the current local migration tests are not
+a substitute for a chain rehearsal.
+
+Release gates, multisig separation, canary caps, pause commands and monitoring
+stop conditions are defined in [`RELEASE_READINESS.md`](RELEASE_READINESS.md).
 
 ## Contract Instances
 
@@ -182,7 +189,7 @@ Record `LIQUIDITY_ADDRESS`.
 
 ### 3. Connect The Liquidity Contract
 
-The vault admin executes this once on `VAULT_ADDRESS`:
+The vault admin executes this on `VAULT_ADDRESS`:
 
 ```json
 {
@@ -191,6 +198,16 @@ The vault admin executes this once on `VAULT_ADDRESS`:
   }
 }
 ```
+
+The vault instantiate message must contain the governance-approved uploaded
+`liquidity_code_id`. The vault rejects an account, unrelated contract, or any
+candidate whose current code ID differs. It queries the candidate's
+configured vault and ordered assets, records its current Wasm code ID, and checks
+that code ID on every swap, transfer, and finalize call. Query vault `config` and
+record both `liquidity_contract` and `liquidity_code_id`. Treat the liquidity
+contract and its chain migration admin as custodial components. Use
+`revoke_liquidity_contract` immediately if the binding is compromised; restoring
+service requires binding a valid controller again.
 
 ### 4. Register The Vault With The Proxy
 

@@ -1,112 +1,77 @@
-# Verification Report
+# Verification Evidence
 
-Last synchronized: 2026-08-01
+Last updated: 2026-08-01
 
-This report describes the current tree. GitHub Actions artifacts are the
-authoritative per-commit record for logs, optimized Wasm checksums, SBOMs, and
-release evidence; static checksums are intentionally not duplicated here.
+This file distinguishes local execution from GitHub Actions evidence. A workflow
+definition is not proof that it ran, and source tests are not a security audit.
 
-## Environment
+## Current Revision
 
-- Rust `1.81.0` from `rust-toolchain.toml`
-- CL8Y DEX revision `fad801117fe54420d7529da04e485d67d511ef2c`
-- Immutable optimizer image from the root `Makefile`
-- Terra Classic LocalTerra, chain ID `localterra`
-- Standard unmodified CL8Y limit-order pair
-- One-second TWAP for deterministic LocalTerra tests
-- Protocol fee disabled in the local fixture
+- Repository baseline: `b1e943de8da888330d6c0c825b8d702ad03e8d48`
+- Reported security corrections: uncommitted working-tree changes after that baseline
+- Rust toolchain: `1.81.0`
+- CL8Y fixture revision: `fad801117fe54420d7529da04e485d67d511ef2c`
 
-## Source Verification
+No GitHub Actions run can yet represent the uncommitted working tree. After these
+changes are committed, all workflows must be rerun for that exact commit.
 
-```sh
-make test
-make clippy
-```
+## Local Results
 
-Result: PASS
+The following commands were executed locally while implementing the current
+working-tree corrections:
 
-- Rebalancer Rust: 20 tests (7 liquidity, 11 vault, 2 proxy)
-- Grid Rust: 38 tests (4 manager/limits, 23 vault unit, 11 integration)
-- Rebalancer keeper Python: 48 tests
-- Grid operator Python: 24 tests
-- Strict Clippy and formatting: PASS
+| Command | Result | Scope |
+|---|---|---|
+| `cargo +1.81.0 test --locked --workspace --all-targets` in `grid-contract-system` | PASS: 41 tests (4 manager, 26 vault unit, 11 integration) | Grid contracts |
+| `cargo +1.81.0 test --locked --workspace --all-targets` in `rebalancer-system` | PASS: 30 Rust tests (11 liquidity, 15 vault, 4 proxy) | Rebalancer contracts/packages |
+| `python3 -m unittest -v test_keeper.py` | PASS: 50 tests | Rebalancer keeper |
+| `python3 -m unittest discover -s grid-contract-system/services/grid-operator/tests -p 'test_*.py'` | PASS: 24 tests | Grid operator |
+| `make local-e2e` | PASS: 10 rebalancer and 10 grid scenarios | Signed LocalTerra, uncommitted tree |
 
-Grid integration coverage includes manager-created dedicated vaults, complete
-deposit/fill/reconcile/cancel/withdraw lifecycles, concurrent fills, parked
-refunds, pair pause, generic query failures, malicious CW20 balance behavior,
-unsolicited-balance synchronization, token admission/quarantine, reply rollback,
-cross-vault isolation, exact fixture-output accounting, and randomized custody
-conservation.
+These are local results, not GitHub Actions results. Both strict Clippy workspaces,
+formatting, release Wasm builds, optimized E2E Wasm builds, and shell syntax also
+passed locally. Soak, schema generation (no generator is present), and complete
+funded migration scenarios were not run.
 
-The exact fixture-output test verifies two independent vaults. One vault remains
-unchanged while the other is filled; after configured ask/bid fixture fills and
-integer rounding, the resulting base-token increases are exactly 300 and 187.
-These are deterministic accounting fixtures, not guarantees of market profit or
-production CL8Y fee/execution behavior.
+The successful `make local-e2e` run used the healthy local Docker Compose stack,
+chain ID `localterra`, pinned CL8Y revision above, Rust `1.81.0`, and optimizer
+image pinned by `Makefile`. Optimized hashes from that run were:
 
-## Dependency Security
+- `cl8y_bot_liquidity.wasm`: `e5b1a511e6cc1aa0e539fdf44df14453bfb3d613aeaa72d9fe9c245eed7c4b42`
+- `cl8y_bot_vault.wasm`: `d15d79b6004cf84938e2ddc62ca1c0febd010feda8b992137c02ad8e89315e57`
+- `cl8y_swap_proxy.wasm`: `732f146ed78269b50d2f013855a9d734b0ea355d19b351d90b3b39a5f4409fc2`
+- `cl8y_grid_manager.wasm`: `a276a70b25151567e0b3c4cb8df72e0a0607d9680a50bafceee0ffcf65c2b533`
+- `cl8y_grid_vault.wasm`: `bfa357e81e517d79d8fdfbd193ee5ee4f654325bd3db2428791f6a97ded6dcca`
 
-```sh
-make security
-```
+## Existing CI Evidence
 
-Result: PASS with parser-compatible scanner revisions pinned in
-`.github/scripts/install-security-tools.sh` and `.github/workflows/security.yml`.
-The narrow `RUSTSEC-2024-0344` host-only exception and its removal condition are
-documented in `SECURITY.md` and `deny.toml`.
+The baseline commit had retained source-quality, dependency-security, and
+reproducible-build runs. Those runs do not validate the current working tree:
 
-## Reproducible Wasm
+- Source quality: `actions/runs/30697337166`
+- Dependency security: `actions/runs/30697337170`
+- Reproducible Wasm: `actions/runs/30697337164`
 
-```sh
-make reproducible
-```
+No retained `LocalTerra E2E` GitHub Actions run was found for the baseline or the
+current changes. Therefore no E2E PASS is claimed here. `.github/workflows/e2e.yml`
+now runs both signed suites through `make local-e2e`, preserves command exit codes,
+records the tested SHA, publishes logs, and writes a success-only job summary.
 
-The workflow builds both workspaces twice with the immutable optimizer image and
-compares every output digest. Per-commit checksums and evidence are uploaded by
-the Reproducible Wasm workflow and regenerated for signed releases.
+## E2E Scope And Limits
 
-## Signed LocalTerra E2E
+The scripts contain rebalancer and grid scenarios, but scenario presence is not
+execution evidence. A future evidence entry must include the exact commit, run
+URL/ID, date, runner image, tool versions, scenario counts, skipped scenarios,
+artifact name and digest, and known limitations.
 
-```sh
-make local-setup
-make local-e2e
-```
+LocalTerra requires Docker with Compose, Git/network access to the pinned CL8Y
+revision, `make`, `jq`, Python 3, sufficient disk space, and up to 90 minutes.
+Signed local scenarios use a deterministic fixture and do not establish mainnet
+profitability, oracle robustness, or production safety.
 
-Result: PASS, 10 rebalancer scenarios and 10 grid scenarios.
+## Interpretation
 
-The rebalancer suite verifies authorization boundaries, governance fee tier,
-first/subsequent share minting, donation-safe pricing, proportional and
-single-token settlement, TWAP-triggered bounded rebalancing through the
-production keeper, unchanged LP supply, no DEX LP custody, and failure limits.
-
-The grid suite deploys four dedicated one-bot vaults across two pairs. It
-verifies pair-token policy bootstrap, per-side allocation, real CL8Y fills,
-production operator indexing/signing/SQLite restart without replay, exact
-chain-observed fill proceeds, permissionless third-party reconciliation without
-keeper reimbursement, cross-vault state isolation, bounded cancellation,
-withdrawal, and per-vault solvency. Reconciliation does not automatically create
-opposite orders; the owner places new free proceeds with a separate `allocate`.
-
-Signed E2E uses zero confirmation depth for speed. Nonzero confirmation depth,
-shallow transaction disappearance/reappearance, ambiguous broadcasts, forged
-emitters, reverted pages, and retry/backoff policy are covered by the production
-keeper/operator unit suites.
-
-## Extended Soak
-
-```sh
-SOAK_ROUNDS=25 make local-soak
-```
-
-The soak suite alternates inventory pressure, requires each rebalance to spend
-its declared offer amount, preserves LP supply, updates reference price only
-after validated improvement, and confirms no protocol contract acquires DEX LP
-tokens.
-
-## Scope
-
-These checks demonstrate deterministic accounting and functional behavior
-against the pinned local CL8Y code. They do not establish production economic
-profit. Production readiness still requires independent security review,
-mainnet-equivalent TWAP/liquidity analysis, adversarial CL8Y runtime testing, and
-staged limited-value deployment.
+Passing tests demonstrate only the behavior covered by those tests. Independent
+review, external audit, complete grid pair-status semantics, legacy order inventory
+reconciliation, migration rehearsal, and staged deployment evidence remain required
+before economic deployment.
