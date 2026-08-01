@@ -1024,6 +1024,81 @@ fn full_lifecycle_with_fill_reconcile_cancel_withdraw() {
 }
 
 #[test]
+fn independent_bots_realize_exact_round_trip_spread_profit() {
+    fn run_round_trip(h: &mut Harness, sold_base: Uint128) -> Uint128 {
+        h.create_bot();
+        h.deposit(1, &h.token_0.clone(), Uint128::new(1_000));
+        h.deposit(1, &h.token_1.clone(), Uint128::new(2_000));
+        let orders = h.orders(1);
+        let ask = orders
+            .iter()
+            .find(|order| order.side == LimitOrderSide::Ask)
+            .unwrap();
+        let bid = orders
+            .iter()
+            .find(|order| order.side == LimitOrderSide::Bid)
+            .unwrap();
+        assert!(ask.price > bid.price);
+
+        let quote_proceeds =
+            sold_base.multiply_ratio(ask.price.atomics(), Decimal::one().atomics());
+        let bought_base =
+            quote_proceeds.multiply_ratio(Decimal::one().atomics(), bid.price.atomics());
+        assert!(quote_proceeds <= bid.remaining);
+        assert!(bought_base > sold_base);
+
+        h.fill(ask.order_id, sold_base, quote_proceeds);
+        h.fill(bid.order_id, quote_proceeds, bought_base);
+        h.reconcile(1, vec![ask.order_id, bid.order_id]);
+        h.cancel_all(1);
+
+        let bot = h.bot(1);
+        let profit = bought_base.checked_sub(sold_base).unwrap();
+        assert_eq!(bot.free_balances[0], Uint128::new(1_000) + profit);
+        assert_eq!(bot.free_balances[1], Uint128::new(2_000));
+        profit
+    }
+
+    let mut first = Harness::new();
+    let mut second = Harness::new();
+    second.create_bot();
+    second.deposit(1, &second.token_0.clone(), Uint128::new(1_000));
+    second.deposit(1, &second.token_1.clone(), Uint128::new(2_000));
+    let second_before = second.bot(1);
+    let second_orders_before = second.orders(1);
+
+    let first_profit = run_round_trip(&mut first, Uint128::new(200));
+    assert_eq!(second.bot(1), second_before);
+    assert_eq!(second.orders(1), second_orders_before);
+
+    let orders = second.orders(1);
+    let ask = orders
+        .iter()
+        .find(|order| order.side == LimitOrderSide::Ask)
+        .unwrap();
+    let bid = orders
+        .iter()
+        .find(|order| order.side == LimitOrderSide::Bid)
+        .unwrap();
+    let sold_base = Uint128::new(125);
+    let quote_proceeds = sold_base.multiply_ratio(ask.price.atomics(), Decimal::one().atomics());
+    let bought_base = quote_proceeds.multiply_ratio(Decimal::one().atomics(), bid.price.atomics());
+    second.fill(ask.order_id, sold_base, quote_proceeds);
+    second.fill(bid.order_id, quote_proceeds, bought_base);
+    second.reconcile(1, vec![ask.order_id, bid.order_id]);
+    second.cancel_all(1);
+    let second_profit = bought_base.checked_sub(sold_base).unwrap();
+
+    assert_eq!(
+        second.bot(1).free_balances[0],
+        Uint128::new(1_000) + second_profit
+    );
+    assert_eq!(second.bot(1).free_balances[1], Uint128::new(2_000));
+    assert_eq!(first_profit, Uint128::new(300));
+    assert_eq!(second_profit, Uint128::new(187));
+}
+
+#[test]
 fn parking_expiry_and_dust_reconcile_claims_refund() {
     let mut h = Harness::new();
     h.create_bot();

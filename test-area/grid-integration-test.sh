@@ -164,6 +164,7 @@ test "$ASK_COUNT_BEFORE" -ge 1
 test "$BID_COUNT_BEFORE" -ge 1
 BOT_2_BEFORE=$(query_grid "$GRID_ADDRESS_2" "{\"bot\":{\"bot_id\":$BOT_2}}")
 BOT_2_ORDERS_BEFORE=$(query_grid "$GRID_ADDRESS_2" "{\"orders\":{\"bot_id\":$BOT_2}}")
+BOT_1_BEFORE=$(query_grid "$GRID_ADDRESS_1" "{\"bot\":{\"bot_id\":$BOT_1}}")
 
 echo "[grid 4/10] Partially filling one CL8Y ask"
 fill_first_grid_ask "$GRID_ADDRESS_1" "$PAIR_ADDRESS" "$CORAL_ADDRESS" "$BOT_1"
@@ -177,6 +178,11 @@ test "$(jq --argjson id "$LAST_ASK_ID" '[.[] | select(.order_id == $id)] | lengt
     <<<"$ORDERS_AFTER")" = "1"
 test "$(jq '[.[] | select(.side == "bid")] | length' <<<"$ORDERS_AFTER")" \
     -eq "$BID_COUNT_BEFORE"
+BOT_1_AFTER=$(query_grid "$GRID_ADDRESS_1" "{\"bot\":{\"bot_id\":$BOT_1}}")
+jq -e --argjson before "$BOT_1_BEFORE" --arg output "$LAST_FILL_OUTPUT" '
+  .free_balances[0] == $before.free_balances[0] and
+  (.free_balances[1] | tonumber) == (($before.free_balances[1] | tonumber) + ($output | tonumber))
+' <<<"$BOT_1_AFTER" >/dev/null
 
 echo "[grid 6/10] Verifying cross-bot state isolation"
 test "$(query_grid "$GRID_ADDRESS_2" "{\"bot\":{\"bot_id\":$BOT_2}}")" = "$BOT_2_BEFORE"
