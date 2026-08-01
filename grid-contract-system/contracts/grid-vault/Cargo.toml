@@ -19,8 +19,8 @@ cw20.workspace = true
 thiserror.workspace = true
 base64ct.workspace = true
 zeroize.workspace = true
+cl8y-grid-manager = { path = "../grid-manager", version = "0.1.0", features = ["library"] }
 
 [dev-dependencies]
-cl8y-grid-manager = { path = "../grid-manager", version = "0.1.0" }
 cw-multi-test = "1.2.0"
 cw20-base = "1.1.2"

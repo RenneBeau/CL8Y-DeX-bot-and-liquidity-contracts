@@ -1,5 +1,6 @@
 use std::{cmp::Ordering as CmpOrdering, collections::BTreeSet};
 
+use cl8y_grid_manager::limits::valid_vault_limits;
 use cosmwasm_std::{
     entry_point, from_json, to_json_binary, Addr, BankMsg, Binary, Coin, Decimal, Deps, DepsMut,
     Env, Fraction, MessageInfo, Order, Reply, Response, StdError, StdResult, SubMsg,
@@ -27,9 +28,6 @@ const CONTRACT_NAME: &str = "crates.io:cl8y-grid-vault";
 const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const FIRST_REPLY_ID: u64 = 1;
 const MAX_ADJUST_STEPS: u32 = 64;
-const MAX_GRID_COUNT: u32 = 100;
-const MAX_ORDERS_PER_RECONCILE: u32 = 100;
-const MAX_ACTIVE_ORDERS_PER_BOT: u32 = 500;
 const BOT_ID: u64 = 1;
 
 #[entry_point]
@@ -41,12 +39,11 @@ pub fn instantiate(
 ) -> Result<Response, ContractError> {
     assert_no_funds(&info)?;
     if msg.gas_denom.trim().is_empty()
-        || msg.max_grid_count < 2
-        || msg.max_grid_count > MAX_GRID_COUNT
-        || msg.max_orders_per_reconcile == 0
-        || msg.max_orders_per_reconcile > MAX_ORDERS_PER_RECONCILE
-        || msg.max_active_orders_per_bot < msg.max_grid_count
-        || msg.max_active_orders_per_bot > MAX_ACTIVE_ORDERS_PER_BOT
+        || !valid_vault_limits(
+            msg.max_grid_count,
+            msg.max_orders_per_reconcile,
+            msg.max_active_orders_per_bot,
+        )
         || msg.keeper_reward.is_zero()
         || msg.order_timeout_seconds == 0
     {

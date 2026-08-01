@@ -6,6 +6,7 @@ use cw2::set_contract_version;
 use cw_utils::parse_reply_instantiate_data;
 
 use crate::error::ContractError;
+use crate::limits::valid_vault_limits;
 use crate::msg::{
     ConfigResponse, ExecuteMsg, InstantiateMsg, QueryMsg, VaultInstantiateMsg, VaultResponse,
 };
@@ -28,9 +29,11 @@ pub fn instantiate(
         || msg.gas_denom.trim().is_empty()
         || msg.keeper_reward.is_zero()
         || msg.order_timeout_seconds == 0
-        || msg.max_grid_count < 2
-        || msg.max_orders_per_reconcile == 0
-        || msg.max_active_orders_per_vault < msg.max_grid_count
+        || !valid_vault_limits(
+            msg.max_grid_count,
+            msg.max_orders_per_reconcile,
+            msg.max_active_orders_per_vault,
+        )
     {
         return Err(ContractError::InvalidConfig);
     }
