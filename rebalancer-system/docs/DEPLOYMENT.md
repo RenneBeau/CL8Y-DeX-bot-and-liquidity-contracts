@@ -142,7 +142,8 @@ Settings:
 
 - `rebalance_threshold_bps: 500` means a 5% price movement.
 - `allocation_tolerance_bps: 500` allows a 5% ratio deviation.
-- `twap_window_seconds` must be nonzero and reads CL8Y cumulative observations.
+- `twap_window_seconds` must be between 1 and 86,400 and requires existing CL8Y
+  cumulative-observation history for the entire window.
 - Hard maxima are 50% of the offered balance per trade, 10% TWAP execution
   deviation, 5% quote slippage, 10% spot/TWAP deviation, 20% of the offered-side
   pool reserve, and 10% CL8Y spread.

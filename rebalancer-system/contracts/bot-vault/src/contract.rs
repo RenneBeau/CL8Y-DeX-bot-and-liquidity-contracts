@@ -34,6 +34,7 @@ const MAX_QUOTE_SLIPPAGE_BPS: u16 = 500;
 const MAX_SPOT_TWAP_DEVIATION_BPS: u16 = 1_000;
 const MAX_TRADE_POOL_BPS: u16 = 2_000;
 const MAX_ALLOCATION_TOLERANCE_BPS: u16 = 2_000;
+const MAX_TWAP_WINDOW_SECONDS: u32 = 86_400;
 const REBALANCE_REPLY_ID: u64 = 1;
 
 #[entry_point]
@@ -158,6 +159,7 @@ pub fn execute(
             twap_window_seconds,
         } => execute_update_thresholds(
             deps,
+            env,
             info,
             rebalance_threshold_bps,
             allocation_tolerance_bps,
@@ -391,6 +393,7 @@ fn execute_update_keeper(
 #[allow(clippy::too_many_arguments)]
 fn execute_update_thresholds(
     deps: DepsMut,
+    env: Env,
     info: MessageInfo,
     rebalance: Option<u16>,
     allocation: Option<u16>,
@@ -413,9 +416,12 @@ fn execute_update_thresholds(
         config.allocation_tolerance_bps = value;
     }
     if let Some(value) = twap_window_seconds {
-        if value == 0 {
+        if value == 0 || value > MAX_TWAP_WINDOW_SECONDS {
             return Err(ContractError::InvalidTwapWindow);
         }
+        let mut proposed = config.clone();
+        proposed.twap_window_seconds = value;
+        config.reference_price = query_price(deps.as_ref(), &env, &proposed)?;
         config.twap_window_seconds = value;
     }
     let next_max_trade = max_trade_bps.unwrap_or(config.max_trade_bps);
@@ -818,7 +824,8 @@ fn validate_rebalance_outcome(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cosmwasm_std::testing::{mock_dependencies, mock_info};
+    use cosmwasm_std::testing::{mock_dependencies, mock_env, mock_info};
+    use cosmwasm_std::{from_json, ContractResult, SystemResult, WasmQuery};
 
     #[test]
     fn ratio_deviation_uses_reference_basis() {
@@ -871,6 +878,7 @@ mod tests {
             .unwrap();
         execute_update_thresholds(
             deps.as_mut(),
+            mock_env(),
             mock_info("admin", &[]),
             Some(5_000),
             None,
@@ -889,6 +897,7 @@ mod tests {
         );
         let error = execute_update_thresholds(
             deps.as_mut(),
+            mock_env(),
             mock_info("admin", &[]),
             None,
             Some(2_001),
@@ -907,6 +916,28 @@ mod tests {
     #[test]
     fn twap_window_update_is_admin_gated_and_validated() {
         let mut deps = mock_dependencies();
+        deps.querier.update_wasm(|query| match query {
+            WasmQuery::Smart { msg, .. } => {
+                let query: PairQueryMsg = from_json(msg).unwrap();
+                match query {
+                    PairQueryMsg::Observe { seconds_ago } => {
+                        let window = Uint128::from(seconds_ago[1]);
+                        SystemResult::Ok(ContractResult::Ok(
+                            to_json_binary(&ObserveResponse {
+                                price_a_cumulatives: vec![
+                                    Decimal::from_ratio(2u128, 1u128).atomics() * window,
+                                    Uint128::zero(),
+                                ],
+                                price_b_cumulatives: vec![Uint128::zero(), Uint128::zero()],
+                            })
+                            .unwrap(),
+                        ))
+                    }
+                    _ => panic!("unexpected query"),
+                }
+            }
+            _ => panic!("unexpected query"),
+        });
         CONFIG
             .save(
                 deps.as_mut().storage,
@@ -933,6 +964,7 @@ mod tests {
             .unwrap();
         execute_update_thresholds(
             deps.as_mut(),
+            mock_env(),
             mock_info("admin", &[]),
             None,
             None,
@@ -946,8 +978,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(CONFIG.load(&deps.storage).unwrap().twap_window_seconds, 300);
+        assert_eq!(
+            CONFIG.load(&deps.storage).unwrap().reference_price,
+            Decimal::from_ratio(2u128, 1u128)
+        );
         let error = execute_update_thresholds(
             deps.as_mut(),
+            mock_env(),
             mock_info("admin", &[]),
             None,
             None,
@@ -961,8 +998,49 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error, ContractError::InvalidTwapWindow);
+        deps.querier.update_wasm(|_| {
+            SystemResult::Ok(ContractResult::Err(
+                "insufficient observation history".into(),
+            ))
+        });
         let error = execute_update_thresholds(
             deps.as_mut(),
+            mock_env(),
+            mock_info("admin", &[]),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(400),
+        )
+        .unwrap_err();
+        assert!(matches!(error, ContractError::Std(_)));
+        let unchanged = CONFIG.load(&deps.storage).unwrap();
+        assert_eq!(unchanged.twap_window_seconds, 300);
+        assert_eq!(unchanged.reference_price, Decimal::from_ratio(2u128, 1u128));
+        let error = execute_update_thresholds(
+            deps.as_mut(),
+            mock_env(),
+            mock_info("admin", &[]),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(MAX_TWAP_WINDOW_SECONDS + 1),
+        )
+        .unwrap_err();
+        assert_eq!(error, ContractError::InvalidTwapWindow);
+        let error = execute_update_thresholds(
+            deps.as_mut(),
+            mock_env(),
             mock_info("keeper", &[]),
             None,
             None,

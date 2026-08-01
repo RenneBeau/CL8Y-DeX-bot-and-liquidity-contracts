@@ -31,8 +31,11 @@ The admin can update `rebalance_threshold_bps`, `allocation_tolerance_bps`,
 `max_trade_bps`, `max_execution_deviation_bps`, `quote_slippage_bps`,
 `max_spot_twap_deviation_bps`, `max_trade_pool_bps`, `max_spread`, and
 `twap_window_seconds` at any time through `UpdateThresholds`; omitted fields
-retain their current values. The TWAP window must remain nonzero. This lets a
-vault adapt its observation window to changed volatility without redeploying.
+retain their current values. The TWAP window must be between one second and one
+day. The pair must already have history for the proposed window; a successful
+change atomically resets the reference price to that new-window TWAP. This lets
+a vault adapt its observation window without creating a methodology-only
+rebalance trigger.
 
 ## User Operations
 

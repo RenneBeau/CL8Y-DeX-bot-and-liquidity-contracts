@@ -39,7 +39,9 @@ Both values can also be changed in one transaction.
 ## Update The TWAP Window
 
 The vault admin can change the TWAP observation window with the same message.
-It must be greater than zero:
+It must be between 1 and 86,400 seconds, and the pair must already have enough
+history for the requested window. A successful update also resets the reference
+price to the validated new-window TWAP:
 
 ```json
 {
