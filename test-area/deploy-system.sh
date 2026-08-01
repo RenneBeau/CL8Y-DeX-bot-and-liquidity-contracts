@@ -40,6 +40,39 @@ if [ -z "$SECOND_PAIR_ADDRESS" ]; then
     exit 1
 fi
 
+ensure_pair_oracle_history() {
+    local query hook message output tx_hash
+    query='{"observe":{"seconds_ago":[0,1]}}'
+    if terrad_query wasm contract-state smart "$PAIR_ADDRESS" "$query" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    echo "Seeding the EMBER/CORAL oracle before vault instantiation..."
+    hook=$(jq -nc '{swap:{belief_price:null,max_spread:"0.50",min_return:"1",to:null,
+      deadline:null,trader:null,hybrid:null}}' | base64 -w0)
+    message=$(jq -nc --arg pair "$PAIR_ADDRESS" --arg hook "$hook" \
+        '{send:{contract:$pair,amount:"1000000",msg:$hook}}')
+    if ! output=$(terrad_tx wasm execute "$EMBER_ADDRESS" "$message"); then
+        echo "ERROR: failed to seed the EMBER/CORAL oracle." >&2
+        return 1
+    fi
+    tx_hash=$(jq -r '.txhash // empty' <<<"$output")
+    if [ -z "$tx_hash" ] || ! wait_tx "$tx_hash" >/dev/null; then
+        echo "ERROR: oracle seed transaction was not confirmed." >&2
+        return 1
+    fi
+    for _ in $(seq 1 30); do
+        sleep 1
+        if terrad_query wasm contract-state smart "$PAIR_ADDRESS" "$query" >/dev/null 2>&1; then
+            return 0
+        fi
+    done
+    echo "ERROR: EMBER/CORAL oracle did not produce one second of history." >&2
+    return 1
+}
+
+ensure_pair_oracle_history
+
 echo "Building clean proxy, vault, and liquidity Wasm artifacts..."
 docker run --rm \
     -v "$PROJECT_ROOT/rebalancer-system:/code" \
@@ -96,11 +129,23 @@ instantiate_contract() {
     local code_id="$1"
     local message="$2"
     local label="$3"
-    local tx_hash result
-    tx_hash=$(terrad_tx wasm instantiate "$code_id" "$message" \
-        --label "$label" --admin "$TEST_ADDRESS" | jq -r '.txhash')
-    result=$(wait_tx "$tx_hash")
-    tx_event_value "$result" contract_address
+    local output tx_hash result address
+    if ! output=$(terrad_tx wasm instantiate "$code_id" "$message" \
+        --label "$label" --admin "$TEST_ADDRESS"); then
+        echo "ERROR: failed to instantiate $label." >&2
+        return 1
+    fi
+    tx_hash=$(jq -r '.txhash // empty' <<<"$output")
+    if [ -z "$tx_hash" ] || ! result=$(wait_tx "$tx_hash"); then
+        echo "ERROR: instantiation transaction failed for $label." >&2
+        return 1
+    fi
+    address=$(tx_event_value "$result" contract_address)
+    if [ -z "$address" ]; then
+        echo "ERROR: instantiation returned no contract address for $label." >&2
+        return 1
+    fi
+    printf '%s\n' "$address"
 }
 
 PROXY_INIT=$(jq -nc --arg admin "$TEST_ADDRESS" --arg cl8y "$CL8Y_ADDRESS" \
