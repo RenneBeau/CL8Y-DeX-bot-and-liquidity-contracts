@@ -92,6 +92,9 @@ pub enum ExecuteMsg {
         bot_id: u64,
         recipient: Option<String>,
     },
+    ContinueInventoryReconciliation {
+        limit: u32,
+    },
 }
 
 #[cw_serde]
@@ -132,9 +135,80 @@ pub enum PairExecuteMsg {
 pub enum PairQueryMsg {
     Pair {},
     Pool {},
-    LimitOrder { order_id: u64 },
-    ExpiredLimitRefund { order_id: u64 },
+    LimitOrder {
+        order_id: u64,
+    },
+    ExpiredLimitRefund {
+        order_id: u64,
+    },
     LimitOrderConfig {},
+    Protocol {},
+    OwnerInventory {
+        owner: String,
+        snapshot: Option<OwnerInventorySnapshot>,
+        start_after: Option<u64>,
+        limit: Option<u32>,
+    },
+}
+
+#[cw_serde]
+pub enum OwnerOrderState {
+    Active,
+    ParkedRefund,
+}
+
+#[cw_serde]
+pub enum OrderStatusReason {
+    TimeExpired,
+    Dust,
+    ForceClean,
+    Blacklisted,
+    Cancelled,
+    Claimed,
+    FullyExecuted,
+}
+
+#[cw_serde]
+pub struct OwnerInventorySnapshot {
+    pub generation: u64,
+    pub max_order_id: u64,
+}
+
+#[cw_serde]
+pub struct OwnerInventoryRow {
+    pub order_id: u64,
+    pub owner: String,
+    pub state: OwnerOrderState,
+    pub side: LimitOrderSide,
+    pub price: Option<Decimal>,
+    pub remaining: Uint128,
+    pub expires_at: Option<u64>,
+    pub reason: Option<OrderStatusReason>,
+}
+
+#[cw_serde]
+pub struct OwnerInventoryResponse {
+    pub schema_version: u16,
+    pub snapshot: OwnerInventorySnapshot,
+    pub rows: Vec<OwnerInventoryRow>,
+    pub next_cursor: Option<u64>,
+    pub complete: bool,
+}
+
+#[cw_serde]
+pub enum PairApiFeature {
+    TypedOrderStatus,
+    OwnerInventory,
+    OwnerIndexBackfill,
+}
+
+#[cw_serde]
+pub struct PairProtocolResponse {
+    pub schema_version: u16,
+    pub features: Vec<PairApiFeature>,
+    pub owner_inventory_ready: bool,
+    pub owner_inventory_generation: u64,
+    pub max_owner_inventory_page_size: u32,
 }
 
 #[cw_serde]
@@ -233,6 +307,38 @@ pub struct ConfigResponse {
     pub max_active_orders_per_bot: u32,
     pub mode: VaultModeResponse,
     pub inventory_reconciliation_required: bool,
+    pub inventory_reconciliation: InventoryReconciliationResponse,
+}
+
+#[cw_serde]
+pub enum InventoryReconciliationPhaseResponse {
+    NotRequired,
+    NotStarted,
+    ScanningPair,
+    DrainingPair,
+    CleaningRecoveredInventory,
+    CleaningLocalOrders,
+    Complete,
+}
+
+#[cw_serde]
+pub struct PendingInventoryActionResponse {
+    pub kind: String,
+    pub order_ids: Vec<u64>,
+}
+
+#[cw_serde]
+pub struct InventoryReconciliationResponse {
+    pub phase: InventoryReconciliationPhaseResponse,
+    pub snapshot: Option<OwnerInventorySnapshot>,
+    pub pair_code_id: Option<u64>,
+    pub scan_cursor: Option<u64>,
+    pub recovered_count: u64,
+    pub recovery_epoch: u64,
+    pub pending: Option<PendingInventoryActionResponse>,
+    pub successful_pair_pages: u64,
+    pub cleaned_local_orders: u64,
+    pub last_error: Option<String>,
 }
 
 #[cw_serde]

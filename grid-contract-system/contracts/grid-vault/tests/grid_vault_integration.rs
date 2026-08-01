@@ -21,9 +21,11 @@ use cl8y_grid_manager::msg::{
 };
 use cl8y_grid_vault::msg::{
     Asset, AssetInfo, ExecuteMsg as VaultExecuteMsg, ExpiredLimitRefundResponse, FactoryQueryMsg,
-    InstantiateMsg as VaultInstantiateMsg, LimitOrderConfigResponse, LimitOrderResponse,
-    LimitOrderSide, PairCw20HookMsg, PairInfo, PairQueryMsg, PoolResponse,
-    QueryMsg as VaultQueryMsg, ReceiveMsg, TokenPolicyResponse,
+    InstantiateMsg as VaultInstantiateMsg, InventoryReconciliationPhaseResponse,
+    LimitOrderConfigResponse, LimitOrderResponse, LimitOrderSide, MigrateMsg as VaultMigrateMsg,
+    OrderStatusReason, OwnerInventoryResponse, OwnerInventoryRow, OwnerInventorySnapshot,
+    OwnerOrderState, PairApiFeature, PairCw20HookMsg, PairInfo, PairProtocolResponse, PairQueryMsg,
+    PoolResponse, QueryMsg as VaultQueryMsg, ReceiveMsg, TokenPolicyResponse,
 };
 
 // ---------------------------------------------------------------------------
@@ -356,6 +358,91 @@ fn mock_pair_query(
             });
             to_json_binary(&refund)
         }
+        PairQueryMsg::Protocol {} => to_json_binary(&PairProtocolResponse {
+            schema_version: 1,
+            features: vec![
+                PairApiFeature::TypedOrderStatus,
+                PairApiFeature::OwnerInventory,
+                PairApiFeature::OwnerIndexBackfill,
+            ],
+            owner_inventory_ready: true,
+            owner_inventory_generation: 1,
+            max_owner_inventory_page_size: 100,
+        }),
+        PairQueryMsg::OwnerInventory {
+            owner,
+            snapshot,
+            start_after,
+            limit,
+        } => {
+            let max_order_id = PAIR_NEXT_ORDER.load(deps.storage)?.saturating_sub(1);
+            let snapshot = snapshot.unwrap_or(OwnerInventorySnapshot {
+                generation: 1,
+                max_order_id,
+            });
+            if snapshot.generation != 1 || snapshot.max_order_id > max_order_id {
+                return Err(StdError::generic_err("snapshot mismatch"));
+            }
+            let mut rows = Vec::new();
+            for item in PAIR_ORDERS.range(
+                deps.storage,
+                start_after.map(cw_storage_plus::Bound::exclusive),
+                Some(cw_storage_plus::Bound::inclusive(snapshot.max_order_id)),
+                cosmwasm_std::Order::Ascending,
+            ) {
+                let (order_id, order) = item?;
+                if order.owner == owner {
+                    rows.push(OwnerInventoryRow {
+                        order_id,
+                        owner: order.owner,
+                        state: OwnerOrderState::Active,
+                        side: order.side,
+                        price: Some(order.price),
+                        remaining: order.remaining,
+                        expires_at: order.expires_at,
+                        reason: None,
+                    });
+                }
+            }
+            for item in PAIR_PARKED.range(
+                deps.storage,
+                start_after.map(cw_storage_plus::Bound::exclusive),
+                Some(cw_storage_plus::Bound::inclusive(snapshot.max_order_id)),
+                cosmwasm_std::Order::Ascending,
+            ) {
+                let (order_id, order) = item?;
+                if order.owner == owner {
+                    rows.push(OwnerInventoryRow {
+                        order_id,
+                        owner: order.owner,
+                        state: OwnerOrderState::ParkedRefund,
+                        side: order.side,
+                        price: Some(order.price),
+                        remaining: order.remaining,
+                        expires_at: order.expires_at,
+                        reason: Some(OrderStatusReason::TimeExpired),
+                    });
+                }
+            }
+            rows.sort_by_key(|row| row.order_id);
+            let limit = limit.unwrap_or(50) as usize;
+            let complete = rows.len() <= limit;
+            if !complete {
+                rows.truncate(limit);
+            }
+            let next_cursor = if complete {
+                None
+            } else {
+                rows.last().map(|row| row.order_id)
+            };
+            to_json_binary(&OwnerInventoryResponse {
+                schema_version: 1,
+                snapshot,
+                rows,
+                next_cursor,
+                complete,
+            })
+        }
     }
 }
 
@@ -519,6 +606,24 @@ fn vault_code() -> Box<dyn Contract<Empty, Empty>> {
     Box::new(contract)
 }
 
+fn legacy_vault_code() -> Box<dyn Contract<Empty, Empty>> {
+    let contract = ContractWrapper::new(
+        cl8y_grid_vault::contract::execute,
+        |mut deps,
+         env,
+         info,
+         msg|
+         -> Result<cosmwasm_std::Response, cl8y_grid_vault::error::ContractError> {
+            let response = cl8y_grid_vault::contract::instantiate(deps.branch(), env, info, msg)?;
+            cw2::set_contract_version(deps.storage, "crates.io:cl8y-grid-vault", "0.1.0")?;
+            Ok(response)
+        },
+        cl8y_grid_vault::contract::query,
+    )
+    .with_reply(cl8y_grid_vault::contract::reply);
+    Box::new(contract)
+}
+
 fn manager_code() -> Box<dyn Contract<Empty, Empty>> {
     let contract = ContractWrapper::new(
         cl8y_grid_manager::contract::execute,
@@ -556,6 +661,7 @@ struct Harness {
     token_1: Addr,
     alice: Addr,
     keeper: Addr,
+    vault_code_id: u64,
 }
 
 impl Harness {
@@ -695,9 +801,10 @@ impl Harness {
         }
 
         let vault_code_id = app.store_code(vault_code());
+        let legacy_vault_code_id = app.store_code(legacy_vault_code());
         let vault = app
             .instantiate_contract(
-                vault_code_id,
+                legacy_vault_code_id,
                 alice.clone(),
                 &VaultInstantiateMsg {
                     admin: admin.to_string(),
@@ -714,7 +821,7 @@ impl Harness {
                 },
                 &[],
                 "grid-vault",
-                None,
+                Some(alice.to_string()),
             )
             .unwrap();
 
@@ -751,6 +858,7 @@ impl Harness {
             token_1,
             alice,
             keeper,
+            vault_code_id,
         }
     }
 
@@ -1442,6 +1550,144 @@ fn manager_create_vault_then_full_vault_flow() {
     );
 
     h.vault = standalone_vault;
+}
+
+#[test]
+fn migrated_vault_scans_mixed_inventory_and_retries_failed_drain_end_to_end() {
+    let mut h = Harness::new();
+    h.create_bot();
+    h.deposit(1, &h.token_0.clone(), Uint128::new(1_000));
+    h.deposit(1, &h.token_1.clone(), Uint128::new(2_000));
+    let parked_id = h.orders(1)[0].order_id;
+    h.expire(parked_id);
+    let bot_before = h.bot(1);
+    let shares_before: cl8y_grid_vault::msg::ShareResponse = h
+        .app
+        .wrap()
+        .query_wasm_smart(
+            &h.vault,
+            &VaultQueryMsg::Shares {
+                bot_id: 1,
+                address: h.alice.to_string(),
+            },
+        )
+        .unwrap();
+
+    h.app
+        .migrate_contract(
+            h.alice.clone(),
+            h.vault.clone(),
+            &VaultMigrateMsg {},
+            h.vault_code_id,
+        )
+        .unwrap();
+
+    for _ in 0..10 {
+        let config: cl8y_grid_vault::msg::ConfigResponse = h
+            .app
+            .wrap()
+            .query_wasm_smart(&h.vault, &VaultQueryMsg::Config {})
+            .unwrap();
+        if config.inventory_reconciliation.phase
+            == InventoryReconciliationPhaseResponse::DrainingPair
+        {
+            assert_eq!(config.inventory_reconciliation.recovered_count, 4);
+            assert!(config.inventory_reconciliation.scan_cursor.is_some());
+            break;
+        }
+        h.app
+            .execute_contract(
+                h.alice.clone(),
+                h.vault.clone(),
+                &VaultExecuteMsg::ContinueInventoryReconciliation { limit: 1 },
+                &[],
+            )
+            .unwrap();
+    }
+    let scanned: cl8y_grid_vault::msg::ConfigResponse = h
+        .app
+        .wrap()
+        .query_wasm_smart(&h.vault, &VaultQueryMsg::Config {})
+        .unwrap();
+    assert_eq!(
+        scanned.inventory_reconciliation.phase,
+        InventoryReconciliationPhaseResponse::DrainingPair
+    );
+
+    h.set_paused(true);
+    h.app
+        .execute_contract(
+            h.alice.clone(),
+            h.vault.clone(),
+            &VaultExecuteMsg::ContinueInventoryReconciliation { limit: 100 },
+            &[],
+        )
+        .unwrap();
+    let failed: cl8y_grid_vault::msg::ConfigResponse = h
+        .app
+        .wrap()
+        .query_wasm_smart(&h.vault, &VaultQueryMsg::Config {})
+        .unwrap();
+    assert!(failed.inventory_reconciliation_required);
+    assert!(failed.inventory_reconciliation.pending.is_none());
+    assert!(failed.inventory_reconciliation.last_error.is_some());
+    assert_eq!(h.orders(1).len(), 4);
+
+    h.set_paused(false);
+    for _ in 0..20 {
+        let config: cl8y_grid_vault::msg::ConfigResponse = h
+            .app
+            .wrap()
+            .query_wasm_smart(&h.vault, &VaultQueryMsg::Config {})
+            .unwrap();
+        if !config.inventory_reconciliation_required {
+            break;
+        }
+        h.app
+            .execute_contract(
+                h.alice.clone(),
+                h.vault.clone(),
+                &VaultExecuteMsg::ContinueInventoryReconciliation { limit: 2 },
+                &[],
+            )
+            .unwrap();
+    }
+
+    let complete: cl8y_grid_vault::msg::ConfigResponse = h
+        .app
+        .wrap()
+        .query_wasm_smart(&h.vault, &VaultQueryMsg::Config {})
+        .unwrap();
+    assert!(!complete.inventory_reconciliation_required);
+    assert_eq!(
+        complete.inventory_reconciliation.phase,
+        InventoryReconciliationPhaseResponse::Complete
+    );
+    assert_eq!(complete.inventory_reconciliation.recovered_count, 0);
+    assert!(h.orders(1).is_empty());
+    let bot = h.bot(1);
+    assert_eq!(bot.active_orders, 0);
+    assert_eq!(bot.owner, bot_before.owner);
+    assert_eq!(bot.total_shares, bot_before.total_shares);
+    let shares_after: cl8y_grid_vault::msg::ShareResponse = h
+        .app
+        .wrap()
+        .query_wasm_smart(
+            &h.vault,
+            &VaultQueryMsg::Shares {
+                bot_id: 1,
+                address: h.alice.to_string(),
+            },
+        )
+        .unwrap();
+    assert_eq!(shares_after.shares, shares_before.shares);
+    assert_eq!(
+        bot.free_balances,
+        [
+            h.balance_of(&h.token_0, &h.vault),
+            h.balance_of(&h.token_1, &h.vault),
+        ]
+    );
 }
 
 // ---------------------------------------------------------------------------

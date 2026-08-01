@@ -22,7 +22,7 @@ working-tree corrections:
 
 | Command | Result | Scope |
 |---|---|---|
-| `cargo +1.81.0 test --locked --workspace --all-targets` in `grid-contract-system` | PASS: 41 tests (4 manager, 26 vault unit, 11 integration) | Grid contracts |
+| `cargo +1.81.0 test --locked --workspace --all-targets` in `grid-contract-system` | PASS: 49 tests (4 manager, 33 vault unit, 12 integration) | Grid contracts |
 | `cargo +1.81.0 test --locked --workspace --all-targets` in `rebalancer-system` | PASS: 30 Rust tests (11 liquidity, 15 vault, 4 proxy) | Rebalancer contracts/packages |
 | `python3 -m unittest -v test_keeper.py` | PASS: 50 tests | Rebalancer keeper |
 | `python3 -m unittest discover -s grid-contract-system/services/grid-operator/tests -p 'test_*.py'` | PASS: 24 tests | Grid operator |
@@ -41,7 +41,7 @@ image pinned by `Makefile`. Optimized hashes from that run were:
 - `cl8y_bot_vault.wasm`: `d15d79b6004cf84938e2ddc62ca1c0febd010feda8b992137c02ad8e89315e57`
 - `cl8y_swap_proxy.wasm`: `732f146ed78269b50d2f013855a9d734b0ea355d19b351d90b3b39a5f4409fc2`
 - `cl8y_grid_manager.wasm`: `a276a70b25151567e0b3c4cb8df72e0a0607d9680a50bafceee0ffcf65c2b533`
-- `cl8y_grid_vault.wasm`: `bfa357e81e517d79d8fdfbd193ee5ee4f654325bd3db2428791f6a97ded6dcca`
+- `cl8y_grid_vault.wasm`: `c6687ddbb2eaf56f909a54757639c6f4670b61f18d66c357443e3cb2294bc0f4`
 
 ## Existing CI Evidence
 

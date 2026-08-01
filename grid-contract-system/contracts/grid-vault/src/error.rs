@@ -71,4 +71,18 @@ pub enum ContractError {
     InventoryReconciliationRequired,
     #[error("arithmetic result is outside the supported range")]
     ArithmeticOutOfRange,
+    #[error("inventory reconciliation limit must be between 1 and 100")]
+    InvalidInventoryReconciliationLimit,
+    #[error("pair owner-inventory protocol is unsupported or not ready")]
+    UnsupportedPairInventoryProtocol,
+    #[error("pair owner-inventory response is malformed")]
+    InvalidOwnerInventory,
+    #[error("inventory reconciliation is already awaiting a pair reply")]
+    InventoryReconciliationPending,
+    #[error("inventory reconciliation requires exactly bot 1 in this vault")]
+    InvalidBotInvariant,
+    #[error("unsupported grid vault migration source version")]
+    UnsupportedMigrationSource,
+    #[error("pair limit-order batch configuration is malformed")]
+    InvalidPairBatchLimit,
 }

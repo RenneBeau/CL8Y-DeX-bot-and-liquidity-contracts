@@ -2,7 +2,7 @@ use cosmwasm_schema::cw_serde;
 use cosmwasm_std::{Addr, Decimal, Uint128};
 use cw_storage_plus::{Item, Map};
 
-use crate::msg::LimitOrderSide;
+use crate::msg::{LimitOrderSide, OrderStatusReason, OwnerOrderState};
 
 #[cw_serde]
 pub struct Config {
@@ -81,6 +81,81 @@ pub const QUARANTINE: Map<&Addr, ()> = Map::new("quarantine");
 // A legacy vault cannot prove that vulnerable versions did not forget pair orders.
 pub const INVENTORY_RECONCILIATION_REQUIRED: Item<bool> =
     Item::new("inventory_reconciliation_required");
+
+#[cw_serde]
+pub enum InventoryReconciliationPhase {
+    NotStarted,
+    ScanningPair,
+    DrainingPair,
+    CleaningRecoveredInventory,
+    CleaningLocalOrders,
+    Complete,
+}
+
+#[cw_serde]
+pub struct InventorySnapshot {
+    pub generation: u64,
+    pub max_order_id: u64,
+}
+
+#[cw_serde]
+pub struct PendingInventoryAction {
+    pub reply_id: u64,
+    pub kind: PageKind,
+    pub order_ids: Vec<u64>,
+}
+
+#[cw_serde]
+pub struct InventoryReconciliation {
+    pub phase: InventoryReconciliationPhase,
+    pub snapshot: Option<InventorySnapshot>,
+    pub pair_code_id: Option<u64>,
+    #[serde(default)]
+    pub scan_cursor: Option<u64>,
+    #[serde(default)]
+    pub recovered_count: u64,
+    #[serde(default)]
+    pub recovery_epoch: u64,
+    pub pending: Option<PendingInventoryAction>,
+    pub successful_pair_pages: u64,
+    pub cleaned_local_orders: u64,
+    pub last_error: Option<String>,
+}
+
+impl InventoryReconciliation {
+    pub fn locked() -> Self {
+        Self {
+            phase: InventoryReconciliationPhase::NotStarted,
+            snapshot: None,
+            pair_code_id: None,
+            scan_cursor: None,
+            recovered_count: 0,
+            recovery_epoch: 0,
+            pending: None,
+            successful_pair_pages: 0,
+            cleaned_local_orders: 0,
+            last_error: None,
+        }
+    }
+}
+
+pub const INVENTORY_RECONCILIATION: Item<InventoryReconciliation> =
+    Item::new("inventory_reconciliation");
+
+#[cw_serde]
+pub struct RecoveredInventoryRow {
+    #[serde(default)]
+    pub recovery_epoch: u64,
+    pub owner: Addr,
+    pub state: OwnerOrderState,
+    pub side: LimitOrderSide,
+    pub price: Option<Decimal>,
+    pub remaining: Uint128,
+    pub expires_at: Option<u64>,
+    pub reason: Option<OrderStatusReason>,
+}
+
+pub const RECOVERED_INVENTORY: Map<u64, RecoveredInventoryRow> = Map::new("recovered_inventory");
 
 #[cw_serde]
 pub enum PageKind {

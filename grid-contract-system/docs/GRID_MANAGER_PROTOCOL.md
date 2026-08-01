@@ -155,6 +155,55 @@ the vault's actual liquid CW20 balances. Expired orders may require a CL8Y clean
 walk before their refund row becomes claimable. Pair pause can delay this flow but
 cannot redirect the funds.
 
+### Legacy Inventory Reconciliation
+
+Vaults migrated from a release that could forget pair orders remain locked behind
+`inventory_reconciliation_required`. The owner advances the bounded state machine
+with `{"continue_inventory_reconciliation":{"limit":<1..100>}}`. New bot creation,
+deposits, and allocation are disabled for the entire reconciliation; normal and
+emergency withdrawals remain disabled. Administrative configuration and pair-code
+pinning remain available, but there is no administrative unlock.
+
+Before taking a snapshot, the vault verifies the pair's runtime code ID and
+requires pair protocol schema v1 with `typed_order_status`, `owner_inventory`, and
+`owner_index_backfill`, a ready owner index, and the protocol page cap. It persists
+the pair-issued generation and order-ID high-water. The scanning phase walks that
+snapshot with a contract-owned exclusive cursor. Every validated active or parked
+row is copied into a migration-only recovery map; it is observable custody evidence
+and is never assigned a strategy rung or credited to accounting. Invalid, duplicate,
+out-of-order, or replayed pages and query failures leave the prior cursor and map
+unchanged.
+
+After the complete scan, draining repeatedly queries page one under the same
+snapshot. Active IDs are atomically cancelled first; when no active row is present,
+parked IDs are atomically claimed. Each batch is capped by the caller limit, owner
+inventory limit, and pair `LimitOrderConfig`. Failed pair replies keep the snapshot,
+recovery records, local rows, and lock and expose the error in `config` for retry.
+
+Only a complete empty pair page is terminal proof. The vault then removes recovery
+records and stale local rows in separate bounded phases, verifies that this contract
+contains exactly bot 1, sets `active_orders` to zero from the empty map, and replaces
+both free balances with actual vault CW20 balances. It unlocks only if the pair code
+and protocol generation still match and no pair/local page is pending. Pair custody,
+not a client cursor or the vulnerable local order map, is canonical during this flow.
+
+A fully filled order can disappear between scanning and draining. The vault does
+not query or interpret pair tombstones during migration and does not claim
+vault-side knowledge of why a row disappeared. The subsequent complete empty
+owner-inventory proof is what safely permits stale recovery and local rows to be
+retired; actual CW20 balances are then synchronized exactly.
+
+Migration validates the stored `cw2` contract name and semantic version and accepts
+only an older supported source. Repeating migration at the same or a newer version
+fails before changing the lock. For every supported migration from vulnerable
+`0.1.0` with a bot or history, rollback storage is never authoritative: even a
+stored `Complete` phase is discarded, the Boolean gate is set, and the pair proof
+starts again from a fresh snapshot. Stale recovery rows are tagged with an older
+epoch, may be overwritten idempotently during adoption, and are removed by the same
+bounded recovery cleanup without affecting the new scan's count. A pre-bot vault
+stays unlocked only when reconciliation/recovery, bot, order, pending-page and
+placement state are absent and `next_bot_id` proves no bot was previously allocated.
+
 ### Pair Code Pinning
 
 The vault stores the pair's code ID at bot creation. Deposit, allocate,
@@ -215,6 +264,10 @@ Vault state:
 - `Rung`: price and initial side.
 - `GridOrder`: pair-local ID key, rung, side, price, and last remaining escrow.
 - `PlacementPlan`: reply-scoped expected rungs and gross amounts.
+- `InventoryReconciliation`: phase, pair snapshot/code pin, exclusive scan cursor,
+  recovered-row count, pending drain action, bounded-work counters, and last error.
+- `RecoveredInventoryRow`: migration-only validated pair custody metadata keyed by
+  order ID; it is cleaned before stale strategy orders and never affects shares.
 
 ## Security Invariants
 
@@ -251,12 +304,28 @@ Migration must:
 5. Register each vault independently for any CL8Y fee tier.
 6. Keep the old contract recoverable until every old pair-owned order is resolved.
 
-Upgrading a vault from a release containing ambiguous terminal classification sets
-`inventory_reconciliation_required=true`. Normal and emergency withdrawals then
-fail closed. The flag cannot be administratively cleared in this release because
-the pair exposes no bounded owner-order inventory proof. Known active or parked IDs
-can be recovered, but deployment remains blocked until a pair upgrade provides a
-complete owner inventory/status query and a later migration verifies it.
+Upgrade order is mandatory:
+
+1. Merge and pin the pair API dependency from
+   [PlasticDigits/cl8y-dex-terraclassic PR #1](https://github.com/PlasticDigits/cl8y-dex-terraclassic/pull/1)
+   (reviewed fork reference `c1f669b06c98936005b665cf56d5540a33a49edd`).
+2. Upgrade each pair and run its bounded owner-index backfill until protocol v1
+   reports `owner_inventory_ready=true`. Do not migrate funded vaults before this.
+3. Verify the new pair runtime code ID, migrate the vault, and re-pin that code ID
+   before the first reconciliation snapshot.
+4. Repeatedly continue reconciliation, monitoring phase, snapshot generation and
+   high-water, scan cursor, recovered count, pending action, last error, successful
+   pair pages, and local rows cleaned. Investigate repeated identical failures
+   rather than bypassing them.
+5. Require a final complete empty rescan, local cleanup, zero active orders, exact
+   CW20 balance synchronization, and a cleared lock before allowing withdrawals.
+
+Once a vault has captured a snapshot, do not roll the pair back, change its owner
+index generation, or repin a different implementation. Restore the exact verified
+pair implementation and generation and resume. A failed deployment is rolled
+forward; rollback is permitted only before any affected vault captures a snapshot.
+If code is nevertheless rolled back and migrated forward again, no saved phase,
+including `Complete`, can replace a new scan and empty canonical pair proof.
 
 ## Failure And Recovery
 
@@ -280,4 +349,6 @@ balance accounting, timed orders, reply-confirmed pages, token admission and
 quarantine, mocked multi-contract/property tests, signed LocalTerra scenarios,
 and the durable operator are implemented. Production readiness still requires
 adversarial validation against the production CL8Y runtime, an independent
-external audit, and staged testnet/limited-value rollout.
+external audit, and staged testnet/limited-value rollout. The legacy inventory
+flow is not deployable until upstream PR #1 is merged and pinned and a funded
+historical-state fixture rehearsal completes successfully.
