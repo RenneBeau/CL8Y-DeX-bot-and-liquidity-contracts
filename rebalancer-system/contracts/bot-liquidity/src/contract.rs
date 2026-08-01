@@ -28,6 +28,9 @@ pub fn instantiate(
     info: MessageInfo,
     msg: InstantiateMsg,
 ) -> Result<Response, ContractError> {
+    if msg.minimum_initial_deposit <= LOCKED_INITIAL_SHARES {
+        return Err(ContractError::InvalidMinimumInitialDeposit);
+    }
     set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
     let admin = deps.api.addr_validate(&msg.admin)?;
     let vault = deps.api.addr_validate(&msg.vault)?;
@@ -234,6 +237,12 @@ fn execute_update_config(
     let mut config = CONFIG.load(deps.storage)?;
     assert_admin(&config, &info.sender)?;
     if let Some(value) = minimum_initial_deposit {
+        if value <= LOCKED_INITIAL_SHARES {
+            return Err(ContractError::InvalidMinimumInitialDeposit);
+        }
+        if !TOKEN_INFO.load(deps.storage)?.total_supply.is_zero() {
+            return Err(ContractError::BootstrapComplete);
+        }
         config.minimum_initial_deposit = value;
     }
     CONFIG.save(deps.storage, &config)?;
@@ -674,6 +683,7 @@ mod tests {
     use super::*;
     use cosmwasm_std::testing::{mock_dependencies, mock_env, mock_info};
     use cosmwasm_std::{from_json, ContractResult, Reply, SubMsgResult, SystemResult};
+    use cw20_base::state::TokenInfo;
 
     fn test_config() -> Config {
         Config {
@@ -719,6 +729,18 @@ mod tests {
     fn update_config_is_admin_gated_and_updates_minimum() {
         let mut deps = mock_dependencies();
         CONFIG.save(deps.as_mut().storage, &test_config()).unwrap();
+        TOKEN_INFO
+            .save(
+                deps.as_mut().storage,
+                &TokenInfo {
+                    name: "Liquidity".into(),
+                    symbol: "LIQ".into(),
+                    decimals: 6,
+                    total_supply: Uint128::zero(),
+                    mint: None,
+                },
+            )
+            .unwrap();
         let error = execute_update_config(
             deps.as_mut(),
             mock_info("attacker", &[]),
@@ -736,11 +758,45 @@ mod tests {
             CONFIG.load(&deps.storage).unwrap().minimum_initial_deposit,
             Uint128::new(5_000)
         );
+        TOKEN_INFO
+            .update(deps.as_mut().storage, |mut token| -> StdResult<_> {
+                token.total_supply = Uint128::new(10_000);
+                Ok(token)
+            })
+            .unwrap();
+        let error = execute_update_config(
+            deps.as_mut(),
+            mock_info("admin", &[]),
+            Some(Uint128::new(6_000)),
+        )
+        .unwrap_err();
+        assert_eq!(error, ContractError::BootstrapComplete);
         execute_update_config(deps.as_mut(), mock_info("admin", &[]), None).unwrap();
         assert_eq!(
             CONFIG.load(&deps.storage).unwrap().minimum_initial_deposit,
             Uint128::new(5_000)
         );
+    }
+
+    #[test]
+    fn instantiate_rejects_ineffective_initial_minimum() {
+        let mut deps = mock_dependencies();
+        let error = instantiate(
+            deps.as_mut(),
+            mock_env(),
+            mock_info("creator", &[]),
+            InstantiateMsg {
+                admin: "admin".into(),
+                vault: "vault".into(),
+                name: "Liquidity".into(),
+                symbol: "LIQ".into(),
+                decimals: 6,
+                minimum_initial_deposit: LOCKED_INITIAL_SHARES,
+                marketing: None,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error, ContractError::InvalidMinimumInitialDeposit);
     }
 
     #[test]

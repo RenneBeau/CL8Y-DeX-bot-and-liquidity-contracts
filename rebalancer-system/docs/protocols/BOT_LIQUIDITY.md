@@ -10,9 +10,8 @@ vault's token A and token B inventory.
 
 ## Roles
 
-- `admin`: may update `minimum_initial_deposit` at any time via
-  `UpdateConfig`. Omitted fields retain their current values; existing
-  positions are unaffected.
+- `admin`: may update `minimum_initial_deposit` via `UpdateConfig` only before
+  the first LP mint. Omitted fields retain their current values.
 - `vault`: the only contract allowed to settle deposits and single-token
   withdrawal swaps.
 
@@ -50,7 +49,8 @@ owner keeps their shares — a failed swap can never strand a position.
 
 ## Inflation And Donation Protection
 
-- The initial depositor must satisfy `minimum_initial_deposit`.
+- The initial depositor must satisfy `minimum_initial_deposit`, which must be
+  greater than the 1,000 permanently locked share units.
 - At least 1,000 smallest share units are permanently locked.
 - Pre-first-deposit donations receive permanently locked shares.
 - Existing vault donations are included in pre-deposit balances.

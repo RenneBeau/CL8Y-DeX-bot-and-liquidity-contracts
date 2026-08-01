@@ -76,8 +76,9 @@ The new keeper becomes active immediately.
 
 ## Update The Liquidity Minimum Initial Deposit
 
-The liquidity contract admin can adjust the minimum initial deposit for the
-first LP entry at any time:
+The liquidity contract admin can adjust the minimum initial deposit only before
+the first LP mint. The value must exceed the 1,000 permanently locked share
+units:
 
 ```json
 {
@@ -87,8 +88,8 @@ first LP entry at any time:
 }
 ```
 
-Omitted fields retain their current values. The update applies to the next
-initial deposit; existing positions are unaffected.
+Omitted fields retain their current values. Once supply is nonzero, updates are
+rejected because this bootstrap-only setting can no longer affect deposits.
 
 ## Transfer Vault Administration
 

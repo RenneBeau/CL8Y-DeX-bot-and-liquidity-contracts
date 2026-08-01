@@ -169,6 +169,9 @@ pair tokens to use the same decimals.
 }
 ```
 
+`minimum_initial_deposit` is bootstrap-only, must exceed 1,000 smallest share
+units, and cannot be changed after the first LP mint.
+
 ```sh
 terrad tx wasm instantiate <LIQUIDITY_CODE_ID> '<JSON_ABOVE>' \
   --label <TOKEN_A_SYMBOL>-<TOKEN_B_SYMBOL>-bot-liquidity \

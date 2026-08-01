@@ -23,6 +23,10 @@ pub enum ContractError {
     MinimumNotMet,
     #[error("initial deposit is too small")]
     InitialDepositTooSmall,
+    #[error("minimum initial deposit must exceed permanently locked initial shares")]
+    InvalidMinimumInitialDeposit,
+    #[error("minimum initial deposit cannot change after bootstrap")]
+    BootstrapComplete,
     #[error("deposit minted zero shares")]
     ZeroShares,
     #[error("vault allocation exceeds its configured tolerance")]
