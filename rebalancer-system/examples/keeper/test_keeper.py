@@ -207,6 +207,15 @@ class QueryFinalTxTests(unittest.TestCase):
             result = query_final_tx("http://lcd", "http://rpc", "txhash4")
         self.assertIsNone(result)
 
+    def test_returns_none_when_rpc_reports_not_indexed_as_500(self):
+        with patch("keeper.get_json") as mock_get:
+            mock_get.side_effect = [
+                {"tx_response": {}},
+                HTTPError("url", 500, "Internal Server Error", {}, None),
+            ]
+            result = query_final_tx("http://lcd", "http://rpc", "txhash7")
+        self.assertIsNone(result)
+
     def test_returns_none_when_rpc_returns_no_result(self):
         with patch("keeper.get_json") as mock_get:
             mock_get.side_effect = [
@@ -612,12 +621,12 @@ class BroadcastTests(unittest.TestCase):
 class PreflightTests(unittest.TestCase):
     @patch("keeper.tx_command")
     @patch("keeper.run_command")
-    def test_appends_dry_run_flag(self, mock_run, mock_tx):
+    def test_appends_generate_only_flag(self, mock_run, mock_tx):
         mock_tx.return_value = ["terrad", "tx", "wasm", "execute", "vault1", "msg"]
         mock_run.return_value = MagicMock(stdout="", stderr="")
         preflight("vault1", {}, MagicMock())
         mock_run.assert_called_once()
-        self.assertIn("--dry-run", mock_run.call_args[0][0])
+        self.assertIn("--generate-only", mock_run.call_args[0][0])
 
 
 class ParseArgsTests(unittest.TestCase):

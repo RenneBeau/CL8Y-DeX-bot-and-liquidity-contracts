@@ -18,6 +18,7 @@ def components(config: Config):
                     config.keyring_backend, config.gas_adjustment, config.fees)
     indexer = Indexer(db, rpc, config.chain_id, config.deployment_height,
                       config.vaults, config.finality_depth)
+    indexer.register_vaults()
     keeper = Keeper(db, terrad, config.max_orders_per_batch,
                     config.poll_seconds, config.tx_timeout_seconds,
                     confirmation_blocks=config.finality_depth,

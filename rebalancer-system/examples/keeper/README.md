@@ -160,7 +160,7 @@ execution and derives offer side, amount, trade cap, minimum return, and maximum
 spread from on-chain configuration. If movement has triggered but allocation is
 already within tolerance, the keeper sends `sync_reference` instead.
 
-Before broadcast the keeper runs a `terrad --dry-run` preflight. It parses the
+Before broadcast the keeper runs a `terrad --generate-only` gas simulation. It parses the
 sync CheckTx code and hash, then polls LCD with RPC fallback until DeliverTx is
 final and requires code zero. Only one hash can be in flight. Pending hashes and
 deterministic-failure suppression are persisted and fsynced in

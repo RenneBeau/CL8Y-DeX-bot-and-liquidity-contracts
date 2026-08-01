@@ -59,6 +59,7 @@ print(max(1, int(value)))
         '{send:{contract:$pair,amount:$amount,msg:$hook}}')
     tx_hash=$(terrad_tx wasm execute "$token1" "$swap" | jq -r '.txhash')
     swap_result=$(wait_tx "$tx_hash")
+    LAST_FILL_HEIGHT=$(jq -r '.height' <<<"$swap_result")
     fill_event=$(jq -c --arg id "$LAST_ASK_ID" '
       [[.logs[]?.events[]?, .events[]?][]
        | select(any(.attributes[]?; .key == "action" and .value == "limit_order_fill"))
@@ -77,12 +78,31 @@ print(max(1, int(value)))
 
 reconcile_last_fill() {
     local manager="$1"
-    local bot_id="$2"
+    local _bot_id="$2"
     local _pair="$3"
-    local message
-    message=$(jq -nc --argjson bot_id "$bot_id" --argjson order_id "$LAST_ASK_ID" \
-        '{reconcile:{bot_id:$bot_id,order_ids:[$order_id]}}')
-    execute_grid_from gridkeeper "$manager" "$message"
+    local database result replay tx_hash
+    database=$(mktemp)
+    rm -f "$database"
+    operator() {
+        env PYTHONPATH="$PROJECT_ROOT/grid-contract-system/services/grid-operator" \
+            GRID_DB_PATH="$database" GRID_RPC_URL=http://127.0.0.1:26657 \
+            GRID_CHAIN_ID=localterra GRID_DEPLOYMENT_HEIGHT="$LAST_FILL_HEIGHT" \
+            GRID_VAULTS="$manager" GRID_FINALITY_DEPTH=0 \
+            GRID_TERRAD="$SCRIPT_DIR/terrad-wrapper.sh" GRID_KEY_NAME=gridkeeper \
+            GRID_KEYRING_BACKEND=test GRID_FEES=20000000uluna \
+            GRID_TX_POLL_SECONDS=1 GRID_TX_TIMEOUT_SECONDS=60 \
+            python3 -m grid_operator.cli "$@"
+    }
+    operator index >/dev/null
+    result=$(operator keep)
+    jq -e --arg manager "$manager" '.[$manager] == "confirmed"' <<<"$result" >/dev/null
+    replay=$(operator keep)
+    jq -e --arg manager "$manager" '.[$manager] == "idle"' <<<"$replay" >/dev/null
+    tx_hash=$(python3 -c 'import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute(
+      "select tx_hash from batches where state=\"confirmed\" order by id desc limit 1").fetchone()[0])' \
+        "$database")
+    rm -f "$database" "$database-wal" "$database-shm"
+    terrad_query tx "$tx_hash"
 }
 
 echo "[grid 1/10] Verifying manager fee tier on standard CL8Y pair"

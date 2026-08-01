@@ -116,8 +116,15 @@ PRE_DEVIATION=$(jq -r '.allocation_deviation_bps' <<<"$PLAN")
 expect_execute_failure attacker "$VAULT_ADDRESS" "$(vault_rebalance_message)"
 SHARES_BEFORE=$(token_supply "$LIQUIDITY_ADDRESS")
 CORAL_BEFORE=$(cw20_balance "$REBALANCE_TOKEN" "$VAULT_ADDRESS")
-CORRECT=$(vault_rebalance_message)
-execute_wait "$VAULT_ADDRESS" "$CORRECT"
+KEEPER_STATE=$(mktemp)
+rm -f "$KEEPER_STATE"
+python3 "$PROJECT_ROOT/rebalancer-system/examples/keeper/keeper.py" \
+    --vault "$VAULT_ADDRESS" --lcd http://127.0.0.1:1317 --rpc http://127.0.0.1:26657 \
+    --chain-id localterra --key test1 --keyring-backend test \
+    --terrad "$SCRIPT_DIR/terrad-wrapper.sh" --state-file "$KEEPER_STATE" \
+    --confirmation-blocks 0 --once --broadcast
+test -s "$KEEPER_STATE"
+rm -f "$KEEPER_STATE"
 CORAL_AFTER=$(cw20_balance "$REBALANCE_TOKEN" "$VAULT_ADDRESS")
 test $((CORAL_BEFORE - CORAL_AFTER)) -eq "$REBALANCE_AMOUNT"
 test "$(token_supply "$LIQUIDITY_ADDRESS")" = "$SHARES_BEFORE"

@@ -154,7 +154,7 @@ def run_command(command):
 
 
 def preflight(vault, message, args):
-    run_command(tx_command(vault, message, args) + ["--dry-run"])
+    run_command(tx_command(vault, message, args) + ["--generate-only"])
 
 
 def broadcast(vault, message, args):
@@ -198,7 +198,7 @@ def query_final_tx(lcd, rpc, tx_hash):
     try:
         response = get_json(rpc_url).get("result")
     except urllib.error.HTTPError as error:
-        if error.code == 404:
+        if error.code in (404, 500):
             return None
         raise
     if not response:
