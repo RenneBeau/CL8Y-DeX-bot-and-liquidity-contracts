@@ -170,6 +170,9 @@ operator intervention rather than risking a duplicate. Commands have a 60-second
 timeout, and transient connection, sequence, timeout, availability, and mempool
 errors do not suppress the plan. An unchanged plan rejected deterministically by
 CheckTx or DeliverTx remains suppressed until on-chain plan inputs change.
+Code-zero inclusion is re-queried until `KEEPER_CONFIRMATION_BLOCKS` later
+blocks exist (default 2), so a transaction that disappears in a shallow reorg
+remains pending rather than advancing keeper state.
 
 ## 7. Run As A Service
 

@@ -225,7 +225,8 @@ class QueryFinalTxTests(unittest.TestCase):
 
 class PollPendingTests(unittest.TestCase):
     def test_returns_true_on_success(self):
-        args = MagicMock(lcd="lcd", rpc="rpc", tx_timeout_seconds=60, tx_poll_seconds=1)
+        args = MagicMock(lcd="lcd", rpc="rpc", tx_timeout_seconds=60, tx_poll_seconds=1,
+                         confirmation_blocks=0)
         tracker = MagicMock(pending_hash="hash1", pending_plan="fp")
         query_tx = MagicMock(return_value={"code": 0, "raw_log": "", "height": "50"})
         sleep = MagicMock()
@@ -240,7 +241,8 @@ class PollPendingTests(unittest.TestCase):
         tracker.save.assert_called_once()
 
     def test_suppresses_plan_on_delivertx_failure(self):
-        args = MagicMock(lcd="lcd", rpc="rpc", tx_timeout_seconds=60, tx_poll_seconds=1)
+        args = MagicMock(lcd="lcd", rpc="rpc", tx_timeout_seconds=60, tx_poll_seconds=1,
+                         confirmation_blocks=0)
         tracker = MagicMock(pending_hash="hash2", pending_plan="fp_bad")
         query_tx = MagicMock(return_value={"code": 5, "raw_log": "out of gas", "height": "51"})
         sleep = MagicMock()
@@ -256,7 +258,8 @@ class PollPendingTests(unittest.TestCase):
         tracker.save.assert_called_once()
 
     def test_timeout_returns_false(self):
-        args = MagicMock(lcd="lcd", rpc="rpc", tx_timeout_seconds=5, tx_poll_seconds=1)
+        args = MagicMock(lcd="lcd", rpc="rpc", tx_timeout_seconds=5, tx_poll_seconds=1,
+                         confirmation_blocks=0)
         tracker = MagicMock(pending_hash="hash3", pending_plan="fp")
         query_tx = MagicMock(return_value=None)
         sleep = MagicMock()
@@ -269,7 +272,8 @@ class PollPendingTests(unittest.TestCase):
         tracker.save.assert_not_called()
 
     def test_polls_multiple_times_before_success(self):
-        args = MagicMock(lcd="lcd", rpc="rpc", tx_timeout_seconds=30, tx_poll_seconds=1)
+        args = MagicMock(lcd="lcd", rpc="rpc", tx_timeout_seconds=30, tx_poll_seconds=1,
+                         confirmation_blocks=0)
         tracker = MagicMock(pending_hash="hash4", pending_plan="fp4")
         query_tx = MagicMock(side_effect=[None, None, {"code": 0, "raw_log": "", "height": "55"}])
         sleep = MagicMock()
@@ -280,6 +284,23 @@ class PollPendingTests(unittest.TestCase):
         self.assertEqual(query_tx.call_count, 3)
         self.assertEqual(sleep.call_count, 2)
 
+    def test_shallow_reorg_waits_for_reincluded_transaction_depth(self):
+        args = MagicMock(lcd="lcd", rpc="rpc", tx_timeout_seconds=30, tx_poll_seconds=1,
+                         confirmation_blocks=2)
+        tracker = MagicMock(pending_hash="hash5", pending_plan="fp5")
+        included = {"code": 0, "raw_log": "", "height": "50"}
+        query_tx = MagicMock(side_effect=[included, None, included])
+        latest_height = MagicMock(side_effect=[51, 52])
+        sleep = MagicMock()
+
+        result = poll_pending(args, tracker, query_tx=query_tx, sleep=sleep,
+                              latest_height=latest_height)
+
+        self.assertTrue(result)
+        self.assertEqual(query_tx.call_count, 3)
+        self.assertEqual(latest_height.call_count, 2)
+        self.assertIsNone(tracker.pending_hash)
+
 
 def _make_args(**overrides):
     base = dict(
@@ -289,6 +310,7 @@ def _make_args(**overrides):
         vault="vault",
         tx_timeout_seconds=60,
         tx_poll_seconds=1,
+        confirmation_blocks=0,
         poll_seconds=15,
         deadline_seconds=120,
         terrad="terrad",

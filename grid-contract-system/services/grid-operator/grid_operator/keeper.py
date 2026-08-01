@@ -27,13 +27,16 @@ def _has_reverted_grid_page(response: dict) -> bool:
 class Keeper:
     def __init__(self, db: Database, terrad, max_orders: int = 20,
                  poll_seconds: int = 6, timeout_seconds: int = 180,
-                  sleep=time.sleep, clock=time.monotonic, wall_clock=time.time):
+                 sleep=time.sleep, clock=time.monotonic, wall_clock=time.time,
+                 confirmation_blocks: int = 0, latest_height=None):
         if max_orders < 1:
             raise ValueError("max_orders must be positive")
         self.db, self.terrad, self.max_orders = db, terrad, max_orders
         self.poll_seconds, self.timeout_seconds = poll_seconds, timeout_seconds
         self.sleep, self.clock = sleep, clock
         self.wall_clock = wall_clock
+        self.confirmation_blocks = confirmation_blocks
+        self.latest_height = latest_height
 
     def _record_failure(self, batch_id: int, attempt_id: int, attempt_state: str,
                         error: str, response: dict | None = None, deliver_code: int | None = None) -> str:
@@ -186,6 +189,19 @@ class Keeper:
                 response = None
             if response:
                 tx_response = response.get("tx_response", response)
+                tx_height = int(tx_response.get("height", 0) or 0)
+                if self.confirmation_blocks and (
+                    not tx_height or self.latest_height() < tx_height + self.confirmation_blocks
+                ):
+                    if self.clock() - start >= self.timeout_seconds:
+                        with self.db.transaction(immediate=True) as conn:
+                            conn.execute("UPDATE tx_attempts SET state='timeout',updated_at=? WHERE id=?",
+                                         (int(time.time()), attempt_id))
+                            conn.execute("UPDATE batches SET state='timeout',error='confirmation polling timed out' WHERE id=?",
+                                         (batch_id,))
+                        return "timeout"
+                    self.sleep(self.poll_seconds)
+                    continue
                 code = int(tx_response.get("code", 0) or 0)
                 if code == 0:
                     if _has_reverted_grid_page(response):

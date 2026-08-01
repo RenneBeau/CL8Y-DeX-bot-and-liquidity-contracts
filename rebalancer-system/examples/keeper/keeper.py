@@ -211,11 +211,24 @@ def query_final_tx(lcd, rpc, tx_hash):
     }
 
 
-def poll_pending(args, tracker, query_tx=query_final_tx, sleep=time.sleep):
+def query_latest_height(rpc):
+    response = get_json(f"{rpc.rstrip('/')}/status")
+    return int(response["result"]["sync_info"]["latest_block_height"])
+
+
+def poll_pending(args, tracker, query_tx=query_final_tx, sleep=time.sleep,
+                 latest_height=query_latest_height):
     deadline = time.monotonic() + args.tx_timeout_seconds
     while True:
         result = query_tx(args.lcd, args.rpc, tracker.pending_hash)
         if result is not None:
+            confirmation_blocks = getattr(args, "confirmation_blocks", 0)
+            tx_height = int(result["height"])
+            if confirmation_blocks and latest_height(args.rpc) < tx_height + confirmation_blocks:
+                if time.monotonic() >= deadline:
+                    return False
+                sleep(args.tx_poll_seconds)
+                continue
             tx_hash = tracker.pending_hash
             plan = tracker.pending_plan
             tracker.pending_hash = None
@@ -304,13 +317,15 @@ def parse_args():
     parser.add_argument("--poll-seconds", type=int, default=int(os.getenv("KEEPER_POLL_SECONDS", "15")))
     parser.add_argument("--tx-poll-seconds", type=float, default=float(os.getenv("KEEPER_TX_POLL_SECONDS", "2")))
     parser.add_argument("--tx-timeout-seconds", type=float, default=float(os.getenv("KEEPER_TX_TIMEOUT_SECONDS", "60")))
+    parser.add_argument("--confirmation-blocks", type=int, default=int(os.getenv("KEEPER_CONFIRMATION_BLOCKS", "2")))
     parser.add_argument("--state-file", default=os.getenv("KEEPER_STATE_FILE", ".keeper-state.json"))
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--broadcast", action="store_true")
     args = parser.parse_args()
     if not args.vault:
         parser.error("--vault or KEEPER_VAULT_ADDRESS is required")
-    if args.deadline_seconds <= 0 or args.tx_poll_seconds <= 0 or args.tx_timeout_seconds <= 0:
+    if args.deadline_seconds <= 0 or args.tx_poll_seconds <= 0 or args.tx_timeout_seconds <= 0 \
+            or args.confirmation_blocks < 0:
         parser.error("deadline and transaction polling values must be positive")
     return args
 

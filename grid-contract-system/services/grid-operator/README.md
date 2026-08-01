@@ -26,8 +26,10 @@ venv/bin/grid-operator run
 ```
 
 `index` fetches both `/block` and `/block_results`, starts at
-`GRID_DEPLOYMENT_HEIGHT`, and only scans through `latest-finality_depth`. It
-revalidates the last observed finalized hash on every pass and refuses to
+`GRID_DEPLOYMENT_HEIGHT`, and only scans through `latest-finality_depth`. The
+same `GRID_FINALITY_DEPTH` also gates transaction confirmation: a code-zero
+reconcile remains pending and is re-queried until that many later blocks exist.
+The indexer revalidates the last observed finalized hash on every pass and refuses to
 continue on a hash or parent-link mismatch. Successful transaction hashes are
 SHA-256 hashes of the decoded Tendermint transaction bytes.
 

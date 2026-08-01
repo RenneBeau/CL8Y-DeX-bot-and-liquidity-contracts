@@ -19,7 +19,9 @@ def components(config: Config):
     indexer = Indexer(db, rpc, config.chain_id, config.deployment_height,
                       config.vaults, config.finality_depth)
     keeper = Keeper(db, terrad, config.max_orders_per_batch,
-                    config.poll_seconds, config.tx_timeout_seconds)
+                    config.poll_seconds, config.tx_timeout_seconds,
+                    confirmation_blocks=config.finality_depth,
+                    latest_height=rpc.latest_height)
     return db, terrad, indexer, keeper
 
 

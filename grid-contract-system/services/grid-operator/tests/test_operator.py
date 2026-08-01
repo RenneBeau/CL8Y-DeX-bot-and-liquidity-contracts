@@ -326,6 +326,25 @@ class KeeperTests(unittest.TestCase):
         self.assertEqual(terrad.broadcasts, 1)
         self.assertEqual(self.db.cursor("confirmed:vault1"), 10)
 
+    def test_shallow_reorg_waits_for_confirmation_depth(self):
+        heights = iter((21, 22))
+        terrad = FakeTerrad(queries=[
+            {"code": 0, "height": "20", "txhash": "ABC"},
+            RpcError("temporarily missing"),
+            {"code": 0, "height": "20", "txhash": "ABC"},
+        ])
+        keeper = Keeper(
+            self.db,
+            terrad,
+            confirmation_blocks=2,
+            latest_height=lambda: next(heights),
+            sleep=lambda _: None,
+        )
+
+        self.assertEqual(keeper.process_batch(keeper.freeze_batch("vault1")), "confirmed")
+        self.assertEqual(self.db.cursor("confirmed:vault1"), 10)
+        self.assertEqual(terrad.broadcasts, 1)
+
     def test_ambiguous_broadcast_is_not_rebroadcast_after_restart(self):
         terrad = FakeTerrad(broadcast_error=RpcError("connection reset"))
         keeper = Keeper(self.db, terrad)
