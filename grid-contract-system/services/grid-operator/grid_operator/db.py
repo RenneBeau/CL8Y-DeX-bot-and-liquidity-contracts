@@ -40,7 +40,8 @@ CREATE TABLE IF NOT EXISTS aggregates (
 CREATE TABLE IF NOT EXISTS batches (
   id INTEGER PRIMARY KEY, vault_address TEXT NOT NULL, bot_id INTEGER NOT NULL,
   through_height INTEGER NOT NULL, state TEXT NOT NULL,
-  created_at INTEGER NOT NULL, confirmed_at INTEGER, tx_hash TEXT, error TEXT
+  created_at INTEGER NOT NULL, confirmed_at INTEGER, tx_hash TEXT, error TEXT,
+  failure_count INTEGER NOT NULL DEFAULT 0, next_retry_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS batches_state ON batches(state, vault_address);
 CREATE TABLE IF NOT EXISTS batch_items (
@@ -61,7 +62,7 @@ CREATE TABLE IF NOT EXISTS tx_attempts (
 CREATE TABLE IF NOT EXISTS cursors (
   name TEXT PRIMARY KEY, height INTEGER NOT NULL, value TEXT, updated_at INTEGER NOT NULL
 );
-PRAGMA user_version = 1;
+PRAGMA user_version = 2;
 """
 
 
@@ -76,9 +77,15 @@ class Database:
 
     def migrate(self) -> None:
         version = self.conn.execute("PRAGMA user_version").fetchone()[0]
-        if version > 1:
+        if version > 2:
             raise RuntimeError(f"database schema {version} is newer than this operator")
-        self.conn.executescript(SCHEMA)
+        if version == 0:
+            self.conn.executescript(SCHEMA)
+        elif version == 1:
+            with self.transaction(immediate=True) as conn:
+                conn.execute("ALTER TABLE batches ADD COLUMN failure_count INTEGER NOT NULL DEFAULT 0")
+                conn.execute("ALTER TABLE batches ADD COLUMN next_retry_at INTEGER")
+                conn.execute("PRAGMA user_version = 2")
 
     @contextmanager
     def transaction(self, immediate: bool = False):

@@ -175,6 +175,26 @@ class IndexerTests(unittest.TestCase):
         tables = {row[0] for row in self.db.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         self.assertTrue({"blocks", "raw_events", "vaults", "orders", "aggregates", "batches",
                          "tx_attempts", "cursors"}.issubset(tables))
+        batch_columns = {
+            row[1] for row in self.db.conn.execute("PRAGMA table_info(batches)")
+        }
+        self.assertTrue({"failure_count", "next_retry_at"}.issubset(batch_columns))
+        self.assertEqual(self.db.conn.execute("PRAGMA user_version").fetchone()[0], 2)
+
+    def test_schema_one_database_migrates_retry_columns(self):
+        legacy_path = Path(self.temp.name) / "legacy.sqlite"
+        legacy = Database(legacy_path)
+        legacy.conn.execute(
+            "CREATE TABLE batches (id INTEGER PRIMARY KEY, vault_address TEXT NOT NULL, "
+            "bot_id INTEGER NOT NULL, through_height INTEGER NOT NULL, state TEXT NOT NULL, "
+            "created_at INTEGER NOT NULL, confirmed_at INTEGER, tx_hash TEXT, error TEXT)"
+        )
+        legacy.conn.execute("PRAGMA user_version = 1")
+        legacy.migrate()
+        columns = {row[1] for row in legacy.conn.execute("PRAGMA table_info(batches)")}
+        self.assertTrue({"failure_count", "next_retry_at"}.issubset(columns))
+        self.assertEqual(legacy.conn.execute("PRAGMA user_version").fetchone()[0], 2)
+        legacy.conn.close()
 
 
 class FakeTerrad:
@@ -246,6 +266,25 @@ class KeeperTests(unittest.TestCase):
         self.assertEqual(result, "check_failed")
         self.assertEqual(self.db.cursor("confirmed:vault1"), 0)
         self.assertIsNone(self.db.conn.execute("SELECT reconciled_batch_id FROM raw_events").fetchone()[0])
+
+    def test_repeated_checktx_failure_enters_intervention_after_backoff(self):
+        now = [100]
+        terrad = FakeTerrad(broadcast={"code": 12, "txhash": "BAD", "raw_log": "fee"})
+        keeper = Keeper(self.db, terrad, wall_clock=lambda: now[0])
+        batch = keeper.freeze_batch("vault1")
+
+        self.assertEqual(keeper.process_batch(batch), "check_failed")
+        self.assertEqual(keeper.process_batch(batch), "backoff")
+        now[0] += 60
+        self.assertEqual(keeper.process_batch(batch), "check_failed")
+        now[0] += 120
+        self.assertEqual(keeper.process_batch(batch), "check_failed")
+        self.assertEqual(keeper.process_batch(batch), "intervention")
+        self.assertEqual(terrad.broadcasts, 3)
+        row = self.db.conn.execute(
+            "SELECT state,failure_count,next_retry_at FROM batches WHERE id=?", (batch,)
+        ).fetchone()
+        self.assertEqual(tuple(row), ("intervention", 3, None))
 
     def test_delivertx_failure_does_not_advance_checkpoint(self):
         terrad = FakeTerrad(queries=[{"code": 9, "height": "20", "raw_log": "reverted"}])

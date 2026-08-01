@@ -5,7 +5,11 @@ from .db import Database
 from .rpc import RpcError
 
 
-ACTIVE_BATCH_STATES = ("ready", "signed", "broadcasting", "broadcast", "timeout", "unknown")
+ACTIVE_BATCH_STATES = (
+    "ready", "signed", "broadcasting", "broadcast", "timeout", "unknown", "intervention"
+)
+MAX_FAILURES = 3
+RETRY_BACKOFF_SECONDS = 60
 
 
 def _has_reverted_grid_page(response: dict) -> bool:
@@ -23,12 +27,32 @@ def _has_reverted_grid_page(response: dict) -> bool:
 class Keeper:
     def __init__(self, db: Database, terrad, max_orders: int = 20,
                  poll_seconds: int = 6, timeout_seconds: int = 180,
-                 sleep=time.sleep, clock=time.monotonic):
+                  sleep=time.sleep, clock=time.monotonic, wall_clock=time.time):
         if max_orders < 1:
             raise ValueError("max_orders must be positive")
         self.db, self.terrad, self.max_orders = db, terrad, max_orders
         self.poll_seconds, self.timeout_seconds = poll_seconds, timeout_seconds
         self.sleep, self.clock = sleep, clock
+        self.wall_clock = wall_clock
+
+    def _record_failure(self, batch_id: int, attempt_id: int, attempt_state: str,
+                        error: str, response: dict | None = None, deliver_code: int | None = None) -> str:
+        batch = self.db.conn.execute("SELECT failure_count FROM batches WHERE id=?", (batch_id,)).fetchone()
+        failures = int(batch["failure_count"]) + 1
+        state = "intervention" if failures >= MAX_FAILURES else "ready"
+        next_retry = None if state == "intervention" else int(self.wall_clock()) + RETRY_BACKOFF_SECONDS * (2 ** (failures - 1))
+        with self.db.transaction(immediate=True) as conn:
+            conn.execute(
+                "UPDATE tx_attempts SET state=?,deliver_code=?,error=?,response_json=COALESCE(?,response_json),updated_at=? WHERE id=?",
+                (attempt_state, deliver_code, error,
+                 json.dumps(response, sort_keys=True) if response is not None else None,
+                 int(self.wall_clock()), attempt_id),
+            )
+            conn.execute(
+                "UPDATE batches SET state=?,error=?,failure_count=?,next_retry_at=? WHERE id=?",
+                (state, error, failures, next_retry, batch_id),
+            )
+        return state
 
     def freeze_batch(self, vault: str) -> int | None:
         with self.db.transaction(immediate=True) as conn:
@@ -91,6 +115,11 @@ class Keeper:
             raise ValueError(f"unknown batch {batch_id}")
         if batch["state"] == "confirmed":
             return "confirmed"
+        if batch["state"] == "intervention":
+            return "intervention"
+        if batch["state"] == "ready" and batch["next_retry_at"] is not None \
+                and int(self.wall_clock()) < int(batch["next_retry_at"]):
+            return "backoff"
         attempt = self._latest_attempt(batch_id)
         if batch["state"] == "broadcasting":
             # A previous process may have reached the node but died before saving its response.
@@ -140,12 +169,11 @@ class Keeper:
             conn.execute("UPDATE batches SET tx_hash=? WHERE id=?", (tx_hash, batch_id))
             if code != 0 or not tx_hash:
                 error = tx_response.get("raw_log") or tx_response.get("log") or "CheckTx failed or omitted tx hash"
-                conn.execute("UPDATE tx_attempts SET state='check_failed',error=? WHERE id=?", (error, attempt_id))
-                conn.execute("UPDATE batches SET state='ready',error=? WHERE id=?", (error, batch_id))
             else:
                 conn.execute("UPDATE tx_attempts SET state='broadcast' WHERE id=?", (attempt_id,))
                 conn.execute("UPDATE batches SET state='broadcast' WHERE id=?", (batch_id,))
         if code != 0 or not tx_hash:
+            self._record_failure(batch_id, attempt_id, "check_failed", error)
             return "check_failed"
         return self._poll(batch_id, attempt_id, tx_hash)
 
@@ -162,21 +190,12 @@ class Keeper:
                 if code == 0:
                     if _has_reverted_grid_page(response):
                         error = "grid cancel or claim page reverted"
-                        with self.db.transaction(immediate=True) as conn:
-                            conn.execute(
-                                "UPDATE tx_attempts SET state='page_reverted',deliver_code=0,error=?,response_json=?,updated_at=? WHERE id=?",
-                                (error, json.dumps(response, sort_keys=True), int(time.time()), attempt_id),
-                            )
-                            conn.execute("UPDATE batches SET state='ready',error=? WHERE id=?",
-                                         (error, batch_id))
+                        self._record_failure(batch_id, attempt_id, "page_reverted", error, response, 0)
                         return "page_reverted"
                     self._confirm(batch_id, attempt_id, tx_hash, response)
                     return "confirmed"
                 error = tx_response.get("raw_log") or tx_response.get("log") or "DeliverTx failed"
-                with self.db.transaction(immediate=True) as conn:
-                    conn.execute("UPDATE tx_attempts SET state='deliver_failed',deliver_code=?,error=?,response_json=?,updated_at=? WHERE id=?",
-                                 (code, error, json.dumps(response, sort_keys=True), int(time.time()), attempt_id))
-                    conn.execute("UPDATE batches SET state='ready',error=? WHERE id=?", (error, batch_id))
+                self._record_failure(batch_id, attempt_id, "deliver_failed", error, response, code)
                 return "deliver_failed"
             if self.clock() - start >= self.timeout_seconds:
                 with self.db.transaction(immediate=True) as conn:
