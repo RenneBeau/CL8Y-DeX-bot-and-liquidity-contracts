@@ -37,6 +37,9 @@ pub enum ExecuteMsg {
     Allocate {
         bot_id: u64,
     },
+    SyncBalances {
+        bot_id: u64,
+    },
     Reconcile {
         bot_id: u64,
         order_ids: Vec<u64>,

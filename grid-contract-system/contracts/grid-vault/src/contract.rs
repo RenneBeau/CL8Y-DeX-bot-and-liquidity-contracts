@@ -99,6 +99,7 @@ pub fn execute(
             recipient,
         } => execute_withdraw_gas(deps, info, bot_id, amount, recipient),
         ExecuteMsg::Allocate { bot_id } => execute_allocate(deps, env, info, bot_id),
+        ExecuteMsg::SyncBalances { bot_id } => execute_sync_balances(deps, env, info, bot_id),
         ExecuteMsg::Reconcile { bot_id, order_ids } => {
             execute_reconcile(deps, env, info, bot_id, order_ids)
         }
@@ -126,6 +127,26 @@ pub fn execute(
             execute_emergency_withdraw(deps, env, info, bot_id, recipient)
         }
     }
+}
+
+fn execute_sync_balances(
+    deps: DepsMut,
+    env: Env,
+    info: MessageInfo,
+    bot_id: u64,
+) -> Result<Response, ContractError> {
+    assert_no_funds(&info)?;
+    let mut bot = BOTS.load(deps.storage, bot_id)?;
+    if info.sender != bot.owner {
+        return Err(ContractError::Unauthorized);
+    }
+    let credited = sync_free_balances(deps.as_ref(), &env, &mut bot)?;
+    BOTS.save(deps.storage, bot_id, &bot)?;
+    Ok(Response::new()
+        .add_attribute("action", "sync_grid_balances")
+        .add_attribute("bot_id", bot_id.to_string())
+        .add_attribute("credited_token_0", credited[0])
+        .add_attribute("credited_token_1", credited[1]))
 }
 
 fn execute_create_bot(

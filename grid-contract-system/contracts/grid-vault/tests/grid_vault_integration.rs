@@ -1185,6 +1185,38 @@ fn malicious_token_lying_balance_rejected_on_deposit() {
 }
 
 #[test]
+fn unsolicited_transfer_can_be_synchronized_without_minting_shares() {
+    let mut h = Harness::new();
+    h.create_bot();
+    h.app
+        .execute_contract(
+            h.alice.clone(),
+            h.token_0.clone(),
+            &Cw20ExecuteMsg::Transfer {
+                recipient: h.vault.to_string(),
+                amount: Uint128::new(100),
+            },
+            &[],
+        )
+        .unwrap();
+
+    h.app
+        .execute_contract(
+            h.alice.clone(),
+            h.vault.clone(),
+            &VaultExecuteMsg::SyncBalances { bot_id: 1 },
+            &[],
+        )
+        .unwrap();
+    let bot = h.bot(1);
+    assert_eq!(bot.free_balances[0], Uint128::new(100));
+    assert_eq!(bot.total_shares, Uint128::zero());
+
+    h.deposit(1, &h.token_0.clone(), Uint128::new(500));
+    assert!(!h.orders(1).is_empty());
+}
+
+#[test]
 fn generic_pair_query_error_treated_as_terminal_without_panic() {
     let mut h = Harness::new();
     h.create_bot();
