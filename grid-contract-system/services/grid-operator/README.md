@@ -71,6 +71,32 @@ systemd `StateDirectory`. Adjust paths, user, environment, keyring access, and
 fee policy for the host. Install the reviewed environment file as
 `/etc/grid-operator.env` before starting the service.
 
+## Swap-Only Vault Keeper
+
+The limit-order flow above applies only to `cl8y-grid-vault` instances. The
+swap-only design (`cl8y-grid-vault-swap`) has no limit orders: it holds CW20
+balances and re-balances toward the current grid cell by paying a pair Swap
+taker. Rebalance is fully permissionless, so any keeper may submit it.
+
+`grid-operator keep-swap` polls `{"grid_status": {}}` on the configured vault
+(`--vault` or `GRID_SWAP_VAULTS`, one swap vault per process) and, when the
+vault reports `should_rebalance` with no swap already pending, submits
+`{"rebalance": {"deadline": <now + GRID_SWAP_DEADLINE_SECONDS>}}`.
+
+```sh
+GRID_SWAP_VAULTS=<vault-address> \
+GRID_SWAP_RPC_URL=http://127.0.0.1:26657 \
+GRID_SWAP_CHAIN_ID=localterra \
+GRID_SWAP_KEY_NAME=grid-keeper \
+venv/bin/grid-operator keep-swap
+```
+
+It is a dry-run by default; pass `--broadcast` to sign and submit. State lives
+in a fail-closed JSON tracker (`GRID_SWAP_STATE_FILE`): an unresolved broadcast
+is never automatically rebroadcast, and a deterministic DeliverTx failure
+suppresses the identical plan until the vault state changes. It self-funds its
+own gas via the configured `GRID_SWAP_FEES`.
+
 ## Tests
 
 ```sh

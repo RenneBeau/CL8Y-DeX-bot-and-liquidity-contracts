@@ -124,6 +124,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "cl8y-grid-vault-swap"
+version = "0.1.0"
+dependencies = [
+ "base64ct",
+ "cosmwasm-schema",
+ "cosmwasm-std",
+ "cw-multi-test",
+ "cw-storage-plus",
+ "cw2",
+ "cw20",
+ "cw20-base",
+ "serde",
+ "thiserror",
+ "zeroize",
+]
+
+[[package]]
 name = "const-oid"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"

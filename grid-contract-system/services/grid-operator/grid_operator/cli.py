@@ -8,6 +8,7 @@ from .db import Database
 from .indexer import Indexer
 from .keeper import Keeper
 from .rpc import TendermintRPC, Terrad
+from .swap_keeper import main as swap_keeper_main
 
 
 def components(config: Config):
@@ -50,9 +51,11 @@ def status(db: Database, config: Config) -> dict:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="grid-operator")
-    parser.add_argument("command", choices=("run", "index", "keep", "migrate", "status"))
+    parser.add_argument("command", choices=("run", "index", "keep", "keep-swap", "migrate", "status"))
     parser.add_argument("--scan-limit", type=int)
-    args = parser.parse_args(argv)
+    args, unknown = parser.parse_known_args(argv)
+    if args.command == "keep-swap":
+        return swap_keeper_main(unknown)
     config = Config.from_env()
     db, terrad, indexer, keeper = components(config)
     if args.command == "migrate":

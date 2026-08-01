@@ -306,19 +306,11 @@ Migration must:
 
 Upgrade order is mandatory:
 
-1. Merge and pin the pair API dependency from
-   [PlasticDigits/cl8y-dex-terraclassic PR #1](https://github.com/PlasticDigits/cl8y-dex-terraclassic/pull/1)
-   (reviewed fork reference `c1f669b06c98936005b665cf56d5540a33a49edd`).
-2. Upgrade each pair and run its bounded owner-index backfill until protocol v1
-   reports `owner_inventory_ready=true`. Do not migrate funded vaults before this.
-3. Verify the new pair runtime code ID, migrate the vault, and re-pin that code ID
-   before the first reconciliation snapshot.
-4. Repeatedly continue reconciliation, monitoring phase, snapshot generation and
-   high-water, scan cursor, recovered count, pending action, last error, successful
-   pair pages, and local rows cleaned. Investigate repeated identical failures
-   rather than bypassing them.
-5. Require a final complete empty rescan, local cleanup, zero active orders, exact
-   CW20 balance synchronization, and a cleared lock before allowing withdrawals.
+1. Deploy the swap-only `grid-vault-swap` design against the shipped pair; no
+   pair upgrade is needed.
+2. Migrate any funded vault to the swap-only vault by deploying a fresh contract
+   and depositing the withdrawn balances; there is no in-place custody migration.
+3. Rehearse with funded historical-state fixtures before economic deployment.
 
 Once a vault has captured a snapshot, do not roll the pair back, change its owner
 index generation, or repin a different implementation. Restore the exact verified
@@ -344,11 +336,26 @@ including `Complete`, can replace a new scan and empty canonical pair proof.
 
 ## Production Status
 
-Address-level custody, permissionless amount-free reconciliation, observed
-balance accounting, timed orders, reply-confirmed pages, token admission and
-quarantine, mocked multi-contract/property tests, signed LocalTerra scenarios,
-and the durable operator are implemented. Production readiness still requires
-adversarial validation against the production CL8Y runtime, an independent
-external audit, and staged testnet/limited-value rollout. The legacy inventory
-flow is not deployable until upstream PR #1 is merged and pinned and a funded
-historical-state fixture rehearsal completes successfully.
+### Limit-Order Vault (reference only, not deployable)
+
+`contracts/grid-vault` is retained for reference. It is **not deployable** and
+must not be funded. Its legacy inventory-reconciliation flow depends on pair
+queries that do not exist in the shipped CL8Y pair: typed order status
+(`typed_order_status`), owner inventory (`owner_inventory`), and owner-index
+backfill (`owner_index_backfill`). No pair modification, fork, or upstream PR is
+permitted for the grid system, so those queries will never be available. Any
+deployment of this vault against the shipped pair stays permanently locked behind
+`inventory_reconciliation_required` and cannot prove custody completeness. The
+design remains documented only as an analysis artifact.
+
+### Swap-Only Vault (deployable design)
+
+`contracts/grid-vault-swap` is the deployable grid design. It holds its CW20
+balances directly in the vault address, reads the pool price, and executes
+classic pair `Swap` calls through the CW20 receive hook when the price crosses a
+grid level. It uses exactly the shipped pair API (`Pool`, `Observe`, `Swap`) and
+requires no upstream merge, no fork, and no reconciliation state.
+
+Production readiness still requires adversarial validation against the production
+CL8Y runtime, an independent external audit, and staged testnet/limited-value
+rollout.

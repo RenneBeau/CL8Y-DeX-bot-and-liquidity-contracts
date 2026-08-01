@@ -69,6 +69,19 @@ class Terrad:
                             "--chain-id", self.chain_id, "--node", self.node, "--output", "json"], unsigned)
         return json.dumps(signed, separators=(",", ":")).encode()
 
+    def preflight(self, contract: str, message: dict) -> dict:
+        """Simulate the rebalance tx (--generate-only) without broadcasting."""
+        args = ["tx", "wasm", "execute", contract, json.dumps(message, separators=(",", ":")),
+                "--from", self.key, "--keyring-backend", self.keyring, "--chain-id", self.chain_id,
+                "--node", self.node, "--gas", "auto", "--gas-adjustment", self.gas_adjustment,
+                "--generate-only", "--output", "json"]
+        if self.fees:
+            args += ["--fees", self.fees]
+        return self._run(args)
+
+    def latest_height(self) -> int:
+        return int(self._run(["status", "--node", self.node])["sync_info"]["latest_block_height"])
+
     def broadcast(self, signed_tx: bytes):
         return self._run(["tx", "broadcast", "-", "--node", self.node,
                           "--broadcast-mode", "sync", "--output", "json"], signed_tx)
