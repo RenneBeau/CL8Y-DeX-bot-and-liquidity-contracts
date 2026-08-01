@@ -47,6 +47,8 @@ pub enum VaultExecuteMsg {
         max_trade_bps: Option<u16>,
         max_execution_deviation_bps: Option<u16>,
         quote_slippage_bps: Option<u16>,
+        max_spot_twap_deviation_bps: Option<u16>,
+        max_trade_pool_bps: Option<u16>,
         max_spread: Option<Decimal>,
         twap_window_seconds: Option<u32>,
     },
@@ -79,6 +81,8 @@ pub struct VaultConfigResponse {
     pub max_trade_bps: u16,
     pub max_execution_deviation_bps: u16,
     pub quote_slippage_bps: u16,
+    pub max_spot_twap_deviation_bps: u16,
+    pub max_trade_pool_bps: u16,
     pub max_spread: Decimal,
 }
 

@@ -235,6 +235,7 @@ pub enum VaultModeResponse {
 
 #[cw_serde]
 pub struct TokenPolicyResponse {
+    pub enabled: bool,
     pub allowed_tokens: Vec<String>,
     pub quarantined_tokens: Vec<String>,
 }

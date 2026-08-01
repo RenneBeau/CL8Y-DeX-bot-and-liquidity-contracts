@@ -76,6 +76,7 @@ pub const ORDERS: Map<(u64, u64), GridOrder> = Map::new("orders");
 pub const SHARES: Map<(u64, &Addr), Uint128> = Map::new("shares");
 pub const PLACEMENTS: Map<u64, PlacementPlan> = Map::new("placements");
 pub const ALLOWED_TOKENS: Map<&Addr, ()> = Map::new("allowed_tokens");
+pub const TOKEN_POLICY_ENABLED: Item<bool> = Item::new("token_policy_enabled");
 pub const QUARANTINE: Map<&Addr, ()> = Map::new("quarantine");
 
 #[cw_serde]

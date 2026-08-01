@@ -17,6 +17,8 @@ pub struct Config {
     pub max_trade_bps: u16,
     pub max_execution_deviation_bps: u16,
     pub quote_slippage_bps: u16,
+    pub max_spot_twap_deviation_bps: u16,
+    pub max_trade_pool_bps: u16,
     pub max_spread: Decimal,
     pub reference_price: Decimal,
 }

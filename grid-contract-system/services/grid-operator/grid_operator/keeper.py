@@ -8,6 +8,18 @@ from .rpc import RpcError
 ACTIVE_BATCH_STATES = ("ready", "signed", "broadcasting", "broadcast", "timeout", "unknown")
 
 
+def _has_reverted_grid_page(response: dict) -> bool:
+    tx_response = response.get("tx_response", response)
+    events = list(tx_response.get("events") or [])
+    for log in tx_response.get("logs") or []:
+        events.extend(log.get("events") or [])
+    return any(
+        attribute.get("key") == "action" and attribute.get("value") == "reverted_grid_page"
+        for event in events
+        for attribute in event.get("attributes") or []
+    )
+
+
 class Keeper:
     def __init__(self, db: Database, terrad, max_orders: int = 20,
                  poll_seconds: int = 6, timeout_seconds: int = 180,
@@ -148,6 +160,16 @@ class Keeper:
                 tx_response = response.get("tx_response", response)
                 code = int(tx_response.get("code", 0) or 0)
                 if code == 0:
+                    if _has_reverted_grid_page(response):
+                        error = "grid cancel or claim page reverted"
+                        with self.db.transaction(immediate=True) as conn:
+                            conn.execute(
+                                "UPDATE tx_attempts SET state='page_reverted',deliver_code=0,error=?,response_json=?,updated_at=? WHERE id=?",
+                                (error, json.dumps(response, sort_keys=True), int(time.time()), attempt_id),
+                            )
+                            conn.execute("UPDATE batches SET state='ready',error=? WHERE id=?",
+                                         (error, batch_id))
+                        return "page_reverted"
                     self._confirm(batch_id, attempt_id, tx_hash, response)
                     return "confirmed"
                 error = tx_response.get("raw_log") or tx_response.get("log") or "DeliverTx failed"

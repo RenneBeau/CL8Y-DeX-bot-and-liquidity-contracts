@@ -20,7 +20,7 @@ use crate::msg::{
 use crate::state::{
     Bot, Config, GridOrder, PageKind, PendingPage, PendingPageEntry, PlacementPlan, Rung,
     VaultMode, ALLOWED_TOKENS, BOTS, CONFIG, NEXT_BOT_ID, NEXT_REPLY_ID, ORDERS, PENDING_PAGES,
-    PLACEMENTS, QUARANTINE, RUNGS, SHARES, VAULT_MODE,
+    PLACEMENTS, QUARANTINE, RUNGS, SHARES, TOKEN_POLICY_ENABLED, VAULT_MODE,
 };
 
 const CONTRACT_NAME: &str = "crates.io:cl8y-grid-vault";
@@ -73,6 +73,7 @@ pub fn instantiate(
     NEXT_BOT_ID.save(deps.storage, &1)?;
     NEXT_REPLY_ID.save(deps.storage, &FIRST_REPLY_ID)?;
     VAULT_MODE.save(deps.storage, &VaultMode::Active)?;
+    TOKEN_POLICY_ENABLED.save(deps.storage, &false)?;
     Ok(Response::new().add_attribute("action", "instantiate"))
 }
 
@@ -173,6 +174,12 @@ fn execute_create_bot(
     ];
     if asset_tokens[0] == asset_tokens[1] {
         return Err(ContractError::InvalidPair);
+    }
+    if !TOKEN_POLICY_ENABLED.load(deps.storage)? {
+        for token in &asset_tokens {
+            ALLOWED_TOKENS.save(deps.storage, token, &())?;
+        }
+        TOKEN_POLICY_ENABLED.save(deps.storage, &true)?;
     }
     for token in &asset_tokens {
         require_token_available(deps.as_ref(), token)?;
@@ -994,7 +1001,7 @@ fn require_token_available(deps: Deps, token: &Addr) -> Result<(), ContractError
     if QUARANTINE.has(deps.storage, token) {
         return Err(ContractError::TokenQuarantined);
     }
-    if !ALLOWED_TOKENS.is_empty(deps.storage) && !ALLOWED_TOKENS.has(deps.storage, token) {
+    if TOKEN_POLICY_ENABLED.load(deps.storage)? && !ALLOWED_TOKENS.has(deps.storage, token) {
         return Err(ContractError::TokenNotAllowed);
     }
     Ok(())
@@ -1009,6 +1016,7 @@ fn execute_add_allowed_token(
     assert_admin(deps.as_ref(), &info.sender)?;
     let token = deps.api.addr_validate(&token)?;
     ALLOWED_TOKENS.save(deps.storage, &token, &())?;
+    TOKEN_POLICY_ENABLED.save(deps.storage, &true)?;
     Ok(Response::new()
         .add_attribute("action", "add_allowed_token")
         .add_attribute("token", token))
@@ -1339,6 +1347,7 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
                 .map(|addr| addr.to_string())
                 .collect();
             to_json_binary(&TokenPolicyResponse {
+                enabled: TOKEN_POLICY_ENABLED.load(deps.storage)?,
                 allowed_tokens,
                 quarantined_tokens,
             })
@@ -2829,6 +2838,28 @@ mod tests {
             .unwrap();
         create_bot(deps.as_mut(), "alice");
         assert!(BOTS.has(&deps.storage, 1));
+    }
+
+    #[test]
+    fn first_pair_seeds_fail_closed_token_policy() {
+        let mut deps = mock_dependencies();
+        install_pair_querier(&mut deps);
+        instantiate_default(deps.as_mut());
+        assert!(!TOKEN_POLICY_ENABLED.load(&deps.storage).unwrap());
+
+        create_bot(deps.as_mut(), "alice");
+        assert!(TOKEN_POLICY_ENABLED.load(&deps.storage).unwrap());
+        assert!(ALLOWED_TOKENS.has(&deps.storage, &Addr::unchecked("token_a")));
+        assert!(ALLOWED_TOKENS.has(&deps.storage, &Addr::unchecked("token_b")));
+
+        execute_remove_allowed_token(deps.as_mut(), mock_info("admin", &[]), "token_a".into())
+            .unwrap();
+        execute_remove_allowed_token(deps.as_mut(), mock_info("admin", &[]), "token_b".into())
+            .unwrap();
+        assert_eq!(
+            require_token_available(deps.as_ref(), &Addr::unchecked("token_a")),
+            Err(ContractError::TokenNotAllowed)
+        );
     }
 
     #[test]

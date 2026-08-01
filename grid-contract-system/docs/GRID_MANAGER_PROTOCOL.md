@@ -37,9 +37,16 @@ The design does not protect against:
 - Temporary inability to distinguish a missing order from an unrelated pair query
   error. Emergency processing is owner-only and should be retried after pair/RPC
   health is restored.
+
 - Exact event-by-event opposite-rung recreation. The current pair does not retain
   cumulative maker output, and per-fill rounding prevents exact reconstruction
   from aggregate escrow reduction.
+
+At first bot creation, a previously unconfigured vault enables its token policy
+and atomically allowlists only the two assets returned by the factory-verified
+pair. The admin may add operational tokens such as CL8Y later. Once enabled, an
+empty allowlist denies every token; removing the final entry never reopens the
+policy.
 
 ## Roles And Trust
 

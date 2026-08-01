@@ -13,5 +13,7 @@ pub struct InstantiateMsg {
     pub max_trade_bps: Option<u16>,
     pub max_execution_deviation_bps: Option<u16>,
     pub quote_slippage_bps: Option<u16>,
+    pub max_spot_twap_deviation_bps: Option<u16>,
+    pub max_trade_pool_bps: Option<u16>,
     pub max_spread: Option<Decimal>,
 }

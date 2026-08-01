@@ -60,6 +60,13 @@ class IndexerTests(unittest.TestCase):
         self.path = Path(self.temp.name) / "db.sqlite"
         self.db = Database(self.path)
         self.db.migrate()
+        self.db.conn.execute(
+            "INSERT INTO vaults(address,bot_id,pair_address) VALUES('vault1',1,'pairA')"
+        )
+        self.db.conn.execute(
+            "INSERT INTO orders(pair_address,order_id,vault_address,bot_id,side,active) "
+            "VALUES('pairA',7,'vault1',1,'ask',1)"
+        )
 
     def tearDown(self):
         self.db.conn.close()
@@ -81,11 +88,21 @@ class IndexerTests(unittest.TestCase):
         self.assertEqual((row["input_amount"], row["output_amount"]), ("10", "20"))
         self.assertEqual(self.db.conn.execute("SELECT COUNT(*) FROM raw_events").fetchone()[0], 1)
 
-    def test_same_order_id_across_pairs_remains_distinct(self):
+    def test_fill_from_nonconfigured_pair_is_rejected(self):
         block, result = response(10, [fill("pairA", 7), fill("pairB", 7, "bid", 3, 4)])
         self.indexer(FakeRPC({10: block}, {10: result})).scan()
         rows = self.db.conn.execute("SELECT pair_address,input_amount,output_amount FROM aggregates ORDER BY pair_address").fetchall()
-        self.assertEqual([tuple(row) for row in rows], [("pairA", "10", "20"), ("pairB", "4", "3")])
+        self.assertEqual([tuple(row) for row in rows], [("pairA", "10", "20")])
+
+    def test_forged_fill_from_non_pair_contract_is_rejected(self):
+        block, result = response(10, [fill("attacker", 7)])
+        self.indexer(FakeRPC({10: block}, {10: result})).scan()
+        self.assertEqual(self.db.conn.execute("SELECT COUNT(*) FROM raw_events").fetchone()[0], 0)
+
+    def test_fill_for_unknown_order_is_rejected(self):
+        block, result = response(10, [fill("pairA", 999)])
+        self.indexer(FakeRPC({10: block}, {10: result})).scan()
+        self.assertEqual(self.db.conn.execute("SELECT COUNT(*) FROM raw_events").fetchone()[0], 0)
 
     def test_partial_and_terminal_fills_rebuild_exact_aggregate(self):
         b10, r10 = response(10, [fill(amount0=3, amount1=5)], b"one")
@@ -147,7 +164,9 @@ class IndexerTests(unittest.TestCase):
         indexer = self.indexer(FakeRPC({}, {}, latest=0))
         indexer.register_vaults()
         indexer.refresh_orders(queries, "vault1", 12)
-        row = self.db.conn.execute("SELECT pair_address,bot_id,side,remaining FROM orders").fetchone()
+        row = self.db.conn.execute(
+            "SELECT pair_address,bot_id,side,remaining FROM orders WHERE order_id=4"
+        ).fetchone()
         self.assertEqual(queries.assert_bot, 1)
         self.assertEqual(tuple(row), ("pairA", 1, "ask", "9"))
 
@@ -234,6 +253,24 @@ class KeeperTests(unittest.TestCase):
         result = keeper.process_batch(keeper.freeze_batch("vault1"))
         self.assertEqual(result, "deliver_failed")
         self.assertEqual(self.db.cursor("confirmed:vault1"), 0)
+
+    def test_reverted_grid_page_does_not_confirm_successful_transaction(self):
+        transaction = {
+            "code": 0,
+            "height": "20",
+            "logs": [{"events": [attrs(action="reverted_grid_page", bot_id=1)]}],
+        }
+        keeper = Keeper(self.db, FakeTerrad(queries=[transaction]))
+        batch = keeper.freeze_batch("vault1")
+        self.assertEqual(keeper.process_batch(batch), "page_reverted")
+        self.assertEqual(self.db.cursor("confirmed:vault1"), 0)
+        self.assertIsNone(
+            self.db.conn.execute("SELECT reconciled_batch_id FROM raw_events").fetchone()[0]
+        )
+        self.assertEqual(
+            self.db.conn.execute("SELECT state FROM batches WHERE id=?", (batch,)).fetchone()[0],
+            "ready",
+        )
 
     def test_timeout_then_eventual_inclusion_polls_without_rebroadcast(self):
         now = [0]

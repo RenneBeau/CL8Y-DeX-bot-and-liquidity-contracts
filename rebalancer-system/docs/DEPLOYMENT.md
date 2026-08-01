@@ -4,6 +4,14 @@ This guide explains how to upload the contracts, initialize the shared swap
 proxy, connect a CL8Y pair, deploy a vault and bot LP token for that pair, and
 change the bot settings later.
 
+## Upgrade Policy
+
+The current contracts have no funded legacy deployment and do not expose a
+`migrate` entry point. Releases that change stored state require fresh contract
+instantiation and configuration; do not replace code on an older instance.
+Add and test an explicit versioned migration before any future in-place upgrade
+of a funded deployment.
+
 ## Contract Instances
 
 Upload each Wasm code once:
@@ -118,6 +126,8 @@ Repeat these steps for every new pair.
   "max_trade_bps": 2500,
   "max_execution_deviation_bps": 500,
   "quote_slippage_bps": 200,
+  "max_spot_twap_deviation_bps": 500,
+  "max_trade_pool_bps": 1000,
   "max_spread": "0.05"
 }
 ```
@@ -134,7 +144,8 @@ Settings:
 - `allocation_tolerance_bps: 500` allows a 5% ratio deviation.
 - `twap_window_seconds` must be nonzero and reads CL8Y cumulative observations.
 - Hard maxima are 50% of the offered balance per trade, 10% TWAP execution
-  deviation, 5% quote slippage, and 10% CL8Y spread.
+  deviation, 5% quote slippage, 10% spot/TWAP deviation, 20% of the offered-side
+  pool reserve, and 10% CL8Y spread.
 - `60` is a short-term starting point, not a universal safe value. Benchmark
   30-300 seconds against the pair's liquidity, block time, and volatility.
 

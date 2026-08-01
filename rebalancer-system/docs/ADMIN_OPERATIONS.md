@@ -54,10 +54,11 @@ It must be greater than zero:
 ## Update Risk Controls
 
 The same message can update `max_trade_bps`,
-`max_execution_deviation_bps`, `quote_slippage_bps`, and `max_spread`; omitted
+`max_execution_deviation_bps`, `quote_slippage_bps`,
+`max_spot_twap_deviation_bps`, `max_trade_pool_bps`, and `max_spread`; omitted
 or null fields retain their current values. Hard maxima are respectively 5,000,
-1,000, and 500 basis points and 10% spread. These bounds cannot be overridden
-by the admin or keeper.
+1,000, 500, 1,000, and 2,000 basis points and 10% spread. These bounds cannot be
+overridden by the admin or keeper.
 
 ## Replace The Keeper
 

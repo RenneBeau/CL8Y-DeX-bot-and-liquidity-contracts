@@ -35,6 +35,10 @@ pub enum ContractError {
     AllocationDidNotImprove,
     #[error("keeper swap is not safely bounded")]
     InvalidRebalanceSwap,
+    #[error("pool spot price deviates too far from TWAP")]
+    UnsafePoolPrice,
+    #[error("rebalance trade is too large relative to pool depth")]
+    InsufficientPoolDepth,
     #[error("vault allocation exceeds configured tolerance")]
     AllocationOutsideTolerance,
     #[error("another rebalance is pending")]

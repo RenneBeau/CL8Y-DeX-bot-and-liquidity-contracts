@@ -29,10 +29,10 @@ only once.
 
 The admin can update `rebalance_threshold_bps`, `allocation_tolerance_bps`,
 `max_trade_bps`, `max_execution_deviation_bps`, `quote_slippage_bps`,
-`max_spread`, and `twap_window_seconds` at any time through `UpdateThresholds`;
-omitted fields retain their current values. The TWAP window must remain
-nonzero. This lets a vault adapt its observation window to changed volatility
-without redeploying.
+`max_spot_twap_deviation_bps`, `max_trade_pool_bps`, `max_spread`, and
+`twap_window_seconds` at any time through `UpdateThresholds`; omitted fields
+retain their current values. The TWAP window must remain nonzero. This lets a
+vault adapt its observation window to changed volatility without redeploying.
 
 ## User Operations
 
@@ -47,7 +47,10 @@ observations, whose orientation was verified at pinned revision `fad8011` as
 reserve token1 divided by reserve token0. A single captured TWAP controls the
 trigger, equal-value allocation direction and amount, execution-price floor,
 and post-swap allocation check. The amount is additionally capped by
-`max_trade_bps`. The minimum return is the greater of the TWAP floor using
+`max_trade_bps` and `max_trade_pool_bps` relative to the offered-side pool
+reserve. Immediately before execution, the current reserve ratio must remain
+within `max_spot_twap_deviation_bps` of the captured TWAP. The minimum return is
+the greater of the TWAP floor using
 `max_execution_deviation_bps` and the CL8Y simulation floor using
 `quote_slippage_bps`; `max_spread` is also read from on-chain configuration.
 

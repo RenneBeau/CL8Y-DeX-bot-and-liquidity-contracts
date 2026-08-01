@@ -4,7 +4,7 @@ use bot_types::{
 };
 use cl8y_dex::{
     Asset, AssetInfo, HybridSimulationResponse, HybridSwapParams, ObserveResponse, PairInfo,
-    PairQueryMsg,
+    PairQueryMsg, PoolResponse,
 };
 use cosmwasm_std::{
     entry_point, to_json_binary, Addr, Binary, Decimal, Deps, DepsMut, Env, MessageInfo, Reply,
@@ -24,11 +24,15 @@ const DEFAULT_ALLOCATION_TOLERANCE_BPS: u16 = 100;
 const DEFAULT_MAX_TRADE_BPS: u16 = 2_500;
 const DEFAULT_MAX_EXECUTION_DEVIATION_BPS: u16 = 500;
 const DEFAULT_QUOTE_SLIPPAGE_BPS: u16 = 200;
+const DEFAULT_MAX_SPOT_TWAP_DEVIATION_BPS: u16 = 500;
+const DEFAULT_MAX_TRADE_POOL_BPS: u16 = 1_000;
 const DEFAULT_MAX_SPREAD: Decimal = Decimal::percent(5);
 const MAX_SPREAD: Decimal = Decimal::percent(10);
 const MAX_TRADE_BPS: u16 = 5_000;
 const MAX_EXECUTION_DEVIATION_BPS: u16 = 1_000;
 const MAX_QUOTE_SLIPPAGE_BPS: u16 = 500;
+const MAX_SPOT_TWAP_DEVIATION_BPS: u16 = 1_000;
+const MAX_TRADE_POOL_BPS: u16 = 2_000;
 const MAX_ALLOCATION_TOLERANCE_BPS: u16 = 2_000;
 const REBALANCE_REPLY_ID: u64 = 1;
 
@@ -80,11 +84,17 @@ pub fn instantiate(
         .max_execution_deviation_bps
         .unwrap_or(DEFAULT_MAX_EXECUTION_DEVIATION_BPS);
     let quote_slippage_bps = msg.quote_slippage_bps.unwrap_or(DEFAULT_QUOTE_SLIPPAGE_BPS);
+    let max_spot_twap_deviation_bps = msg
+        .max_spot_twap_deviation_bps
+        .unwrap_or(DEFAULT_MAX_SPOT_TWAP_DEVIATION_BPS);
+    let max_trade_pool_bps = msg.max_trade_pool_bps.unwrap_or(DEFAULT_MAX_TRADE_POOL_BPS);
     let max_spread = msg.max_spread.unwrap_or(DEFAULT_MAX_SPREAD);
     validate_risk_controls(
         max_trade_bps,
         max_execution_deviation_bps,
         quote_slippage_bps,
+        max_spot_twap_deviation_bps,
+        max_trade_pool_bps,
         max_spread,
     )?;
     let mut config = Config {
@@ -101,6 +111,8 @@ pub fn instantiate(
         max_trade_bps,
         max_execution_deviation_bps,
         quote_slippage_bps,
+        max_spot_twap_deviation_bps,
+        max_trade_pool_bps,
         max_spread,
         reference_price: Decimal::one(),
     };
@@ -140,6 +152,8 @@ pub fn execute(
             max_trade_bps,
             max_execution_deviation_bps,
             quote_slippage_bps,
+            max_spot_twap_deviation_bps,
+            max_trade_pool_bps,
             max_spread,
             twap_window_seconds,
         } => execute_update_thresholds(
@@ -150,6 +164,8 @@ pub fn execute(
             max_trade_bps,
             max_execution_deviation_bps,
             quote_slippage_bps,
+            max_spot_twap_deviation_bps,
+            max_trade_pool_bps,
             max_spread,
             twap_window_seconds,
         ),
@@ -256,6 +272,17 @@ fn execute_rebalance(
     } else {
         1
     };
+    let pool: PoolResponse = deps
+        .querier
+        .query_wasm_smart(&config.pair, &PairQueryMsg::Pool {})?;
+    validate_pool_safety(
+        &pool,
+        plan.captured_twap,
+        offer_index,
+        amount,
+        config.max_spot_twap_deviation_bps,
+        config.max_trade_pool_bps,
+    )?;
     let params = SwapParams {
         offer_token,
         amount,
@@ -269,7 +296,7 @@ fn execute_rebalance(
             captured_twap: plan.captured_twap,
             balances: plan.balances,
             pre_deviation_bps: plan.allocation_deviation_bps,
-            offer_index,
+            offer_index: offer_index as u8,
             amount,
             min_return,
         },
@@ -370,6 +397,8 @@ fn execute_update_thresholds(
     max_trade_bps: Option<u16>,
     max_execution_deviation_bps: Option<u16>,
     quote_slippage_bps: Option<u16>,
+    max_spot_twap_deviation_bps: Option<u16>,
+    max_trade_pool_bps: Option<u16>,
     max_spread: Option<Decimal>,
     twap_window_seconds: Option<u32>,
 ) -> Result<Response, ContractError> {
@@ -392,11 +421,22 @@ fn execute_update_thresholds(
     let next_max_trade = max_trade_bps.unwrap_or(config.max_trade_bps);
     let next_execution = max_execution_deviation_bps.unwrap_or(config.max_execution_deviation_bps);
     let next_quote = quote_slippage_bps.unwrap_or(config.quote_slippage_bps);
+    let next_spot_twap = max_spot_twap_deviation_bps.unwrap_or(config.max_spot_twap_deviation_bps);
+    let next_trade_pool = max_trade_pool_bps.unwrap_or(config.max_trade_pool_bps);
     let next_spread = max_spread.unwrap_or(config.max_spread);
-    validate_risk_controls(next_max_trade, next_execution, next_quote, next_spread)?;
+    validate_risk_controls(
+        next_max_trade,
+        next_execution,
+        next_quote,
+        next_spot_twap,
+        next_trade_pool,
+        next_spread,
+    )?;
     config.max_trade_bps = next_max_trade;
     config.max_execution_deviation_bps = next_execution;
     config.quote_slippage_bps = next_quote;
+    config.max_spot_twap_deviation_bps = next_spot_twap;
+    config.max_trade_pool_bps = next_trade_pool;
     config.max_spread = next_spread;
     CONFIG.save(deps.storage, &config)?;
     Ok(Response::new().add_attribute("action", "update_thresholds"))
@@ -432,6 +472,8 @@ pub fn query(deps: Deps, env: Env, msg: VaultQueryMsg) -> StdResult<Binary> {
             max_trade_bps: config.max_trade_bps,
             max_execution_deviation_bps: config.max_execution_deviation_bps,
             quote_slippage_bps: config.quote_slippage_bps,
+            max_spot_twap_deviation_bps: config.max_spot_twap_deviation_bps,
+            max_trade_pool_bps: config.max_trade_pool_bps,
             max_spread: config.max_spread,
         }),
         VaultQueryMsg::Balances {} => to_json_binary(&VaultBalancesResponse {
@@ -718,16 +760,46 @@ fn validate_risk_controls(
     max_trade_bps: u16,
     max_execution_deviation_bps: u16,
     quote_slippage_bps: u16,
+    max_spot_twap_deviation_bps: u16,
+    max_trade_pool_bps: u16,
     max_spread: Decimal,
 ) -> Result<(), ContractError> {
     if max_trade_bps == 0
         || max_trade_bps > MAX_TRADE_BPS
         || max_execution_deviation_bps > MAX_EXECUTION_DEVIATION_BPS
         || quote_slippage_bps > MAX_QUOTE_SLIPPAGE_BPS
+        || max_spot_twap_deviation_bps == 0
+        || max_spot_twap_deviation_bps > MAX_SPOT_TWAP_DEVIATION_BPS
+        || max_trade_pool_bps == 0
+        || max_trade_pool_bps > MAX_TRADE_POOL_BPS
         || max_spread.is_zero()
         || max_spread > MAX_SPREAD
     {
         return Err(ContractError::InvalidRiskControl);
+    }
+    Ok(())
+}
+
+fn validate_pool_safety(
+    pool: &PoolResponse,
+    twap: Decimal,
+    offer_index: usize,
+    amount: Uint128,
+    max_spot_twap_deviation_bps: u16,
+    max_trade_pool_bps: u16,
+) -> Result<(), ContractError> {
+    let reserves = [pool.assets[0].amount, pool.assets[1].amount];
+    if reserves[0].is_zero() || reserves[1].is_zero() {
+        return Err(ContractError::InsufficientPoolDepth);
+    }
+    let spot = Decimal::from_ratio(reserves[1], reserves[0]);
+    if relative_deviation(spot, twap)? > max_spot_twap_deviation_bps {
+        return Err(ContractError::UnsafePoolPrice);
+    }
+    if Uint256::from(amount) * Uint256::from(10_000u16)
+        > Uint256::from(reserves[offer_index]) * Uint256::from(max_trade_pool_bps)
+    {
+        return Err(ContractError::InsufficientPoolDepth);
     }
     Ok(())
 }
@@ -790,6 +862,8 @@ mod tests {
                     max_trade_bps: 2_500,
                     max_execution_deviation_bps: 500,
                     quote_slippage_bps: 200,
+                    max_spot_twap_deviation_bps: 500,
+                    max_trade_pool_bps: 1_000,
                     max_spread: Decimal::percent(5),
                     reference_price: Decimal::one(),
                 },
@@ -799,6 +873,8 @@ mod tests {
             deps.as_mut(),
             mock_info("admin", &[]),
             Some(5_000),
+            None,
+            None,
             None,
             None,
             None,
@@ -816,6 +892,8 @@ mod tests {
             mock_info("admin", &[]),
             None,
             Some(2_001),
+            None,
+            None,
             None,
             None,
             None,
@@ -846,6 +924,8 @@ mod tests {
                     max_trade_bps: 2_500,
                     max_execution_deviation_bps: 500,
                     quote_slippage_bps: 200,
+                    max_spot_twap_deviation_bps: 500,
+                    max_trade_pool_bps: 1_000,
                     max_spread: Decimal::percent(5),
                     reference_price: Decimal::one(),
                 },
@@ -854,6 +934,8 @@ mod tests {
         execute_update_thresholds(
             deps.as_mut(),
             mock_info("admin", &[]),
+            None,
+            None,
             None,
             None,
             None,
@@ -873,6 +955,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
             Some(0),
         )
         .unwrap_err();
@@ -880,6 +964,8 @@ mod tests {
         let error = execute_update_thresholds(
             deps.as_mut(),
             mock_info("keeper", &[]),
+            None,
+            None,
             None,
             None,
             None,
@@ -941,14 +1027,58 @@ mod tests {
 
     #[test]
     fn risk_controls_have_hard_bounds() {
-        assert!(validate_risk_controls(5_000, 1_000, 500, Decimal::percent(10)).is_ok());
+        assert!(
+            validate_risk_controls(5_000, 1_000, 500, 1_000, 2_000, Decimal::percent(10)).is_ok()
+        );
         assert_eq!(
-            validate_risk_controls(5_001, 1_000, 500, Decimal::percent(10)),
+            validate_risk_controls(5_001, 1_000, 500, 1_000, 2_000, Decimal::percent(10)),
             Err(ContractError::InvalidRiskControl)
         );
         assert_eq!(
-            validate_risk_controls(5_000, 1_001, 500, Decimal::percent(10)),
+            validate_risk_controls(5_000, 1_001, 500, 1_000, 2_000, Decimal::percent(10)),
             Err(ContractError::InvalidRiskControl)
+        );
+    }
+
+    #[test]
+    fn pool_safety_bounds_spot_deviation_and_trade_depth() {
+        let pool = PoolResponse {
+            assets: [
+                Asset {
+                    info: AssetInfo::Token {
+                        contract_addr: "token0".to_string(),
+                    },
+                    amount: Uint128::new(1_000),
+                },
+                Asset {
+                    info: AssetInfo::Token {
+                        contract_addr: "token1".to_string(),
+                    },
+                    amount: Uint128::new(1_000),
+                },
+            ],
+            total_share: Uint128::new(1_000),
+        };
+        assert!(
+            validate_pool_safety(&pool, Decimal::one(), 0, Uint128::new(100), 500, 1_000,).is_ok()
+        );
+
+        let mut manipulated = pool.clone();
+        manipulated.assets[1].amount = Uint128::new(1_200);
+        assert_eq!(
+            validate_pool_safety(
+                &manipulated,
+                Decimal::one(),
+                0,
+                Uint128::new(100),
+                500,
+                1_000,
+            ),
+            Err(ContractError::UnsafePoolPrice)
+        );
+        assert_eq!(
+            validate_pool_safety(&pool, Decimal::one(), 0, Uint128::new(101), 500, 1_000,),
+            Err(ContractError::InsufficientPoolDepth)
         );
     }
 

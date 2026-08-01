@@ -165,25 +165,30 @@ class Indexer:
             order_text = _first(attrs, "order_id", "limit_order_id")
             if maker not in vault_set or not pair or not order_text.isdigit():
                 continue
+            vault_row = conn.execute(
+                "SELECT pair_address FROM vaults WHERE address=? AND enabled=1", (maker,)
+            ).fetchone()
+            if not vault_row or not vault_row["pair_address"] or vault_row["pair_address"] != pair:
+                continue
             order_id = int(order_text)
-            order = conn.execute("SELECT vault_address,bot_id,side FROM orders WHERE pair_address=? AND order_id=?",
-                                 (pair, order_id)).fetchone()
+            order = conn.execute(
+                "SELECT vault_address,bot_id,side FROM orders "
+                "WHERE pair_address=? AND order_id=? AND active=1",
+                (pair, order_id),
+            ).fetchone()
+            if not order or order["vault_address"] != maker:
+                continue
             vault = maker
-            side = _first(attrs, "side", "order_side").lower() or (order["side"] if order else "")
+            side = _first(attrs, "side", "order_side").lower() or order["side"]
             if side not in ("ask", "bid"):
                 raise EventError(f"fill {pair}/{order_id} has no valid side")
-            if order and order["vault_address"] != maker:
-                raise EventError(f"fill maker conflicts with mapped order {pair}/{order_id}")
             token0 = _first(attrs, "token0_amount", "token_0_amount", "amount0")
             token1 = _first(attrs, "token1_amount", "token_1_amount", "amount1")
             if not token0.isdigit() or not token1.isdigit():
                 raise EventError(f"fill {pair}/{order_id} has invalid amounts")
             input_amount, output_amount = (token0, token1) if side == "ask" else (token1, token0)
-            conn.execute(
-                "INSERT INTO orders(pair_address,order_id,vault_address,bot_id,side,active,updated_height) "
-                "VALUES(?,?,?,1,?,1,?) ON CONFLICT(pair_address,order_id) DO UPDATE SET side=excluded.side,updated_height=excluded.updated_height",
-                (pair, order_id, vault, side, height),
-            )
+            conn.execute("UPDATE orders SET side=?,updated_height=? WHERE pair_address=? AND order_id=?",
+                         (side, height, pair, order_id))
             conn.execute(
                 "INSERT OR IGNORE INTO raw_events(chain_id,height,block_hash,tx_hash,tx_index,event_index,pair_address,order_id," 
                 "vault_address,bot_id,side,input_amount,output_amount,raw_json) VALUES(?,?,?,?,?,?,?,?,?,1,?,?,?,?)",
