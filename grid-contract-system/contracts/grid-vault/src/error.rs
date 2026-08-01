@@ -23,6 +23,10 @@ pub enum ContractError {
     MissingGasFunds,
     #[error("unsupported deposit token")]
     UnsupportedToken,
+    #[error("token is not on the admin allowlist")]
+    TokenNotAllowed,
+    #[error("token is quarantined by the admin")]
+    TokenQuarantined,
     #[error("amount must be greater than zero")]
     ZeroAmount,
     #[error("bot has no grids on this side of the reference price")]

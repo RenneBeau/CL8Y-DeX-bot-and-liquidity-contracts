@@ -75,3 +75,27 @@ pub const RUNGS: Map<(u64, u32), Rung> = Map::new("rungs");
 pub const ORDERS: Map<(u64, u64), GridOrder> = Map::new("orders");
 pub const SHARES: Map<(u64, &Addr), Uint128> = Map::new("shares");
 pub const PLACEMENTS: Map<u64, PlacementPlan> = Map::new("placements");
+pub const ALLOWED_TOKENS: Map<&Addr, ()> = Map::new("allowed_tokens");
+pub const QUARANTINE: Map<&Addr, ()> = Map::new("quarantine");
+
+#[cw_serde]
+pub enum PageKind {
+    Cancel,
+    Claim,
+}
+
+#[cw_serde]
+pub struct PendingPageEntry {
+    pub order_id: u64,
+    pub token_index: u8,
+    pub refund: Uint128,
+}
+
+#[cw_serde]
+pub struct PendingPage {
+    pub bot_id: u64,
+    pub kind: PageKind,
+    pub entries: Vec<PendingPageEntry>,
+}
+
+pub const PENDING_PAGES: Map<u64, PendingPage> = Map::new("pending_pages");

@@ -2,8 +2,8 @@ use std::{cmp::Ordering as CmpOrdering, collections::BTreeSet};
 
 use cosmwasm_std::{
     entry_point, from_json, to_json_binary, Addr, BankMsg, Binary, Coin, Decimal, Deps, DepsMut,
-    Env, Fraction, MessageInfo, Order, Reply, Response, StdError, StdResult, SubMsg, Uint128,
-    WasmMsg,
+    Env, Fraction, MessageInfo, Order, Reply, Response, StdError, StdResult, SubMsg,
+    SubMsgResponse, Uint128, WasmMsg,
 };
 use cw2::set_contract_version;
 use cw20::{BalanceResponse, Cw20ExecuteMsg, Cw20QueryMsg, Cw20ReceiveMsg, TokenInfoResponse};
@@ -15,11 +15,12 @@ use crate::msg::{
     FactoryQueryMsg, InstantiateMsg, LimitOrderConfigResponse, LimitOrderPlacementItem,
     LimitOrderResponse, LimitOrderSide, OrderResponse, PairCw20HookMsg, PairExecuteMsg, PairInfo,
     PairQueryMsg, PairResponse, PoolResponse, QueryMsg, ReceiveMsg, RungResponse, ShareResponse,
-    SolvencyResponse, VaultModeResponse,
+    SolvencyResponse, TokenPolicyResponse, VaultModeResponse,
 };
 use crate::state::{
-    Bot, Config, GridOrder, PlacementPlan, Rung, VaultMode, BOTS, CONFIG, NEXT_BOT_ID,
-    NEXT_REPLY_ID, ORDERS, PLACEMENTS, RUNGS, SHARES, VAULT_MODE,
+    Bot, Config, GridOrder, PageKind, PendingPage, PendingPageEntry, PlacementPlan, Rung,
+    VaultMode, ALLOWED_TOKENS, BOTS, CONFIG, NEXT_BOT_ID, NEXT_REPLY_ID, ORDERS, PENDING_PAGES,
+    PLACEMENTS, QUARANTINE, RUNGS, SHARES, VAULT_MODE,
 };
 
 const CONTRACT_NAME: &str = "crates.io:cl8y-grid-vault";
@@ -110,6 +111,10 @@ pub fn execute(
         ExecuteMsg::UpdatePairCode { bot_id, code_id } => {
             execute_update_pair_code(deps, info, bot_id, code_id)
         }
+        ExecuteMsg::AddAllowedToken { token } => execute_add_allowed_token(deps, info, token),
+        ExecuteMsg::RemoveAllowedToken { token } => execute_remove_allowed_token(deps, info, token),
+        ExecuteMsg::QuarantineToken { token } => execute_quarantine_token(deps, info, token),
+        ExecuteMsg::UnquarantineToken { token } => execute_unquarantine_token(deps, info, token),
         ExecuteMsg::TransferAdmin { admin } => execute_transfer_admin(deps, info, admin),
         ExecuteMsg::AcceptAdmin {} => execute_accept_admin(deps, info),
         ExecuteMsg::Pause {} => execute_pause(deps, info),
@@ -168,6 +173,9 @@ fn execute_create_bot(
     ];
     if asset_tokens[0] == asset_tokens[1] {
         return Err(ContractError::InvalidPair);
+    }
+    for token in &asset_tokens {
+        require_token_available(deps.as_ref(), token)?;
     }
     let token_0: TokenInfoResponse = deps
         .querier
@@ -289,6 +297,9 @@ fn execute_receive(
                 .iter()
                 .position(|token| token == info.sender)
                 .ok_or(ContractError::UnsupportedToken)?;
+            if QUARANTINE.has(deps.storage, &info.sender) {
+                return Err(ContractError::TokenQuarantined);
+            }
             let actual = query_token_balance(deps.as_ref(), &info.sender, &env.contract.address)?;
             let expected = bot.free_balances[token_index].checked_add(receive.amount)?;
             if actual != expected {
@@ -402,6 +413,11 @@ fn execute_allocate(
         return Err(ContractError::Unauthorized);
     }
     assert_pair_code(deps.as_ref(), &bot)?;
+    for token in &bot.asset_tokens {
+        if QUARANTINE.has(deps.storage, token) {
+            return Err(ContractError::TokenQuarantined);
+        }
+    }
     let expires_at = env
         .block
         .time
@@ -455,7 +471,7 @@ fn allocate_side(
 }
 
 fn execute_reconcile(
-    deps: DepsMut,
+    mut deps: DepsMut,
     env: Env,
     info: MessageInfo,
     bot_id: u64,
@@ -478,7 +494,7 @@ fn execute_reconcile(
     }
     let credited = sync_free_balances(deps.as_ref(), &env, &mut bot)?;
     let mut seen = BTreeSet::new();
-    let mut parked_claims = vec![];
+    let mut claim_entries = vec![];
     let mut changed_orders = 0usize;
     for order_id in &order_ids {
         if !seen.insert(*order_id) {
@@ -527,15 +543,18 @@ fn execute_reconcile(
                     LimitOrderSide::Ask => 0,
                     LimitOrderSide::Bid => 1,
                 };
-                bot.free_balances[input_index] =
-                    bot.free_balances[input_index].checked_add(parked_refund)?;
-                parked_claims.push(*order_id);
+                claim_entries.push(PendingPageEntry {
+                    order_id: *order_id,
+                    token_index: input_index,
+                    refund: parked_refund,
+                });
+            } else {
+                ORDERS.remove(deps.storage, (bot_id, *order_id));
+                bot.active_orders = bot
+                    .active_orders
+                    .checked_sub(1)
+                    .ok_or(ContractError::InvalidOrder)?;
             }
-            ORDERS.remove(deps.storage, (bot_id, *order_id));
-            bot.active_orders = bot
-                .active_orders
-                .checked_sub(1)
-                .ok_or(ContractError::InvalidOrder)?;
         } else {
             order.remaining = current_remaining;
             ORDERS.save(deps.storage, (bot_id, *order_id), &order)?;
@@ -551,9 +570,17 @@ fn execute_reconcile(
         .add_attribute("changed_orders", changed_orders.to_string())
         .add_attribute("credited_token_0", credited[0])
         .add_attribute("credited_token_1", credited[1]);
-    if !parked_claims.is_empty() {
+    if !claim_entries.is_empty() {
         let pair_batch_limit = query_pair_batch_limit(deps.as_ref(), &bot.pair)?;
-        response = add_pair_batches(response, &bot.pair, &[], &parked_claims, pair_batch_limit)?;
+        response = add_confirmable_pages(
+            &mut deps,
+            response,
+            bot_id,
+            &bot.pair,
+            &[],
+            &claim_entries,
+            pair_batch_limit,
+        )?;
     }
     if info.sender == config.keeper {
         BOTS.update(deps.storage, bot_id, |bot| -> Result<_, ContractError> {
@@ -572,13 +599,13 @@ fn execute_reconcile(
 }
 
 fn execute_cancel_all(
-    deps: DepsMut,
+    mut deps: DepsMut,
     env: Env,
     info: MessageInfo,
     bot_id: u64,
 ) -> Result<Response, ContractError> {
     assert_no_funds(&info)?;
-    let mut bot = BOTS.load(deps.storage, bot_id)?;
+    let bot = BOTS.load(deps.storage, bot_id)?;
     if info.sender != bot.owner {
         return Err(ContractError::Unauthorized);
     }
@@ -591,8 +618,7 @@ fn execute_cancel_all(
     if tracked.is_empty() {
         return Ok(Response::new().add_attribute("action", "cancel_grid_orders"));
     }
-    let processed_orders = tracked.len() as u32;
-    let mut cancel_ids = Vec::with_capacity(tracked.len());
+    let mut cancel_entries = Vec::with_capacity(tracked.len());
     for (order_id, order) in tracked {
         let on_chain: LimitOrderResponse = deps
             .querier
@@ -606,27 +632,25 @@ fn execute_cancel_all(
             LimitOrderSide::Ask => 0,
             LimitOrderSide::Bid => 1,
         };
-        bot.free_balances[input_index] =
-            bot.free_balances[input_index].checked_add(on_chain.remaining)?;
-        cancel_ids.push(order_id);
-        ORDERS.remove(deps.storage, (bot_id, order_id));
+        cancel_entries.push(PendingPageEntry {
+            order_id,
+            token_index: input_index,
+            refund: on_chain.remaining,
+        });
     }
-    bot.active_orders = bot
-        .active_orders
-        .checked_sub(processed_orders)
-        .ok_or(ContractError::InvalidOrder)?;
-    BOTS.save(deps.storage, bot_id, &bot)?;
     let pair_batch_limit = query_pair_batch_limit(deps.as_ref(), &bot.pair)?;
-    Ok(add_pair_batches(
+    Ok(add_confirmable_pages(
+        &mut deps,
         Response::new(),
+        bot_id,
         &bot.pair,
-        &cancel_ids,
+        &cancel_entries,
         &[],
         pair_batch_limit,
     )?
     .add_attribute("action", "cancel_grid_orders")
     .add_attribute("bot_id", bot_id.to_string())
-    .add_attribute("remaining_orders", bot.active_orders.to_string()))
+    .add_attribute("orders", cancel_entries.len().to_string()))
 }
 
 fn execute_withdraw(
@@ -800,7 +824,7 @@ fn execute_enter_exit(
 }
 
 fn execute_emergency_cancel(
-    deps: DepsMut,
+    mut deps: DepsMut,
     env: Env,
     info: MessageInfo,
     bot_id: u64,
@@ -809,7 +833,7 @@ fn execute_emergency_cancel(
     if VAULT_MODE.load(deps.storage)? != VaultMode::Exit {
         return Err(ContractError::InvalidMode);
     }
-    let mut bot = BOTS.load(deps.storage, bot_id)?;
+    let bot = BOTS.load(deps.storage, bot_id)?;
     if info.sender != bot.owner {
         return Err(ContractError::Unauthorized);
     }
@@ -820,8 +844,9 @@ fn execute_emergency_cancel(
         .range(deps.storage, None, None, Order::Ascending)
         .take(limit)
         .collect::<StdResult<_>>()?;
-    let mut cancel_ids = vec![];
-    let mut claim_ids = vec![];
+    let mut cancel_entries = vec![];
+    let mut claim_entries = vec![];
+    let mut vanished = 0u32;
     for (order_id, order) in &tracked {
         let active: StdResult<LimitOrderResponse> = deps.querier.query_wasm_smart(
             &bot.pair,
@@ -832,7 +857,15 @@ fn execute_emergency_cancel(
         match active {
             Ok(on_chain) => {
                 validate_order(&env.contract.address, *order_id, order, &on_chain)?;
-                cancel_ids.push(*order_id);
+                let token_index = match order.side {
+                    LimitOrderSide::Ask => 0,
+                    LimitOrderSide::Bid => 1,
+                };
+                cancel_entries.push(PendingPageEntry {
+                    order_id: *order_id,
+                    token_index,
+                    refund: on_chain.remaining,
+                });
             }
             Err(_) => {
                 let parked: Option<ExpiredLimitRefundResponse> = deps.querier.query_wasm_smart(
@@ -849,25 +882,42 @@ fn execute_emergency_cancel(
                     {
                         return Err(ContractError::InvalidOrder);
                     }
-                    claim_ids.push(*order_id);
+                    let token_index = match order.side {
+                        LimitOrderSide::Ask => 0,
+                        LimitOrderSide::Bid => 1,
+                    };
+                    claim_entries.push(PendingPageEntry {
+                        order_id: *order_id,
+                        token_index,
+                        refund: refund.remaining,
+                    });
+                } else {
+                    ORDERS.remove(deps.storage, (bot_id, *order_id));
+                    vanished += 1;
                 }
             }
         }
-        ORDERS.remove(deps.storage, (bot_id, *order_id));
     }
-    bot.active_orders = bot.active_orders.saturating_sub(tracked.len() as u32);
-    BOTS.save(deps.storage, bot_id, &bot)?;
+    if vanished != 0 {
+        BOTS.update(deps.storage, bot_id, |bot| -> Result<_, ContractError> {
+            let mut bot = bot.ok_or_else(|| StdError::not_found("bot"))?;
+            bot.active_orders = bot.active_orders.saturating_sub(vanished);
+            Ok(bot)
+        })?;
+    }
     let has_more = ORDERS
         .prefix(bot_id)
         .keys(deps.storage, None, None, Order::Ascending)
         .next()
         .transpose()?
         .is_some();
-    let response = add_pair_batches(
+    let response = add_confirmable_pages(
+        &mut deps,
         Response::new(),
+        bot_id,
         &bot.pair,
-        &cancel_ids,
-        &claim_ids,
+        &cancel_entries,
+        &claim_entries,
         bot.pair_batch_limit,
     )?;
     Ok(response
@@ -940,6 +990,72 @@ fn assert_admin(deps: Deps, sender: &Addr) -> Result<(), ContractError> {
     Ok(())
 }
 
+fn require_token_available(deps: Deps, token: &Addr) -> Result<(), ContractError> {
+    if QUARANTINE.has(deps.storage, token) {
+        return Err(ContractError::TokenQuarantined);
+    }
+    if !ALLOWED_TOKENS.is_empty(deps.storage) && !ALLOWED_TOKENS.has(deps.storage, token) {
+        return Err(ContractError::TokenNotAllowed);
+    }
+    Ok(())
+}
+
+fn execute_add_allowed_token(
+    deps: DepsMut,
+    info: MessageInfo,
+    token: String,
+) -> Result<Response, ContractError> {
+    assert_no_funds(&info)?;
+    assert_admin(deps.as_ref(), &info.sender)?;
+    let token = deps.api.addr_validate(&token)?;
+    ALLOWED_TOKENS.save(deps.storage, &token, &())?;
+    Ok(Response::new()
+        .add_attribute("action", "add_allowed_token")
+        .add_attribute("token", token))
+}
+
+fn execute_remove_allowed_token(
+    deps: DepsMut,
+    info: MessageInfo,
+    token: String,
+) -> Result<Response, ContractError> {
+    assert_no_funds(&info)?;
+    assert_admin(deps.as_ref(), &info.sender)?;
+    let token = deps.api.addr_validate(&token)?;
+    ALLOWED_TOKENS.remove(deps.storage, &token);
+    Ok(Response::new()
+        .add_attribute("action", "remove_allowed_token")
+        .add_attribute("token", token))
+}
+
+fn execute_quarantine_token(
+    deps: DepsMut,
+    info: MessageInfo,
+    token: String,
+) -> Result<Response, ContractError> {
+    assert_no_funds(&info)?;
+    assert_admin(deps.as_ref(), &info.sender)?;
+    let token = deps.api.addr_validate(&token)?;
+    QUARANTINE.save(deps.storage, &token, &())?;
+    Ok(Response::new()
+        .add_attribute("action", "quarantine_token")
+        .add_attribute("token", token))
+}
+
+fn execute_unquarantine_token(
+    deps: DepsMut,
+    info: MessageInfo,
+    token: String,
+) -> Result<Response, ContractError> {
+    assert_no_funds(&info)?;
+    assert_admin(deps.as_ref(), &info.sender)?;
+    let token = deps.api.addr_validate(&token)?;
+    QUARANTINE.remove(deps.storage, &token);
+    Ok(Response::new()
+        .add_attribute("action", "unquarantine_token")
+        .add_attribute("token", token))
+}
+
 fn assert_pair_code(deps: Deps, bot: &Bot) -> Result<(), ContractError> {
     let current = deps.querier.query_wasm_contract_info(&bot.pair)?.code_id;
     if current != bot.pair_code_id {
@@ -997,13 +1113,7 @@ fn add_placement(
             hint_after_order_id: None,
         });
     }
-    let reply_id = NEXT_REPLY_ID.load(deps.storage)?;
-    NEXT_REPLY_ID.save(
-        deps.storage,
-        &reply_id
-            .checked_add(1)
-            .ok_or_else(|| StdError::generic_err("reply id overflow"))?,
-    )?;
+    let reply_id = next_reply_id(deps.storage)?;
     PLACEMENTS.save(
         deps.storage,
         reply_id,
@@ -1031,6 +1141,9 @@ fn add_placement(
 
 #[entry_point]
 pub fn reply(deps: DepsMut, env: Env, reply: Reply) -> Result<Response, ContractError> {
+    if let Some(page) = PENDING_PAGES.may_load(deps.storage, reply.id)? {
+        return handle_pending_page(deps, reply.id, &page, reply.result.into_result());
+    }
     let plan = PLACEMENTS
         .may_load(deps.storage, reply.id)?
         .ok_or(ContractError::UnknownReply)?;
@@ -1212,6 +1325,24 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
             })
         }
         QueryMsg::Solvency { bot_id } => to_json_binary(&check_solvency(deps, &env, bot_id)?),
+        QueryMsg::TokenPolicy {} => {
+            let allowed_tokens = ALLOWED_TOKENS
+                .keys(deps.storage, None, None, Order::Ascending)
+                .collect::<StdResult<Vec<_>>>()?
+                .into_iter()
+                .map(|addr| addr.to_string())
+                .collect();
+            let quarantined_tokens = QUARANTINE
+                .keys(deps.storage, None, None, Order::Ascending)
+                .collect::<StdResult<Vec<_>>>()?
+                .into_iter()
+                .map(|addr| addr.to_string())
+                .collect();
+            to_json_binary(&TokenPolicyResponse {
+                allowed_tokens,
+                quarantined_tokens,
+            })
+        }
     }
 }
 
@@ -1306,33 +1437,102 @@ fn deposit_shares(
     }
 }
 
-fn add_pair_batches(
+fn next_reply_id(storage: &mut dyn cosmwasm_std::Storage) -> StdResult<u64> {
+    let reply_id = NEXT_REPLY_ID.load(storage)?;
+    NEXT_REPLY_ID.save(
+        storage,
+        &reply_id
+            .checked_add(1)
+            .ok_or_else(|| StdError::generic_err("reply id overflow"))?,
+    )?;
+    Ok(reply_id)
+}
+
+fn add_confirmable_pages(
+    deps: &mut DepsMut,
     mut response: Response,
+    bot_id: u64,
     pair: &Addr,
-    cancel_ids: &[u64],
-    claim_ids: &[u64],
+    cancel_entries: &[PendingPageEntry],
+    claim_entries: &[PendingPageEntry],
     batch_limit: u32,
-) -> StdResult<Response> {
+) -> Result<Response, ContractError> {
     let limit = batch_limit.max(1) as usize;
-    for ids in cancel_ids.chunks(limit) {
-        response = response.add_message(WasmMsg::Execute {
-            contract_addr: pair.to_string(),
-            msg: to_json_binary(&PairExecuteMsg::CancelLimitOrders {
-                order_ids: ids.to_vec(),
-            })?,
-            funds: vec![],
-        });
-    }
-    for ids in claim_ids.chunks(limit) {
-        response = response.add_message(WasmMsg::Execute {
-            contract_addr: pair.to_string(),
-            msg: to_json_binary(&PairExecuteMsg::ClaimExpiredLimitOrders {
-                order_ids: ids.to_vec(),
-            })?,
-            funds: vec![],
-        });
+    for (kind, entries) in [
+        (PageKind::Cancel, cancel_entries),
+        (PageKind::Claim, claim_entries),
+    ] {
+        for chunk in entries.chunks(limit) {
+            let reply_id = next_reply_id(deps.storage)?;
+            PENDING_PAGES.save(
+                deps.storage,
+                reply_id,
+                &PendingPage {
+                    bot_id,
+                    kind: kind.clone(),
+                    entries: chunk.to_vec(),
+                },
+            )?;
+            let msg = match kind {
+                PageKind::Cancel => PairExecuteMsg::CancelLimitOrders {
+                    order_ids: chunk.iter().map(|entry| entry.order_id).collect(),
+                },
+                PageKind::Claim => PairExecuteMsg::ClaimExpiredLimitOrders {
+                    order_ids: chunk.iter().map(|entry| entry.order_id).collect(),
+                },
+            };
+            response = response.add_submessage(SubMsg::reply_always(
+                WasmMsg::Execute {
+                    contract_addr: pair.to_string(),
+                    msg: to_json_binary(&msg)?,
+                    funds: vec![],
+                },
+                reply_id,
+            ));
+        }
     }
     Ok(response)
+}
+
+fn handle_pending_page(
+    deps: DepsMut,
+    reply_id: u64,
+    page: &PendingPage,
+    result: Result<SubMsgResponse, String>,
+) -> Result<Response, ContractError> {
+    let reason = match result {
+        Ok(_) => {
+            let mut bot = BOTS.load(deps.storage, page.bot_id)?;
+            for entry in &page.entries {
+                bot.free_balances[entry.token_index as usize] =
+                    bot.free_balances[entry.token_index as usize].checked_add(entry.refund)?;
+                ORDERS.remove(deps.storage, (page.bot_id, entry.order_id));
+            }
+            bot.active_orders = bot
+                .active_orders
+                .checked_sub(page.entries.len() as u32)
+                .ok_or(ContractError::InvalidOrder)?;
+            BOTS.save(deps.storage, page.bot_id, &bot)?;
+            None
+        }
+        Err(error) => Some(error),
+    };
+    PENDING_PAGES.remove(deps.storage, reply_id);
+    let kind_label = match page.kind {
+        PageKind::Cancel => "cancel",
+        PageKind::Claim => "claim",
+    };
+    let response = Response::new()
+        .add_attribute("bot_id", page.bot_id.to_string())
+        .add_attribute("kind", kind_label);
+    match reason {
+        Some(error) => Ok(response
+            .add_attribute("action", "reverted_grid_page")
+            .add_attribute("reason", error)),
+        None => Ok(response
+            .add_attribute("action", "confirmed_grid_page")
+            .add_attribute("orders", page.entries.len().to_string())),
+    }
 }
 
 fn query_pair_batch_limit(deps: Deps, pair: &Addr) -> StdResult<u32> {
@@ -1432,14 +1632,35 @@ mod tests {
     use super::*;
     use cosmwasm_std::testing::{mock_dependencies, mock_env, mock_info};
     use cosmwasm_std::{
-        coin, from_json, ContractInfoResponse, ContractResult, SubMsgResult, SystemResult,
-        WasmQuery,
+        coin, from_json, ContractInfoResponse, ContractResult, Reply, ReplyOn, SubMsgResponse,
+        SubMsgResult, SystemResult, WasmQuery,
     };
 
     fn contract_info(code_id: u64) -> ContractInfoResponse {
         let mut response = ContractInfoResponse::default();
         response.code_id = code_id;
         response
+    }
+
+    fn settle_replies(deps: &mut DepsMut, response: Response, ok: bool) -> Vec<u64> {
+        let mut settled = vec![];
+        for sub in response
+            .messages
+            .iter()
+            .filter(|sub| sub.reply_on == ReplyOn::Always)
+        {
+            let result = if ok {
+                SubMsgResult::Ok(SubMsgResponse {
+                    events: vec![],
+                    data: None,
+                })
+            } else {
+                SubMsgResult::Err("mock pair failed".into())
+            };
+            reply(deps.branch(), mock_env(), Reply { id: sub.id, result }).unwrap();
+            settled.push(sub.id);
+        }
+        settled
     }
 
     fn instantiate_default(deps: DepsMut) {
@@ -1969,7 +2190,17 @@ mod tests {
             execute_emergency_cancel(deps.as_mut(), mock_env(), mock_info("alice", &[]), BOT_ID)
                 .unwrap();
         assert_eq!(cancel.messages.len(), 2);
+        assert!(ORDERS.has(&deps.storage, (BOT_ID, 77)));
+        assert!(!ORDERS.has(&deps.storage, (BOT_ID, 78)));
+        assert!(ORDERS.has(&deps.storage, (BOT_ID, 79)));
+        settle_replies(&mut deps.as_mut(), cancel, true);
         assert!(ORDERS.prefix(BOT_ID).is_empty(&deps.storage));
+        let closed = BOTS.load(&deps.storage, BOT_ID).unwrap();
+        assert_eq!(closed.active_orders, 0);
+        assert_eq!(
+            closed.free_balances,
+            [Uint128::new(999_999 + 25 + 40), Uint128::new(999_999)]
+        );
 
         let withdraw = execute_emergency_withdraw(
             deps.as_mut(),
@@ -2252,6 +2483,12 @@ mod tests {
         assert_eq!(response.messages.len(), 1);
         assert_eq!(
             BOTS.load(&deps.storage, 1).unwrap().free_balances,
+            [Uint128::zero(), Uint128::zero()]
+        );
+        assert!(ORDERS.has(&deps.storage, (1, 77)));
+        settle_replies(&mut deps.as_mut(), response, true);
+        assert_eq!(
+            BOTS.load(&deps.storage, 1).unwrap().free_balances,
             [Uint128::new(40), Uint128::zero()]
         );
         assert!(!ORDERS.has(&deps.storage, (1, 77)));
@@ -2465,5 +2702,209 @@ mod tests {
         assert_eq!(error, ContractError::Unauthorized);
         execute_update_pair_code(deps.as_mut(), mock_info("admin", &[]), 1, 8).unwrap();
         assert_eq!(BOTS.load(&deps.storage, 1).unwrap().pair_code_id, 8);
+    }
+
+    fn install_cancel_all_querier(
+        deps: &mut cosmwasm_std::OwnedDeps<
+            cosmwasm_std::MemoryStorage,
+            cosmwasm_std::testing::MockApi,
+            cosmwasm_std::testing::MockQuerier,
+        >,
+    ) {
+        deps.querier.update_wasm(|query| match query {
+            WasmQuery::Smart { contract_addr, msg } if contract_addr == "pair" => {
+                match from_json::<PairQueryMsg>(msg).unwrap() {
+                    PairQueryMsg::LimitOrder { order_id } => SystemResult::Ok(ContractResult::Ok(
+                        to_json_binary(&LimitOrderResponse {
+                            order_id,
+                            owner: mock_env().contract.address.to_string(),
+                            side: LimitOrderSide::Ask,
+                            price: Decimal::percent(250),
+                            remaining: Uint128::new(100),
+                            expires_at: None,
+                            prev: None,
+                            next: None,
+                        })
+                        .unwrap(),
+                    )),
+                    PairQueryMsg::LimitOrderConfig {} => SystemResult::Ok(ContractResult::Ok(
+                        to_json_binary(&LimitOrderConfigResponse {
+                            max_batch_rungs: 20,
+                        })
+                        .unwrap(),
+                    )),
+                    _ => SystemResult::Ok(ContractResult::Err("unsupported".into())),
+                }
+            }
+            WasmQuery::ContractInfo { contract_addr } if contract_addr == "pair" => {
+                SystemResult::Ok(ContractResult::Ok(
+                    to_json_binary(&contract_info(7)).unwrap(),
+                ))
+            }
+            _ => SystemResult::Ok(ContractResult::Err("unsupported".into())),
+        });
+    }
+
+    #[test]
+    fn cancelled_page_failure_reverts_accounting_and_allows_retry() {
+        let mut deps = mock_dependencies();
+        instantiate_default(deps.as_mut());
+        BOTS.save(deps.as_mut().storage, 1, &test_bot("alice", 1))
+            .unwrap();
+        ORDERS
+            .save(
+                deps.as_mut().storage,
+                (1, 77),
+                &GridOrder {
+                    rung_index: 3,
+                    side: LimitOrderSide::Ask,
+                    price: Decimal::percent(250),
+                    remaining: Uint128::new(100),
+                },
+            )
+            .unwrap();
+        install_cancel_all_querier(&mut deps);
+
+        let cancel =
+            execute_cancel_all(deps.as_mut(), mock_env(), mock_info("alice", &[]), 1).unwrap();
+        assert_eq!(cancel.messages.len(), 1);
+        let failed = reply(
+            deps.as_mut(),
+            mock_env(),
+            Reply {
+                id: cancel.messages[0].id,
+                result: SubMsgResult::Err("pair reverted".into()),
+            },
+        )
+        .unwrap();
+        assert!(failed.attributes.iter().any(|attribute| {
+            attribute.key == "action" && attribute.value == "reverted_grid_page"
+        }));
+        assert!(failed
+            .attributes
+            .iter()
+            .any(|attribute| attribute.key == "reason" && attribute.value == "pair reverted"));
+        assert!(PENDING_PAGES
+            .keys(&deps.storage, None, None, Order::Ascending)
+            .next()
+            .is_none());
+        let bot = BOTS.load(&deps.storage, 1).unwrap();
+        assert_eq!(bot.active_orders, 1);
+        assert_eq!(bot.free_balances, [Uint128::zero(), Uint128::zero()]);
+        assert!(ORDERS.has(&deps.storage, (1, 77)));
+
+        let retry =
+            execute_cancel_all(deps.as_mut(), mock_env(), mock_info("alice", &[]), 1).unwrap();
+        settle_replies(&mut deps.as_mut(), retry, true);
+        assert!(ORDERS.prefix(1).is_empty(&deps.storage));
+        let bot = BOTS.load(&deps.storage, 1).unwrap();
+        assert_eq!(bot.active_orders, 0);
+        assert_eq!(bot.free_balances, [Uint128::new(100), Uint128::zero()]);
+    }
+
+    #[test]
+    fn create_bot_rejects_token_outside_allowlist() {
+        let mut deps = mock_dependencies();
+        install_pair_querier(&mut deps);
+        instantiate_default(deps.as_mut());
+        execute_add_allowed_token(deps.as_mut(), mock_info("admin", &[]), "token_a".into())
+            .unwrap();
+
+        let error = execute(
+            deps.as_mut(),
+            mock_env(),
+            mock_info("alice", &[coin(200, "uluna")]),
+            ExecuteMsg::CreateBot {
+                pair: "pair".into(),
+                lower_price: Decimal::one(),
+                upper_price: Decimal::from_ratio(3u128, 1u128),
+                grid_count: 5,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error, ContractError::TokenNotAllowed);
+        assert!(!BOTS.has(&deps.storage, 1));
+
+        execute_add_allowed_token(deps.as_mut(), mock_info("admin", &[]), "token_b".into())
+            .unwrap();
+        create_bot(deps.as_mut(), "alice");
+        assert!(BOTS.has(&deps.storage, 1));
+    }
+
+    #[test]
+    fn quarantined_token_blocks_create_bot_and_deposit() {
+        let mut deps = mock_dependencies();
+        install_pair_querier(&mut deps);
+        instantiate_default(deps.as_mut());
+        execute_add_allowed_token(deps.as_mut(), mock_info("admin", &[]), "token_a".into())
+            .unwrap();
+        execute_add_allowed_token(deps.as_mut(), mock_info("admin", &[]), "token_b".into())
+            .unwrap();
+        execute_quarantine_token(deps.as_mut(), mock_info("admin", &[]), "token_a".into()).unwrap();
+
+        let error = execute(
+            deps.as_mut(),
+            mock_env(),
+            mock_info("alice", &[coin(200, "uluna")]),
+            ExecuteMsg::CreateBot {
+                pair: "pair".into(),
+                lower_price: Decimal::one(),
+                upper_price: Decimal::from_ratio(3u128, 1u128),
+                grid_count: 5,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error, ContractError::TokenQuarantined);
+
+        execute_unquarantine_token(deps.as_mut(), mock_info("admin", &[]), "token_a".into())
+            .unwrap();
+        create_bot(deps.as_mut(), "alice");
+        execute_quarantine_token(deps.as_mut(), mock_info("admin", &[]), "token_a".into()).unwrap();
+
+        let error = execute_receive(
+            deps.as_mut(),
+            mock_env(),
+            mock_info("token_a", &[]),
+            Cw20ReceiveMsg {
+                sender: "alice".into(),
+                amount: Uint128::new(100),
+                msg: to_json_binary(&ReceiveMsg::Deposit { bot_id: 1 }).unwrap(),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error, ContractError::TokenQuarantined);
+        assert_eq!(
+            BOTS.load(&deps.storage, 1).unwrap().free_balances[0],
+            Uint128::zero()
+        );
+    }
+
+    #[test]
+    fn token_policy_admin_is_restricted_and_query_reflects_changes() {
+        let mut deps = mock_dependencies();
+        instantiate_default(deps.as_mut());
+
+        let error =
+            execute_add_allowed_token(deps.as_mut(), mock_info("alice", &[]), "token_a".into())
+                .unwrap_err();
+        assert_eq!(error, ContractError::Unauthorized);
+
+        execute_add_allowed_token(deps.as_mut(), mock_info("admin", &[]), "token_a".into())
+            .unwrap();
+        execute_quarantine_token(deps.as_mut(), mock_info("admin", &[]), "token_b".into()).unwrap();
+
+        let response: TokenPolicyResponse =
+            from_json(query(deps.as_ref(), mock_env(), QueryMsg::TokenPolicy {}).unwrap()).unwrap();
+        assert_eq!(response.allowed_tokens, vec!["token_a".to_string()]);
+        assert_eq!(response.quarantined_tokens, vec!["token_b".to_string()]);
+
+        execute_remove_allowed_token(deps.as_mut(), mock_info("admin", &[]), "token_a".into())
+            .unwrap();
+        execute_unquarantine_token(deps.as_mut(), mock_info("admin", &[]), "token_b".into())
+            .unwrap();
+        let response: TokenPolicyResponse =
+            from_json(query(deps.as_ref(), mock_env(), QueryMsg::TokenPolicy {}).unwrap()).unwrap();
+        assert!(response.allowed_tokens.is_empty());
+        assert!(response.quarantined_tokens.is_empty());
     }
 }

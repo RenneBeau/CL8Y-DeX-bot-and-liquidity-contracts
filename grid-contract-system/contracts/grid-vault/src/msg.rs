@@ -56,6 +56,18 @@ pub enum ExecuteMsg {
         bot_id: u64,
         code_id: u64,
     },
+    AddAllowedToken {
+        token: String,
+    },
+    RemoveAllowedToken {
+        token: String,
+    },
+    QuarantineToken {
+        token: String,
+    },
+    UnquarantineToken {
+        token: String,
+    },
     TransferAdmin {
         admin: String,
     },
@@ -193,6 +205,8 @@ pub enum QueryMsg {
     Shares { bot_id: u64, address: String },
     #[returns(SolvencyResponse)]
     Solvency { bot_id: u64 },
+    #[returns(TokenPolicyResponse)]
+    TokenPolicy {},
 }
 
 #[cw_serde]
@@ -217,6 +231,12 @@ pub enum VaultModeResponse {
     Active,
     Paused,
     Exit,
+}
+
+#[cw_serde]
+pub struct TokenPolicyResponse {
+    pub allowed_tokens: Vec<String>,
+    pub quarantined_tokens: Vec<String>,
 }
 
 #[cw_serde]

@@ -36,8 +36,8 @@ Result: PASS
 - Documentation tests: passed
 - Strict Clippy: passed with no warnings
 - Grid manager unit tests: 2 passed
-- Grid vault unit tests: 17 passed
-- Grid vault cw-multi-test integration tests: 8 passed
+- Grid vault unit tests: 21 passed
+- Grid vault cw-multi-test integration tests: 9 passed
 - Keeper Python tests: 44 passed
 
 ## Grid Vault cw-multi-test Integration
@@ -69,6 +69,16 @@ real cw20-base tokens, and a malicious CW20 that lies about its balance):
 8. Conservation property: after a 200-step randomized walk (deposits,
    withdraws, cancels, fills, expires, reconciles), each token's
    `vault_balance + escrow_on_pair` equals the account's contribution.
+9. Reply-confirmed cancellation/claim: a failed pair submessage reverts the
+   whole page without crediting refunds or removing orders, emits a
+   `reverted_grid_page` event, and the same cancel-all succeeds on retry.
+10. Reply-failure recovery is replay-safe: pending pages are cleared on failure
+    and deferred accounting (free balances, order removal, `active_orders`)
+    is only applied on submessage success.
+11. Admin allowlist: `create_bot` is rejected with `TokenNotAllowed` until both
+    pair tokens are allowlisted; quarantining a token blocks `create_bot` and
+    deposits until it is unquarantined; non-admin policy calls are rejected.
+12. Token policy query reflects add/remove/quarantine/unquarantine changes.
 
 ## Optimized Wasm
 
@@ -146,6 +156,13 @@ allocation, partial CL8Y fill, reconcile from pair state, cross-vault isolation,
 bounded cancellation and withdrawal, a second pair with the same keeper, and
 final pooled solvency. Deployment robustness now retries account sequence races
 (back-to-back broadcast-mode transactions) instead of failing the deploy.
+
+Cancellation, claim, and emergency-cancel accounting is now reply-confirmed: the
+vault defers free-balance credit and order removal until the pair submessage
+succeeds, reverts the entire page on any failure (emitting a
+`reverted_grid_page` event), and reconciles parked orders as deferred claims.
+The allowlist/quarantine policy is verified on-chain via the `token_policy`
+query (empty lists by default, backwards compatible).
 
 ## Extended Soak
 

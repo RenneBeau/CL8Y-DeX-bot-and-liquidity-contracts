@@ -23,7 +23,7 @@ use cl8y_grid_vault::msg::{
     Asset, AssetInfo, ExecuteMsg as VaultExecuteMsg, ExpiredLimitRefundResponse, FactoryQueryMsg,
     InstantiateMsg as VaultInstantiateMsg, LimitOrderConfigResponse, LimitOrderResponse,
     LimitOrderSide, PairCw20HookMsg, PairInfo, PairQueryMsg, PoolResponse,
-    QueryMsg as VaultQueryMsg, ReceiveMsg,
+    QueryMsg as VaultQueryMsg, ReceiveMsg, TokenPolicyResponse,
 };
 
 // ---------------------------------------------------------------------------
@@ -1077,8 +1077,10 @@ fn pair_pause_blocks_cancel_claim_and_deposit_until_resume() {
     // claim triggered by reconcile.
     h.set_paused(true);
 
-    // 1. Cancel all -> the vault reaches the pair's cancel handler which is paused.
-    let err = h
+    // 1. Cancel all -> the vault's cancel submessage is reverted by the paused
+    //    pair. The outer tx succeeds but emits a `reverted_grid_page` event and
+    //    leaves the accounting untouched.
+    let response = h
         .app
         .execute_contract(
             h.alice.clone(),
@@ -1086,8 +1088,17 @@ fn pair_pause_blocks_cancel_claim_and_deposit_until_resume() {
             &VaultExecuteMsg::CancelAll { bot_id: 1 },
             &[],
         )
-        .unwrap_err();
-    assert!(err.root_cause().to_string().contains("pair paused"));
+        .unwrap();
+    assert!(response.events.iter().any(|event| {
+        event
+            .attributes
+            .iter()
+            .any(|attribute| attribute.key == "action" && attribute.value == "reverted_grid_page")
+    }));
+    assert_eq!(h.orders(1).len(), 4);
+    let bot = h.bot(1);
+    assert_eq!(bot.active_orders, 4);
+    assert_eq!(bot.free_balances, [Uint128::zero(), Uint128::zero()]);
 
     // 2. Deposit -> the placement submessage hits the paused pair.
     let err = h
@@ -1105,13 +1116,15 @@ fn pair_pause_blocks_cancel_claim_and_deposit_until_resume() {
         .unwrap_err();
     assert!(err.root_cause().to_string().contains("pair paused"));
 
-    // 3. Expire an order, then reconcile -> the refund claim hits the paused pair.
+    // 3. Expire an order, then reconcile -> the refund claim hits the paused
+    //    pair and the page reverts without crediting anything. A permissionless
+    //    relayer (not the reimbursed keeper) reports, so no gas is consumed.
     h.expire(ask.order_id);
     let ids: Vec<u64> = h.orders(1).iter().map(|order| order.order_id).collect();
-    let err = h
+    let response = h
         .app
         .execute_contract(
-            h.keeper.clone(),
+            Addr::unchecked("relayer"),
             h.vault.clone(),
             &VaultExecuteMsg::Reconcile {
                 bot_id: 1,
@@ -1119,8 +1132,16 @@ fn pair_pause_blocks_cancel_claim_and_deposit_until_resume() {
             },
             &[],
         )
-        .unwrap_err();
-    assert!(err.root_cause().to_string().contains("pair paused"));
+        .unwrap();
+    assert!(response.events.iter().any(|event| {
+        event
+            .attributes
+            .iter()
+            .any(|attribute| attribute.key == "action" && attribute.value == "reverted_grid_page")
+    }));
+    let bot = h.bot(1);
+    assert_eq!(bot.active_orders, 4);
+    assert_eq!(bot.free_balances, [Uint128::zero(), Uint128::zero()]);
 
     // Resume -> reconcile claims the parked refund, then everything works again.
     h.set_paused(false);
@@ -1480,4 +1501,112 @@ fn property_conservation_holds_across_random_walk() {
             );
         }
     }
+}
+
+#[test]
+fn allowlist_and_quarantine_block_usage_until_cleared() {
+    let mut h = Harness::new();
+    let admin = Addr::unchecked("admin");
+
+    // 1. Admin allowlists only token_0 -> create_bot is rejected because token_1
+    //    is not on the list.
+    h.app
+        .execute_contract(
+            admin.clone(),
+            h.vault.clone(),
+            &VaultExecuteMsg::AddAllowedToken {
+                token: h.token_0.to_string(),
+            },
+            &[],
+        )
+        .unwrap();
+    let err = h
+        .app
+        .execute_contract(
+            h.alice.clone(),
+            h.vault.clone(),
+            &VaultExecuteMsg::CreateBot {
+                pair: h.pair.to_string(),
+                lower_price: Decimal::from_atomics(1u128, 0).unwrap(),
+                upper_price: Decimal::from_atomics(3u128, 0).unwrap(),
+                grid_count: 5,
+            },
+            &[coin(MIN_GAS_RESERVE + KEEPER_REWARD, GAS_DENOM)],
+        )
+        .unwrap_err();
+    assert!(err
+        .root_cause()
+        .to_string()
+        .contains("not on the admin allowlist"));
+
+    // 2. Allowlist token_1 -> create_bot now succeeds.
+    h.app
+        .execute_contract(
+            admin.clone(),
+            h.vault.clone(),
+            &VaultExecuteMsg::AddAllowedToken {
+                token: h.token_1.to_string(),
+            },
+            &[],
+        )
+        .unwrap();
+    h.create_bot();
+
+    // 3. Quarantining token_0 blocks deposits of it.
+    h.app
+        .execute_contract(
+            admin.clone(),
+            h.vault.clone(),
+            &VaultExecuteMsg::QuarantineToken {
+                token: h.token_0.to_string(),
+            },
+            &[],
+        )
+        .unwrap();
+    let err = h
+        .app
+        .execute_contract(
+            h.alice.clone(),
+            h.token_0.clone(),
+            &Cw20ExecuteMsg::Send {
+                contract: h.vault.to_string(),
+                amount: Uint128::new(1_000),
+                msg: to_json_binary(&ReceiveMsg::Deposit { bot_id: 1 }).unwrap(),
+            },
+            &[],
+        )
+        .unwrap_err();
+    assert!(err
+        .root_cause()
+        .to_string()
+        .contains("quarantined by the admin"));
+
+    // 4. TokenPolicy query reflects the quarantine.
+    let policy: TokenPolicyResponse = h
+        .app
+        .wrap()
+        .query_wasm_smart(&h.vault, &VaultQueryMsg::TokenPolicy {})
+        .unwrap();
+    assert_eq!(
+        policy.allowed_tokens,
+        vec![h.token_0.to_string(), h.token_1.to_string()]
+    );
+    assert_eq!(policy.quarantined_tokens, vec![h.token_0.to_string()]);
+
+    // 5. Unquarantine -> the deposit lands and the pair assets are usable again.
+    h.app
+        .execute_contract(
+            admin,
+            h.vault.clone(),
+            &VaultExecuteMsg::UnquarantineToken {
+                token: h.token_0.to_string(),
+            },
+            &[],
+        )
+        .unwrap();
+    h.deposit(1, &h.token_0.clone(), Uint128::new(1_000));
+    h.deposit(1, &h.token_1.clone(), Uint128::new(2_000));
+    assert_eq!(h.orders(1).len(), 4);
+    let bot = h.bot(1);
+    assert_eq!(bot.active_orders, 4);
 }
