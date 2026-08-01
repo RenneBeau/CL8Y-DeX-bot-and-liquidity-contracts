@@ -37,6 +37,7 @@ class TxTrackerTests(unittest.TestCase):
         self.assertIsNone(t.pending_plan)
         self.assertIsNone(t.pending_since)
         self.assertIsNone(t.suppressed_plan)
+        self.assertFalse(t.broadcasting)
 
     def test_loads_existing_state_on_init(self):
         with open(self.path, "w", encoding="utf-8") as f:
@@ -46,6 +47,7 @@ class TxTrackerTests(unittest.TestCase):
                     "pending_plan": "plan123",
                     "pending_since": 42.0,
                     "suppressed_plan": "suppressed",
+                    "broadcasting": True,
                 },
                 f,
             )
@@ -54,6 +56,7 @@ class TxTrackerTests(unittest.TestCase):
         self.assertEqual(t.pending_plan, "plan123")
         self.assertEqual(t.pending_since, 42.0)
         self.assertEqual(t.suppressed_plan, "suppressed")
+        self.assertTrue(t.broadcasting)
 
     def test_save_creates_file_with_mode_600(self):
         t = TxTracker(self.path)
@@ -71,6 +74,7 @@ class TxTrackerTests(unittest.TestCase):
         self.assertEqual(state["pending_plan"], "plan456")
         self.assertEqual(state["pending_since"], 99.0)
         self.assertIsNone(state["suppressed_plan"])
+        self.assertFalse(state["broadcasting"])
 
     def test_save_none_path_is_noop(self):
         t = TxTracker(path=None)
@@ -393,9 +397,39 @@ class RunOnceTests(unittest.TestCase):
         mock_pre.assert_called_once_with(args.vault, {"rebalance": {"deadline": 620}}, args)
         mock_bc.assert_called_once_with(args.vault, {"rebalance": {"deadline": 620}}, args)
         self.assertEqual(tracker.pending_hash, "txhash1")
-        self.assertEqual(tracker.pending_since, 100.0)
+        self.assertEqual(tracker.pending_since, 500)
+        self.assertFalse(tracker.broadcasting)
         tracker.save.assert_called()
         mock_poll.assert_called_once_with(args, tracker)
+
+    def test_broadcast_crash_requires_intervention_after_restart(self):
+        args = _make_args()
+        with tempfile.TemporaryDirectory() as directory:
+            tracker = TxTracker(os.path.join(directory, "state.json"))
+            plan = {
+                "should_rebalance": True,
+                "offer_token": "token1",
+                "captured_twap": "1.5",
+                "balances": ["100", "100"],
+                "reference_price": "1.5",
+            }
+            with patch("keeper.smart_query", return_value=plan):
+                with patch("keeper.time.time", return_value=500):
+                    with patch("keeper.preflight"):
+                        with patch("keeper.broadcast", side_effect=RuntimeError("connection reset")):
+                            with self.assertRaises(RuntimeError):
+                                run_once(args, tracker)
+
+            restarted = TxTracker(tracker.path)
+            self.assertTrue(restarted.broadcasting)
+            self.assertIsNone(restarted.pending_hash)
+            with patch("keeper.smart_query") as query:
+                with patch("builtins.print") as output:
+                    run_once(args, restarted)
+            query.assert_not_called()
+            output.assert_called_with(
+                "previous broadcast outcome is unknown; operator intervention required"
+            )
 
     def test_broadcast_suppresses_on_deterministic_failure(self):
         args = _make_args()
@@ -498,6 +532,16 @@ class RunCommandTests(unittest.TestCase):
         mock_run.return_value = MagicMock(returncode=0, stdout='{"ok": true}', stderr="")
         result = run_command(["some", "command"])
         self.assertEqual(result.stdout, '{"ok": true}')
+        self.assertEqual(mock_run.call_args.kwargs["timeout"], 60)
+
+    @patch("keeper.subprocess.run")
+    def test_transient_cli_failure_is_not_deterministic(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=1, stderr="connection reset by peer", stdout=""
+        )
+        with self.assertRaises(RuntimeError) as error:
+            run_command(["some", "command"])
+        self.assertNotIsInstance(error.exception, DeterministicTxError)
 
 
 class BroadcastTests(unittest.TestCase):
@@ -518,12 +562,13 @@ class BroadcastTests(unittest.TestCase):
         self.assertEqual(result, "txhash2")
 
     @patch("keeper.run_command")
-    def test_raises_deterministic_error_on_checktx_failure(self, mock_run):
+    def test_mempool_checktx_failure_is_transient(self, mock_run):
         mock_run.return_value = MagicMock(
             stdout=json.dumps({"code": 4, "raw_log": "mempool full"})
         )
-        with self.assertRaises(DeterministicTxError) as ctx:
+        with self.assertRaises(RuntimeError) as ctx:
             broadcast("vault1", {}, MagicMock())
+        self.assertNotIsInstance(ctx.exception, DeterministicTxError)
         self.assertIn("mempool full", str(ctx.exception))
 
     @patch("keeper.run_command")

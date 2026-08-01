@@ -163,10 +163,13 @@ already within tolerance, the keeper sends `sync_reference` instead.
 Before broadcast the keeper runs a `terrad --dry-run` preflight. It parses the
 sync CheckTx code and hash, then polls LCD with RPC fallback until DeliverTx is
 final and requires code zero. Only one hash can be in flight. Pending hashes and
-deterministic-failure suppression are persisted in `KEEPER_STATE_FILE`, so an
-ambiguous timeout or service restart never causes rebroadcast of an unresolved
-transaction. An unchanged plan rejected by CheckTx or DeliverTx remains
-suppressed until on-chain plan inputs change.
+deterministic-failure suppression are persisted and fsynced in
+`KEEPER_STATE_FILE`. A `broadcasting` marker is committed before network access;
+if the process restarts before receiving a hash, automatic submission stops for
+operator intervention rather than risking a duplicate. Commands have a 60-second
+timeout, and transient connection, sequence, timeout, availability, and mempool
+errors do not suppress the plan. An unchanged plan rejected deterministically by
+CheckTx or DeliverTx remains suppressed until on-chain plan inputs change.
 
 ## 7. Run As A Service
 

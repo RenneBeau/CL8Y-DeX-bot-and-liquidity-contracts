@@ -19,6 +19,20 @@ class DeterministicTxError(RuntimeError):
     """A CheckTx or DeliverTx rejection that retrying unchanged cannot fix."""
 
 
+def is_transient_error(detail):
+    detail = detail.lower()
+    return any(marker in detail for marker in (
+        "account sequence mismatch",
+        "connection refused",
+        "connection reset",
+        "context deadline exceeded",
+        "mempool full",
+        "temporarily unavailable",
+        "timed out",
+        "timeout",
+    ))
+
+
 class TxTracker:
     def __init__(self, path=None):
         self.path = path
@@ -26,6 +40,7 @@ class TxTracker:
         self.pending_plan = None
         self.pending_since = None
         self.suppressed_plan = None
+        self.broadcasting = False
         if path and os.path.exists(path):
             with open(path, encoding="utf-8") as state_file:
                 state = json.load(state_file)
@@ -33,6 +48,7 @@ class TxTracker:
             self.pending_plan = state.get("pending_plan")
             self.pending_since = state.get("pending_since")
             self.suppressed_plan = state.get("suppressed_plan")
+            self.broadcasting = bool(state.get("broadcasting", False))
 
     def save(self):
         if not self.path:
@@ -47,11 +63,19 @@ class TxTracker:
                     "pending_plan": self.pending_plan,
                     "pending_since": self.pending_since,
                     "suppressed_plan": self.suppressed_plan,
+                    "broadcasting": self.broadcasting,
                 },
                 state_file,
             )
+            state_file.flush()
+            os.fsync(state_file.fileno())
         os.chmod(temporary, 0o600)
         os.replace(temporary, self.path)
+        directory_fd = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
 
 
 def get_json(url):
@@ -120,9 +144,11 @@ def tx_command(vault, message, args):
 
 
 def run_command(command):
-    result = subprocess.run(command, text=True, capture_output=True, check=False)
+    result = subprocess.run(command, text=True, capture_output=True, check=False, timeout=60)
     if result.returncode:
         detail = result.stderr.strip() or result.stdout.strip()
+        if is_transient_error(detail):
+            raise RuntimeError(detail or "temporary terrad failure")
         raise DeterministicTxError(detail or "terrad command failed")
     return result
 
@@ -142,6 +168,8 @@ def broadcast(vault, message, args):
         raise RuntimeError("invalid sync broadcast response") from error
     if code != 0:
         detail = tx.get("raw_log") or tx.get("tx_response", {}).get("raw_log", "")
+        if is_transient_error(detail):
+            raise RuntimeError(f"CheckTx code {code}: {detail}")
         raise DeterministicTxError(f"CheckTx code {code}: {detail}")
     tx_hash = tx.get("txhash") or tx.get("tx_response", {}).get("txhash")
     if not tx_hash:
@@ -193,6 +221,7 @@ def poll_pending(args, tracker, query_tx=query_final_tx, sleep=time.sleep):
             tracker.pending_hash = None
             tracker.pending_plan = None
             tracker.pending_since = None
+            tracker.broadcasting = False
             if result["code"] != 0:
                 tracker.suppressed_plan = plan
                 tracker.save()
@@ -213,6 +242,9 @@ def poll_pending(args, tracker, query_tx=query_final_tx, sleep=time.sleep):
 
 
 def run_once(args, tracker):
+    if getattr(tracker, "broadcasting", False) is True and not tracker.pending_hash:
+        print("previous broadcast outcome is unknown; operator intervention required")
+        return
     if tracker.pending_hash:
         poll_pending(args, tracker)
         return
@@ -238,14 +270,20 @@ def run_once(args, tracker):
 
     try:
         preflight(args.vault, message, args)
+        tracker.broadcasting = True
+        tracker.pending_plan = fingerprint
+        tracker.pending_since = time.time()
+        tracker.save()
         tx_hash = broadcast(args.vault, message, args)
     except DeterministicTxError:
+        tracker.broadcasting = False
+        tracker.pending_plan = None
+        tracker.pending_since = None
         tracker.suppressed_plan = fingerprint
         tracker.save()
         raise
     tracker.pending_hash = tx_hash
-    tracker.pending_plan = fingerprint
-    tracker.pending_since = time.monotonic()
+    tracker.broadcasting = False
     tracker.save()
     print(f"broadcast tx: {tx_hash}")
     poll_pending(args, tracker)
