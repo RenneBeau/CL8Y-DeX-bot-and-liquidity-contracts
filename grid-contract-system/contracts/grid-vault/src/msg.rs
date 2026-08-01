@@ -288,5 +288,9 @@ pub struct SolvencyResponse {
     pub token_0_actual: Uint128,
     pub token_1_expected: Uint128,
     pub token_1_actual: Uint128,
+    pub active_escrow_orders: u32,
+    pub parked_refund_orders: u32,
+    pub terminal_orders: u32,
+    pub unverifiable_orders: u32,
     pub warnings: Vec<String>,
 }

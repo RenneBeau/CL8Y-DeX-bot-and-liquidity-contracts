@@ -166,12 +166,15 @@ expected = free_balance + sum(tracked order.remaining for that token)
 actual   = queried vault CW20 balance + sum(on-chain pair escrow for that token)
 ```
 
-Each tracked order's escrow is re-queried on the pair; unverifiable or foreign
-escrow is reported as a warning string rather than failing the query. In-flight
-fills move value from escrow to the vault balance one-for-one, so the totals
-conserve. A nonzero difference between `expected` and `actual` signals drift in
-tracked state or custody and should be investigated. The query never blocks
-execution.
+Each tracked order is first queried as active escrow, then as an expired parked
+refund. Owner, order ID, side, immutable price (when active), and nonincreasing
+remaining amount are validated before custody is counted. The response reports
+`active_escrow_orders`, `parked_refund_orders`, `terminal_orders`, and
+`unverifiable_orders`; invalid or unqueryable escrow also produces a warning.
+In-flight fills move value from escrow to the vault balance one-for-one, so the
+totals conserve. A nonzero difference between `expected` and `actual` signals
+drift in tracked state or custody and should be investigated. The query never
+blocks execution.
 
 ## State
 

@@ -1615,6 +1615,10 @@ fn check_solvency(deps: Deps, env: &Env, bot_id: u64) -> StdResult<SolvencyRespo
     let bot = BOTS.load(deps.storage, bot_id)?;
     let mut expected = bot.free_balances;
     let mut on_chain_escrow = [Uint128::zero(), Uint128::zero()];
+    let mut active_escrow_orders = 0u32;
+    let mut parked_refund_orders = 0u32;
+    let mut terminal_orders = 0u32;
+    let mut unverifiable_orders = 0u32;
     let mut warnings = Vec::new();
     for item in ORDERS
         .prefix(bot_id)
@@ -1630,14 +1634,47 @@ fn check_solvency(deps: Deps, env: &Env, bot_id: u64) -> StdResult<SolvencyRespo
             &bot.pair,
             &PairQueryMsg::LimitOrder { order_id },
         ) {
-            Ok(on_chain) if on_chain.owner == env.contract.address => {
+            Ok(on_chain)
+                if on_chain.order_id == order_id
+                    && on_chain.owner == env.contract.address
+                    && on_chain.side == order.side
+                    && on_chain.price == order.price
+                    && on_chain.remaining <= order.remaining =>
+            {
                 on_chain_escrow[token_index] =
                     on_chain_escrow[token_index].checked_add(on_chain.remaining)?;
+                active_escrow_orders += 1;
             }
-            Ok(_) => warnings.push(format!(
-                "order {order_id} is no longer escrowed to this vault"
-            )),
-            Err(_) => warnings.push(format!("order {order_id} escrow could not be verified")),
+            Ok(_) => {
+                unverifiable_orders += 1;
+                warnings.push(format!("order {order_id} active escrow fields are invalid"));
+            }
+            Err(_) => match deps
+                .querier
+                .query_wasm_smart::<Option<ExpiredLimitRefundResponse>>(
+                    &bot.pair,
+                    &PairQueryMsg::ExpiredLimitRefund { order_id },
+                ) {
+                Ok(Some(refund))
+                    if refund.order_id == order_id
+                        && refund.owner == env.contract.address
+                        && refund.side == order.side
+                        && refund.remaining <= order.remaining =>
+                {
+                    on_chain_escrow[token_index] =
+                        on_chain_escrow[token_index].checked_add(refund.remaining)?;
+                    parked_refund_orders += 1;
+                }
+                Ok(Some(_)) => {
+                    unverifiable_orders += 1;
+                    warnings.push(format!("order {order_id} parked refund fields are invalid"));
+                }
+                Ok(None) => terminal_orders += 1,
+                Err(_) => {
+                    unverifiable_orders += 1;
+                    warnings.push(format!("order {order_id} escrow could not be verified"));
+                }
+            },
         }
     }
     let mut actual = [Uint128::zero(), Uint128::zero()];
@@ -1650,6 +1687,10 @@ fn check_solvency(deps: Deps, env: &Env, bot_id: u64) -> StdResult<SolvencyRespo
         token_0_actual: actual[0],
         token_1_expected: expected[1],
         token_1_actual: actual[1],
+        active_escrow_orders,
+        parked_refund_orders,
+        terminal_orders,
+        unverifiable_orders,
         warnings,
     })
 }
@@ -2629,6 +2670,8 @@ mod tests {
         assert_eq!(response.token_0_actual, Uint128::new(140));
         assert_eq!(response.token_1_expected, Uint128::new(260));
         assert_eq!(response.token_1_actual, Uint128::new(260));
+        assert_eq!(response.active_escrow_orders, 2);
+        assert_eq!(response.parked_refund_orders, 0);
         assert!(response.warnings.is_empty());
     }
 
@@ -2675,8 +2718,76 @@ mod tests {
                 .unwrap();
         assert_eq!(response.token_0_expected, Uint128::new(140));
         assert_eq!(response.token_0_actual, Uint128::zero());
+        assert_eq!(response.unverifiable_orders, 1);
         assert_eq!(response.warnings.len(), 1);
         assert!(response.warnings[0].contains("order 7"));
+    }
+
+    #[test]
+    fn solvency_query_includes_valid_parked_refund() {
+        let mut deps = mock_dependencies();
+        instantiate_default(deps.as_mut());
+        let mut bot = test_bot("alice", 1);
+        bot.free_balances = [Uint128::new(100), Uint128::zero()];
+        BOTS.save(deps.as_mut().storage, 1, &bot).unwrap();
+        ORDERS
+            .save(
+                deps.as_mut().storage,
+                (1, 7),
+                &GridOrder {
+                    rung_index: 3,
+                    side: LimitOrderSide::Ask,
+                    price: Decimal::percent(250),
+                    remaining: Uint128::new(40),
+                },
+            )
+            .unwrap();
+        deps.querier.update_wasm(|query| match query {
+            WasmQuery::Smart { contract_addr, msg } if contract_addr == "pair" => {
+                match from_json::<PairQueryMsg>(msg).unwrap() {
+                    PairQueryMsg::LimitOrder { .. } => {
+                        SystemResult::Ok(ContractResult::Err("not active".into()))
+                    }
+                    PairQueryMsg::ExpiredLimitRefund { order_id } => {
+                        SystemResult::Ok(ContractResult::Ok(
+                            to_json_binary(&Some(ExpiredLimitRefundResponse {
+                                order_id,
+                                owner: mock_env().contract.address.to_string(),
+                                side: LimitOrderSide::Ask,
+                                remaining: Uint128::new(35),
+                                expires_at: Some(100),
+                            }))
+                            .unwrap(),
+                        ))
+                    }
+                    _ => SystemResult::Ok(ContractResult::Err("unsupported".into())),
+                }
+            }
+            WasmQuery::Smart { contract_addr, msg }
+                if contract_addr == "token_a" || contract_addr == "token_b" =>
+            {
+                let _: Cw20QueryMsg = from_json(msg).unwrap();
+                let balance = if contract_addr == "token_a" { 105 } else { 0 };
+                SystemResult::Ok(ContractResult::Ok(
+                    to_json_binary(&BalanceResponse {
+                        balance: Uint128::new(balance),
+                    })
+                    .unwrap(),
+                ))
+            }
+            _ => SystemResult::Ok(ContractResult::Err("unsupported".into())),
+        });
+
+        let response: SolvencyResponse =
+            from_json(query(deps.as_ref(), mock_env(), QueryMsg::Solvency { bot_id: 1 }).unwrap())
+                .unwrap();
+        assert_eq!(response.token_0_expected, Uint128::new(140));
+        assert_eq!(response.token_0_actual, Uint128::new(140));
+        assert_eq!(response.active_escrow_orders, 0);
+        assert_eq!(response.parked_refund_orders, 1);
+        assert_eq!(response.terminal_orders, 0);
+        assert_eq!(response.unverifiable_orders, 0);
+        assert!(response.warnings.is_empty());
     }
 
     #[test]
