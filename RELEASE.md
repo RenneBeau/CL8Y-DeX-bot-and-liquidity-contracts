@@ -43,15 +43,16 @@ E2E run must pass on the exact release-candidate commit, but it is intentionally
 not triggered by every pull request.
 
 Grid releases that include legacy inventory reconciliation additionally require
-the owner-inventory pair API from
-[PlasticDigits/cl8y-dex-terraclassic PR #1](https://github.com/PlasticDigits/cl8y-dex-terraclassic/pull/1).
-The reviewed development reference is fork commit
-`c1f669b06c98936005b665cf56d5540a33a49edd`; it is not a production dependency
-pin until the upstream PR is merged and the release records the merged revision.
+the owner-inventory pair API from our fork
+[`RenneBeau/cl8y-dex-terraclassic`](https://github.com/RenneBeau/cl8y-dex-terraclassic),
+branch `fix/grid-owner-inventory`, commit
+`c1f669b06c98936005b665cf56d5540a33a49edd`. That commit is the reviewed
+development reference; it is not a production dependency pin until it is merged
+into the grid workspace and the release records the merged revision.
 Rehearse with funded historical-state fixtures: upgrade pair first, finish owner
 index backfill, migrate and re-pin each vault, drain/rescan, clean local rows, and
 verify exact CW20 balance synchronization. Do not claim deployability without the
-merged pin and successful funded rehearsal.
+merged grid-workspace pin and successful funded rehearsal.
 
 Monitor reconciliation phase, snapshot generation/high-water, scan cursor,
 recovered-record count, pending action, last error, pair pages, local cleanup
