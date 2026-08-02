@@ -41,6 +41,31 @@ against the pair exactly as shipped.
   unbounded tombstone growth and `Claimed`/`Dust` reported under a
   `Cancelled` status.
 
+## Vault-side readiness (already implemented)
+
+The consumer side of this API is **already built and tested** in
+`contracts/grid-vault` (`cl8y-grid-vault`, v0.1.1). It needs no change to become
+active — it is capability-gated:
+
+- On a legacy vault, `INVENTORY_RECONCILIATION_REQUIRED` is set and the vault is
+  locked until the migration completes. Reconciliation runs a
+  `ScanningPair -> DrainingPair -> CleaningRecoveredInventory -> CleaningLocalOrders
+  -> Complete` state machine driven by `continue_inventory_reconciliation`.
+- Each step first calls `PairQueryMsg::Protocol` and requires
+  `schema_version == 1`, `owner_inventory_ready == true`, and the
+  `TypedOrderStatus`, `OwnerInventory`, `OwnerIndexBackfill` features. Today the
+  shipped pair fails this gate, so the grid stays **fail-closed and non-deployable**.
+- The moment the upgraded pair reports readiness, the same binary proceeds with
+  generation-checked pages (`Cancel`/`Claim` drains) and unlocks withdrawals
+  once `Complete`.
+
+Covered by the E2E test
+`migrated_vault_scans_mixed_inventory_and_retries_failed_drain_end_to_end`
+(12/12 suite green, clippy `-D warnings` clean).
+
+So: approve + deploy the pair upgrade, and the limit grid becomes operational
+without a vault release.
+
 ## Reviewers
 
 Maintainers: review the patch and/or PR #1. The bot project treats this solely
