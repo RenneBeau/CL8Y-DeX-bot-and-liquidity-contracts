@@ -84,7 +84,7 @@ reconcile_last_fill() {
     database=$(mktemp)
     rm -f "$database"
     operator() {
-        env PYTHONPATH="$PROJECT_ROOT/grid-contract-system/services/grid-operator" \
+        env PYTHONPATH="$PROJECT_ROOT/grid-operator-system/services/grid-operator" \
             GRID_DB_PATH="$database" GRID_RPC_URL=http://127.0.0.1:26657 \
             GRID_CHAIN_ID=localterra GRID_DEPLOYMENT_HEIGHT="$LAST_FILL_HEIGHT" \
             GRID_VAULTS="$manager" GRID_FINALITY_DEPTH=0 \

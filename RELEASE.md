@@ -58,7 +58,7 @@ two vault designs are split into two independent Cargo workspaces:
   (`Pool`, `Observe`, `Swap` via CW20 hook) and requires no upstream merge.
 
 The shared `grid-operator` and protocol documentation remain under
-`grid-contract-system`.
+`grid-operator-system`.
 
 ## Publishing
 

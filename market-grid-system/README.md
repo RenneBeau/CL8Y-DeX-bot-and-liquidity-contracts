@@ -12,7 +12,7 @@ Share accounting mints against the vault's current net-asset-value, not a fixed
 basis, so deposits/withdrawals cannot extract value from existing holders.
 
 The permissionless rebalance keeper for this vault lives in the shared
-[`grid-contract-system`](../grid-contract-system/README.md)
+[`grid-operator-system`](../grid-operator-system/README.md)
 `services/grid-operator` (`swap_keeper.py`).
 
 Build and test:

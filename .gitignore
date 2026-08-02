@@ -1,8 +1,8 @@
 /target/
 /rebalancer-system/target/
 /rebalancer-system/artifacts/
-/grid-contract-system/target/
-/grid-contract-system/artifacts/
+/grid-operator-system/target/
+/grid-operator-system/artifacts/
 /market-grid-system/target/
 /market-grid-system/artifacts/
 /limit-grid-system/target/

@@ -30,7 +30,7 @@ Guides:
 Run the shared operator tests:
 
 ```sh
-python3 -m unittest discover -s grid-contract-system/services/grid-operator/tests -p 'test_*.py'
+python3 -m unittest discover -s grid-operator-system/services/grid-operator/tests -p 'test_*.py'
 ```
 
 This remains pre-production code. Real mainnet-equivalent CL8Y adversarial

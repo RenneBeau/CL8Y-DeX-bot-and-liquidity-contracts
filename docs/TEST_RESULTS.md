@@ -26,7 +26,7 @@ working-tree corrections:
 | `cargo +1.81.0 test --locked --workspace --all-targets` in `market-grid-system` | PASS: 17 tests (10 vault unit, 7 swap integration) | Grid swap contract (deployable) |
 | `cargo +1.81.0 test --locked --workspace --all-targets` in `rebalancer-system` | PASS: 30 Rust tests (11 liquidity, 15 vault, 4 proxy) | Rebalancer contracts/packages |
 | `python3 -m unittest -v test_keeper.py` | PASS: 50 tests | Rebalancer keeper |
-| `python3 -m unittest discover -s grid-contract-system/services/grid-operator/tests -p 'test_*.py'` | PASS: 24 tests | Grid operator |
+| `python3 -m unittest discover -s grid-operator-system/services/grid-operator/tests -p 'test_*.py'` | PASS: 24 tests | Grid operator |
 | `make local-e2e` | PASS: 10 rebalancer and 10 grid scenarios | Signed LocalTerra, uncommitted tree |
 
 These are local results, not GitHub Actions results. Both strict Clippy workspaces,
