@@ -15,11 +15,20 @@ CL8Y fee tier.
 
 ### Grid
 
-[`grid-contract-system`](grid-contract-system/README.md) is the experimental
-one-owner, one-bot-per-vault limit-order grid system. It runs on standard CL8Y
-pairs. Reconciliation is permissionless and derives amounts on-chain; the
-indexer/operator is optional automation, and only its configured keeper address
-is eligible for useful-reconciliation reimbursement.
+The grid work is split into two independent Cargo workspaces plus a shared
+operator/docs harness (`rebalancer-system` is the third, non-grid, system):
+
+- [`market-grid-system`](market-grid-system/README.md) — the **deployable**
+  standard swap grid (`grid-vault-swap`). The vault holds CW20 balances, reads
+  the pool price, and executes classic `Swap` calls as the price crosses a grid
+  level. Uses the exact CL8Y pair API as shipped; no fork or upstream merge.
+- [`limit-grid-system`](limit-grid-system/README.md) — the **reference-only**
+  limit-order grid (`grid-vault` + `grid-manager`). It is retained for
+  documentation but is **not deployable** because it needs pair queries that do
+  not exist in the shipped pair. Do not deploy or fund it.
+- [`grid-contract-system`](grid-contract-system/README.md) — the shared
+  `grid-operator` worker and the grid protocol/ops documentation used by both
+  designs.
 
 ## Verification
 
@@ -39,6 +48,7 @@ an economic deployment. The grid system additionally remains experimental.
 
 - [Rebalancer overview](rebalancer-system/README.md)
 - [Rebalancer implementation](rebalancer-system/IMPLEMENTATION.md)
-- [Grid overview](grid-contract-system/README.md)
-- [Grid implementation](grid-contract-system/IMPLEMENTATION.md)
+- [Market grid (deployable swap)](market-grid-system/README.md)
+- [Limit grid (reference only)](limit-grid-system/README.md)
+- [Grid operator and protocol](grid-contract-system/README.md)
 - [Security policy](SECURITY.md)

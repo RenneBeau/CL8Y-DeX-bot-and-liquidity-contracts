@@ -32,7 +32,7 @@ jobs:
         run: |
           mkdir -p evidence
           status=0
-          for workspace in rebalancer-system grid-contract-system; do
+          for workspace in rebalancer-system market-grid-system limit-grid-system; do
             cargo +stable audit --file "$workspace/Cargo.lock" --ignore RUSTSEC-2024-0344 \
               --json >"evidence/$workspace-audit.json" || status=1
             cargo +stable deny --manifest-path "$workspace/Cargo.toml" --all-features check \

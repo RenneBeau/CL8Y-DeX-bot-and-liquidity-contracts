@@ -3,6 +3,10 @@
 /rebalancer-system/artifacts/
 /grid-contract-system/target/
 /grid-contract-system/artifacts/
+/market-grid-system/target/
+/market-grid-system/artifacts/
+/limit-grid-system/target/
+/limit-grid-system/artifacts/
 /artifacts/
 /test-area/.cache/
 /test-area/.env

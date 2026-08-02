@@ -43,18 +43,22 @@ E2E run must pass on the exact release-candidate commit, but it is intentionally
 not triggered by every pull request.
 
 The grid system deploys strictly against the pinned CL8Y pair contract as
-shipped; no pair modification, fork, or upstream dependency is permitted. Two
-vault designs exist:
+shipped; no pair modification, fork, or upstream dependency is permitted. The
+two vault designs are split into two independent Cargo workspaces:
+`limit-grid-system` and `market-grid-system`:
 
-- `grid-vault` (limit-order maker design) is retained for reference only. It is
-  **not deployable** because it requires pair queries that do not exist in the
-  shipped pair (typed order status, owner inventory, owner-index backfill). Do
-  not deploy or fund it.
-- `grid-vault-swap` is the deployable swap-only design. It holds CW20 balances in
-  the vault, reads the pool price, and executes classic `Swap` calls when the
-  price crosses a grid level. No limit orders, no pair custody, no reconciliation
-  state. It uses the exact pair API as shipped (`Pool`, `Observe`, `Swap` via
-  CW20 hook) and requires no upstream merge.
+- `limit-grid-system` (`grid-vault`/`grid-manager`, the limit-order maker design)
+  is retained for reference only. It is **not deployable** because it requires
+  pair queries that do not exist in the shipped pair (typed order status, owner
+  inventory, owner-index backfill). Do not deploy or fund it.
+- `market-grid-system` (`grid-vault-swap`) is the deployable swap-only design. It
+  holds CW20 balances in the vault, reads the pool price, and executes classic
+  `Swap` calls when the price crosses a grid level. No limit orders, no pair
+  custody, no reconciliation state. It uses the exact pair API as shipped
+  (`Pool`, `Observe`, `Swap` via CW20 hook) and requires no upstream merge.
+
+The shared `grid-operator` and protocol documentation remain under
+`grid-contract-system`.
 
 ## Publishing
 

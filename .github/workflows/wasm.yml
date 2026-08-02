@@ -23,7 +23,8 @@ jobs:
           SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)
           export SOURCE_DATE_EPOCH
           .github/scripts/reproducible-build.sh rebalancer-system artifacts/release 2>&1 | tee evidence/rebalancer-build.log
-          .github/scripts/reproducible-build.sh grid-contract-system artifacts/release 2>&1 | tee evidence/grid-build.log
+          .github/scripts/reproducible-build.sh market-grid-system artifacts/release 2>&1 | tee evidence/grid-swap-build.log
+          .github/scripts/reproducible-build.sh limit-grid-system artifacts/release 2>&1 | tee evidence/limit-grid-system-build.log
           (cd artifacts/release && sha256sum -- *.wasm | LC_ALL=C sort) | tee evidence/checksums.txt
       - name: Upload optimized Wasm
         if: always()

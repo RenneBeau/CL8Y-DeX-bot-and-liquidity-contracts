@@ -8,30 +8,37 @@ ci: test clippy
 test:
 	cargo +$(RUST_TOOLCHAIN) fmt --manifest-path rebalancer-system/Cargo.toml --all -- --check
 	cargo +$(RUST_TOOLCHAIN) test --locked --manifest-path rebalancer-system/Cargo.toml --all-targets
-	cargo +$(RUST_TOOLCHAIN) fmt --manifest-path grid-contract-system/Cargo.toml --all -- --check
-	cargo +$(RUST_TOOLCHAIN) test --locked --manifest-path grid-contract-system/Cargo.toml --all-targets
+	cargo +$(RUST_TOOLCHAIN) fmt --manifest-path market-grid-system/Cargo.toml --all -- --check
+	cargo +$(RUST_TOOLCHAIN) test --locked --manifest-path market-grid-system/Cargo.toml --all-targets
+	cargo +$(RUST_TOOLCHAIN) fmt --manifest-path limit-grid-system/Cargo.toml --all -- --check
+	cargo +$(RUST_TOOLCHAIN) test --locked --manifest-path limit-grid-system/Cargo.toml --all-targets
 	python3 -m unittest discover -s rebalancer-system/examples/keeper -p 'test_*.py'
 	python3 -m unittest discover -s grid-contract-system/services/grid-operator/tests -p 'test_*.py'
 
 clippy:
 	cargo +$(RUST_TOOLCHAIN) clippy --locked --manifest-path rebalancer-system/Cargo.toml --all-targets -- -D warnings
-	cargo +$(RUST_TOOLCHAIN) clippy --locked --manifest-path grid-contract-system/Cargo.toml --all-targets -- -D warnings
+	cargo +$(RUST_TOOLCHAIN) clippy --locked --manifest-path market-grid-system/Cargo.toml --all-targets -- -D warnings
+	cargo +$(RUST_TOOLCHAIN) clippy --locked --manifest-path limit-grid-system/Cargo.toml --all-targets -- -D warnings
 
 security:
 	.github/scripts/install-security-tools.sh
 	cargo +stable audit --file rebalancer-system/Cargo.lock --ignore RUSTSEC-2024-0344
-	cargo +stable audit --file grid-contract-system/Cargo.lock --ignore RUSTSEC-2024-0344
+	cargo +stable audit --file market-grid-system/Cargo.lock --ignore RUSTSEC-2024-0344
+	cargo +stable audit --file limit-grid-system/Cargo.lock --ignore RUSTSEC-2024-0344
 	cargo +stable deny --manifest-path rebalancer-system/Cargo.toml --all-features check
-	cargo +stable deny --manifest-path grid-contract-system/Cargo.toml --all-features check
+	cargo +stable deny --manifest-path market-grid-system/Cargo.toml --all-features check
+	cargo +stable deny --manifest-path limit-grid-system/Cargo.toml --all-features check
 
 optimize:
 	docker run --rm -v "$(CURDIR)/rebalancer-system:/code" --mount type=volume,source=cl8y_bot_target_cache,target=/code/target --mount type=volume,source=registry_cache,target=/usr/local/cargo/registry $(OPTIMIZER_IMAGE)
-	docker run --rm -v "$(CURDIR)/grid-contract-system:/code" --mount type=volume,source=cl8y_grid_target_cache,target=/code/target --mount type=volume,source=registry_cache,target=/usr/local/cargo/registry $(OPTIMIZER_IMAGE)
+	docker run --rm -v "$(CURDIR)/market-grid-system:/code" --mount type=volume,source=cl8y_grid_swap_target_cache,target=/code/target --mount type=volume,source=registry_cache,target=/usr/local/cargo/registry $(OPTIMIZER_IMAGE)
+	docker run --rm -v "$(CURDIR)/limit-grid-system:/code" --mount type=volume,source=cl8y_grid_limit_target_cache,target=/code/target --mount type=volume,source=registry_cache,target=/usr/local/cargo/registry $(OPTIMIZER_IMAGE)
 
 reproducible:
 	mkdir -p artifacts/release
 	OPTIMIZER_IMAGE=$(OPTIMIZER_IMAGE) .github/scripts/reproducible-build.sh rebalancer-system artifacts/release
-	OPTIMIZER_IMAGE=$(OPTIMIZER_IMAGE) .github/scripts/reproducible-build.sh grid-contract-system artifacts/release
+	OPTIMIZER_IMAGE=$(OPTIMIZER_IMAGE) .github/scripts/reproducible-build.sh market-grid-system artifacts/release
+	OPTIMIZER_IMAGE=$(OPTIMIZER_IMAGE) .github/scripts/reproducible-build.sh limit-grid-system artifacts/release
 
 test-keeper:
 	python3 -m unittest discover -s rebalancer-system/examples/keeper -p 'test_*.py'

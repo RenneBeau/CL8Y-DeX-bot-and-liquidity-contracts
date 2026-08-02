@@ -5,6 +5,8 @@ on:
     branches: [main]
     paths:
       - "rebalancer-system/**"
+      - "market-grid-system/**"
+      - "limit-grid-system/**"
       - "grid-contract-system/**"
       - "test-area/**"
       - ".github/workflows/e2e.yml"
@@ -12,6 +14,8 @@ on:
   pull_request:
     paths:
       - "rebalancer-system/**"
+      - "market-grid-system/**"
+      - "limit-grid-system/**"
       - "grid-contract-system/**"
       - "test-area/**"
       - ".github/workflows/e2e.yml"

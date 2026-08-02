@@ -22,7 +22,8 @@ working-tree corrections:
 
 | Command | Result | Scope |
 |---|---|---|
-| `cargo +1.81.0 test --locked --workspace --all-targets` in `grid-contract-system` | PASS: 49 tests (4 manager, 33 vault unit, 12 integration) | Grid contracts |
+| `cargo +1.81.0 test --locked --workspace --all-targets` in `limit-grid-system` | PASS: 49 tests (4 manager, 33 vault unit, 12 integration) | Grid limit-order contracts (reference) |
+| `cargo +1.81.0 test --locked --workspace --all-targets` in `market-grid-system` | PASS: 17 tests (10 vault unit, 7 swap integration) | Grid swap contract (deployable) |
 | `cargo +1.81.0 test --locked --workspace --all-targets` in `rebalancer-system` | PASS: 30 Rust tests (11 liquidity, 15 vault, 4 proxy) | Rebalancer contracts/packages |
 | `python3 -m unittest -v test_keeper.py` | PASS: 50 tests | Rebalancer keeper |
 | `python3 -m unittest discover -s grid-contract-system/services/grid-operator/tests -p 'test_*.py'` | PASS: 24 tests | Grid operator |

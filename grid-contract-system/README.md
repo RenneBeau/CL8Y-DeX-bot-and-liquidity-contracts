@@ -1,37 +1,38 @@
-# Trust-Minimized Grid Contract System
+# Grid Operator & Protocol (Shared)
 
-This independent Cargo workspace contains:
+This directory is the shared **operator service and documentation** harness for
+the two grid ecosystems. It contains no Rust contract crates; those live in two
+separate Cargo workspaces at the repository root:
 
-- `contracts/grid-manager`: non-custodial vault factory and registry.
-- `contracts/grid-vault`: one-owner, one-bot custody and CL8Y order contract.
-- `services/grid-operator`: optional discovery and transaction automation.
+- [`market-grid-system`](../market-grid-system/README.md) — the **deployable**
+  standard swap grid.
+- [`limit-grid-system`](../limit-grid-system/README.md) — the **reference-only**
+  limit-order grid (retained for documentation, not deployable).
 
-The manager never receives CW20 deposits. Each vault address owns only its own
-funds and CL8Y orders. Reconciliation is permissionless and accepts order IDs
-only; credited proceeds come from queried vault balances, not keeper/indexer
-amounts. Every newly placed order has a configured timeout, and the owner retains
-an indexer-independent exit path. The vault pins its CL8Y pair code ID at bot
-creation, validates it before every mutating pair interaction, and exposes a read-only
-`solvency` query that cross-checks free balances plus pair escrow per token.
+Contents:
 
-The current CL8Y pair does not retain cumulative maker output or typed terminal
-history. Exact event-by-event opposite-order recreation is therefore intentionally
-not part of the trust-minimized flow. See the [protocol and threat model](docs/GRID_MANAGER_PROTOCOL.md).
+- `services/grid-operator` — discovery and transaction automation.
+  `indexer.py`/`keeper.py` drive the reference limit-order grid, and
+  `swap_keeper.py` drives the standard swap grid.
+- `docs/` — protocol, operations, and indexer documentation.
+- `IMPLEMENTATION.md` — implementation status and production-readiness notes.
 
-Additional guides:
+The operator never receives CW20 deposits. It is optional automation on top of
+the permissionless, fail-closed contracts.
+
+Guides:
 
 - [Implementation status](IMPLEMENTATION.md)
+- [Protocol and threat model](docs/GRID_MANAGER_PROTOCOL.md)
 - [Operations](docs/GRID_OPERATIONS.md)
 - [Optional indexer](docs/GRID_INDEXER.md)
 
-Build and test:
+Run the shared operator tests:
 
 ```sh
-cargo test --manifest-path grid-contract-system/Cargo.toml
-cargo clippy --manifest-path grid-contract-system/Cargo.toml --all-targets -- -D warnings
+python3 -m unittest discover -s grid-contract-system/services/grid-operator/tests -p 'test_*.py'
 ```
 
-This remains pre-production code. Token admission/quarantine, mocked
-multi-contract integration/property tests, and signed LocalTerra coverage are
-implemented; real mainnet-equivalent CL8Y adversarial validation, an external
-security review, and staged limited-value rollout remain required.
+This remains pre-production code. Real mainnet-equivalent CL8Y adversarial
+validation, an external security review, and staged limited-value rollout remain
+required.

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["contracts/grid-manager", "contracts/grid-vault", "contracts/grid-vault-swap"]
+members = ["contracts/grid-vault-swap"]
 
 [workspace.package]
 version = "0.1.0"

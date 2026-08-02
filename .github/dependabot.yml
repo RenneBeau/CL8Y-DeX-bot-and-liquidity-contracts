@@ -6,7 +6,12 @@ updates:
       interval: weekly
     open-pull-requests-limit: 5
   - package-ecosystem: cargo
-    directory: /grid-contract-system
+    directory: /market-grid-system
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: cargo
+    directory: /limit-grid-system
     schedule:
       interval: weekly
     open-pull-requests-limit: 5

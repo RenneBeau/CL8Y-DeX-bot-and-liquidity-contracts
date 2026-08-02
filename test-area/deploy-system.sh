@@ -82,8 +82,8 @@ docker run --rm \
 
 echo "Building the isolated grid manager and vault Wasm artifacts..."
 docker run --rm \
-    -v "$PROJECT_ROOT/grid-contract-system:/code" \
-    --mount type=volume,source=cl8y_grid_target_cache,target=/code/target \
+    -v "$PROJECT_ROOT/limit-grid-system:/code" \
+    --mount type=volume,source=cl8y_grid_limit_target_cache,target=/code/target \
     --mount type=volume,source=registry_cache,target=/usr/local/cargo/registry \
     "$OPTIMIZER_IMAGE"
 
@@ -114,7 +114,7 @@ LIQUIDITY_CODE_ID=$(store_contract cl8y_bot_liquidity)
 store_grid_contract() {
     local artifact="$1"
     local tx_hash result
-    docker cp "$PROJECT_ROOT/grid-contract-system/artifacts/$artifact.wasm" \
+    docker cp "$PROJECT_ROOT/limit-grid-system/artifacts/$artifact.wasm" \
         "$CONTAINER:/tmp/$artifact.wasm"
     tx_hash=$(terrad_tx wasm store "/tmp/$artifact.wasm" | jq -r '.txhash')
     result=$(wait_tx "$tx_hash")

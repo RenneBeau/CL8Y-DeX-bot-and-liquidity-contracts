@@ -544,6 +544,70 @@ fn withdraw_burns_shares_pro_rata() {
 }
 
 #[test]
+fn deposit_prices_against_vault_nav() {
+    let mut h = setup();
+    let (token0, token1) = (h.token0.clone(), h.token1.clone());
+    // Balanced seed at TWAP 1.5: 60 t0 + 90 t1 -> 120 shares at NAV 1.0.
+    deposit(&mut h, &token0, Uint128::new(60_000_000_000));
+    deposit(&mut h, &token1, Uint128::new(90_000_000_000));
+    assert_eq!(shares_of(&h, &h.depositor), Uint128::new(120_000_000_000));
+
+    // Price drops to 1.0 (cell 1): holdings 60 t0 + 90 t1 are now worth
+    // 150 t0, so a share is worth 1.25 t0 (~NAV 1.25). Under the old fixed
+    // 1:1 basis this would let a token0 depositor mint cheap shares and
+    // withdraw ~70 t0 after depositing 60 t0 (16.7% risk-free extraction).
+    set_twap(&mut h, "1.0");
+
+    let attacker = h.app.api().addr_make("attacker");
+    h.app
+        .execute_contract(
+            h.admin.clone(),
+            token0.clone(),
+            &cw20::Cw20ExecuteMsg::Mint {
+                recipient: attacker.to_string(),
+                amount: Uint128::new(60_000_000_000),
+            },
+            &[],
+        )
+        .unwrap();
+    h.app
+        .execute_contract(
+            attacker.clone(),
+            token0.clone(),
+            &cw20::Cw20ExecuteMsg::Send {
+                contract: h.vault.to_string(),
+                amount: Uint128::new(60_000_000_000),
+                msg: to_json_binary(&ReceiveMsg::Deposit {}).unwrap(),
+            },
+            &[],
+        )
+        .unwrap();
+    // NAV-based mint: 60 t0 * 120e9 / 150e9 == 48e9 shares (not 60e9).
+    let got_shares = shares_of(&h, &attacker);
+    assert_eq!(got_shares, Uint128::new(48_000_000_000));
+    h.app
+        .execute_contract(
+            attacker.clone(),
+            h.vault.clone(),
+            &VaultExecuteMsg::Withdraw {
+                shares: got_shares,
+                recipient: None,
+            },
+            &[],
+        )
+        .unwrap();
+    // At price 1.0 the pair is 1:1, so attacker value == t0 + t1.
+    let value = balance_of(&h.app, &token0, &attacker)
+        .checked_add(balance_of(&h.app, &token1, &attacker))
+        .unwrap();
+    // Must break even; the old fixed-basis bug would have returned ~70 t0.
+    assert!(
+        value <= Uint128::new(60_000_000_000) && value >= Uint128::new(59_900_000_000),
+        "attacker must not extract value (got {value})"
+    );
+}
+
+#[test]
 fn admin_can_pause_and_resume() {
     let mut h = setup();
     h.app

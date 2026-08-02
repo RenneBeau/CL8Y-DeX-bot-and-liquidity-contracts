@@ -4437,7 +4437,7 @@ mod tests {
                             .unwrap()
                             .iter()
                             .filter(|row| {
-                                replay || start_after.map_or(true, |cursor| row.order_id > cursor)
+                                replay || start_after.is_none_or(|cursor| row.order_id > cursor)
                             })
                             .cloned()
                             .collect();

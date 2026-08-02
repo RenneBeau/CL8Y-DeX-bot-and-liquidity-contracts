@@ -41,7 +41,8 @@ jobs:
           checks=$(gh api --method GET "repos/$GITHUB_REPOSITORY/commits/$SHA/check-runs" -f per_page=100)
           required=(
             "Rust (rebalancer-system)"
-            "Rust (grid-contract-system)"
+            "Rust (market-grid-system)"
+            "Rust (limit-grid-system)"
             "Keeper and operator tests"
             "audit-and-policy"
             "build"
@@ -64,7 +65,8 @@ jobs:
           SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)
           export SOURCE_DATE_EPOCH
           .github/scripts/reproducible-build.sh rebalancer-system release 2>&1 | tee evidence/rebalancer-build.log
-          .github/scripts/reproducible-build.sh grid-contract-system release 2>&1 | tee evidence/grid-build.log
+          .github/scripts/reproducible-build.sh market-grid-system release 2>&1 | tee evidence/grid-swap-build.log
+          .github/scripts/reproducible-build.sh limit-grid-system release 2>&1 | tee evidence/limit-grid-system-build.log
       - name: Generate SBOM
         uses: anchore/sbom-action@55dc4ee22412511ee8c3142cbea40418e6cec693 # v0.17.8
         with:

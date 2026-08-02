@@ -203,12 +203,13 @@ fn execute_receive(
         &config.pair,
         config.twap_window_seconds,
     )?;
-    let minted = deposit_shares(receive.amount, token_index, price)?;
+    let balances = balances(deps.as_ref(), &env.contract.address, &config)?;
+    let total_shares = TOTAL_SHARES.load(deps.storage)?;
+    let minted = deposit_shares(receive.amount, token_index, price, &balances, total_shares)?;
     if minted.is_zero() {
         return Err(ContractError::ZeroAmount);
     }
     let depositor = deps.api.addr_validate(&receive.sender)?;
-    let total_shares = TOTAL_SHARES.load(deps.storage)?;
     TOTAL_SHARES.save(
         deps.storage,
         &total_shares
@@ -1009,6 +1010,44 @@ fn assert_no_funds(info: &MessageInfo) -> Result<(), ContractError> {
 }
 
 fn deposit_shares(
+    amount: Uint128,
+    token_index: usize,
+    price: Decimal,
+    balances: &[Uint128; 2],
+    total_shares: Uint128,
+) -> Result<Uint128, ContractError> {
+    let deposit_value_t0 = deposit_value(amount, token_index, price)?;
+    if total_shares.is_zero() {
+        return Ok(deposit_value_t0);
+    }
+    let prior_token_0 = if token_index == 0 {
+        balances[0]
+            .checked_sub(amount)
+            .map_err(StdError::overflow)?
+    } else {
+        balances[0]
+    };
+    let prior_token_1 = if token_index == 1 {
+        balances[1]
+            .checked_sub(amount)
+            .map_err(StdError::overflow)?
+    } else {
+        balances[1]
+    };
+    let token_1_value_t0 = checked_ratio(prior_token_1, Decimal::one().atomics(), price.atomics())
+        .map_err(ContractError::from)?;
+    let vault_value_t0 = prior_token_0
+        .checked_add(token_1_value_t0)
+        .map_err(StdError::overflow)?;
+    if vault_value_t0.is_zero() {
+        return Ok(deposit_value_t0);
+    }
+    Ok(deposit_value_t0
+        .checked_multiply_ratio(total_shares, vault_value_t0)
+        .map_err(|_| StdError::generic_err("share mint overflow"))?)
+}
+
+fn deposit_value(
     amount: Uint128,
     token_index: usize,
     price: Decimal,
