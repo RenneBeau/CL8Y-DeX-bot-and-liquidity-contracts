@@ -1,6 +1,7 @@
 import argparse
 import json
 import signal
+import sys
 import time
 
 from .config import Config
@@ -51,12 +52,19 @@ def status(db: Database, config: Config) -> dict:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="grid-operator")
-    parser.add_argument("command", choices=("run", "index", "keep", "keep-swap", "migrate", "status"))
+    parser.add_argument("command", choices=(
+        "run", "index", "keep", "keep-swap", "keep-discover", "migrate", "status"))
     parser.add_argument("--scan-limit", type=int)
     args, unknown = parser.parse_known_args(argv)
     if args.command == "keep-swap":
         return swap_keeper_main(unknown)
+    if args.command == "keep-discover":
+        from .discovery_keeper import main as discovery_keeper_main
+        return discovery_keeper_main(unknown)
     config = Config.from_env()
+    if args.command in ("index", "keep", "run") and not config.vaults:
+        print("GRID_VAULTS is empty: set at least one limit-grid vault address", file=sys.stderr)
+        return 2
     db, terrad, indexer, keeper = components(config)
     if args.command == "migrate":
         return 0

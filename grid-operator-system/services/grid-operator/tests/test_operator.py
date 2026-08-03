@@ -174,12 +174,12 @@ class IndexerTests(unittest.TestCase):
         self.assertEqual(self.db.conn.execute("PRAGMA journal_mode").fetchone()[0], "wal")
         tables = {row[0] for row in self.db.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         self.assertTrue({"blocks", "raw_events", "vaults", "orders", "aggregates", "batches",
-                         "tx_attempts", "cursors"}.issubset(tables))
+                         "tx_attempts", "cursors", "discovered_vaults"}.issubset(tables))
         batch_columns = {
             row[1] for row in self.db.conn.execute("PRAGMA table_info(batches)")
         }
         self.assertTrue({"failure_count", "next_retry_at"}.issubset(batch_columns))
-        self.assertEqual(self.db.conn.execute("PRAGMA user_version").fetchone()[0], 2)
+        self.assertEqual(self.db.conn.execute("PRAGMA user_version").fetchone()[0], 3)
 
     def test_schema_one_database_migrates_retry_columns(self):
         legacy_path = Path(self.temp.name) / "legacy.sqlite"
@@ -193,7 +193,50 @@ class IndexerTests(unittest.TestCase):
         legacy.migrate()
         columns = {row[1] for row in legacy.conn.execute("PRAGMA table_info(batches)")}
         self.assertTrue({"failure_count", "next_retry_at"}.issubset(columns))
-        self.assertEqual(legacy.conn.execute("PRAGMA user_version").fetchone()[0], 2)
+        self.assertEqual(legacy.conn.execute("PRAGMA user_version").fetchone()[0], 3)
+        tables = {row[0] for row in legacy.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        self.assertIn("discovered_vaults", tables)
+        legacy.conn.close()
+
+    def test_schema_v2_database_migrates_discovered_vaults(self):
+        legacy_path = Path(self.temp.name) / "v2.sqlite"
+        legacy = Database(legacy_path)
+        legacy.conn.executescript(
+            "CREATE TABLE blocks (chain_id TEXT NOT NULL, height INTEGER NOT NULL, hash TEXT NOT NULL, "
+            "parent_hash TEXT, time TEXT, scanned_at INTEGER NOT NULL, PRIMARY KEY(chain_id, height));"
+            "CREATE TABLE vaults (address TEXT PRIMARY KEY, bot_id INTEGER NOT NULL DEFAULT 1, "
+            "pair_address TEXT, enabled INTEGER NOT NULL DEFAULT 1, last_order_refresh_height INTEGER);"
+            "CREATE TABLE orders (pair_address TEXT NOT NULL, order_id INTEGER NOT NULL, vault_address TEXT NOT NULL, "
+            "bot_id INTEGER NOT NULL DEFAULT 1, side TEXT, rung_index INTEGER, price TEXT, remaining TEXT, "
+            "active INTEGER NOT NULL DEFAULT 1, updated_height INTEGER, "
+            "PRIMARY KEY(pair_address, order_id));"
+            "CREATE TABLE raw_events (id INTEGER PRIMARY KEY, chain_id TEXT NOT NULL, height INTEGER NOT NULL, "
+            "block_hash TEXT NOT NULL, tx_hash TEXT NOT NULL, tx_index INTEGER NOT NULL, event_index INTEGER NOT NULL, "
+            "pair_address TEXT NOT NULL, order_id INTEGER NOT NULL, vault_address TEXT NOT NULL, bot_id INTEGER NOT NULL, "
+            "side TEXT NOT NULL, input_amount TEXT NOT NULL, output_amount TEXT NOT NULL, raw_json TEXT NOT NULL, "
+            "reconciled_batch_id INTEGER);"
+            "CREATE TABLE aggregates (pair_address TEXT NOT NULL, order_id INTEGER NOT NULL, vault_address TEXT NOT NULL, "
+            "bot_id INTEGER NOT NULL, input_amount TEXT NOT NULL, output_amount TEXT NOT NULL, fill_count INTEGER NOT NULL, "
+            "first_height INTEGER NOT NULL, through_height INTEGER NOT NULL, PRIMARY KEY(pair_address, order_id));"
+            "CREATE TABLE batches (id INTEGER PRIMARY KEY, vault_address TEXT NOT NULL, bot_id INTEGER NOT NULL, "
+            "through_height INTEGER NOT NULL, state TEXT NOT NULL, created_at INTEGER NOT NULL, "
+            "confirmed_at INTEGER, tx_hash TEXT, error TEXT, failure_count INTEGER NOT NULL DEFAULT 0, "
+            "next_retry_at INTEGER);"
+            "CREATE TABLE batch_items (batch_id INTEGER NOT NULL, pair_address TEXT NOT NULL, order_id INTEGER NOT NULL, "
+            "input_amount TEXT NOT NULL, output_amount TEXT NOT NULL, fill_count INTEGER NOT NULL, "
+            "PRIMARY KEY(batch_id, pair_address, order_id));"
+            "CREATE TABLE batch_events (batch_id INTEGER NOT NULL, event_id INTEGER NOT NULL UNIQUE, "
+            "PRIMARY KEY(batch_id, event_id));"
+            "CREATE TABLE tx_attempts (id INTEGER PRIMARY KEY, batch_id INTEGER NOT NULL, state TEXT NOT NULL, "
+            "signed_tx BLOB NOT NULL, tx_hash TEXT, check_code INTEGER, deliver_code INTEGER, "
+            "created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, response_json TEXT, error TEXT);"
+            "CREATE TABLE cursors (name TEXT PRIMARY KEY, height INTEGER NOT NULL, value TEXT, updated_at INTEGER NOT NULL);"
+            "PRAGMA user_version = 2;"
+        )
+        legacy.migrate()
+        tables = {row[0] for row in legacy.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        self.assertIn("discovered_vaults", tables)
+        self.assertEqual(legacy.conn.execute("PRAGMA user_version").fetchone()[0], 3)
         legacy.conn.close()
 
 

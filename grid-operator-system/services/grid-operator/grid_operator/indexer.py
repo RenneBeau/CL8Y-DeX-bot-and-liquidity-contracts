@@ -40,10 +40,13 @@ def _first(attrs: dict, *names: str) -> str:
 
 class Indexer:
     def __init__(self, db: Database, rpc, chain_id: str, deployment_height: int,
-                 vaults: tuple[str, ...], finality_depth: int):
+                 vaults: tuple[str, ...], finality_depth: int,
+                 code_ids: dict[str, str] | None = None):
         self.db, self.rpc, self.chain_id = db, rpc, chain_id
         self.deployment_height, self.vault_addresses = deployment_height, vaults
         self.finality_depth = finality_depth
+        # kind -> on-chain code id (e.g. {"grid": "123", "rebalance": "456"}).
+        self.code_ids = {kind: str(code_id) for kind, code_id in (code_ids or {}).items()}
 
     def register_vaults(self) -> None:
         self.db.conn.executemany(
@@ -195,3 +198,19 @@ class Indexer:
                 (self.chain_id, height, block_hash, tx_hash, tx_index, event_index, pair, order_id,
                  vault, side, input_amount, output_amount, json.dumps(event, sort_keys=True, separators=(",", ":"))),
             )
+        if self.code_ids:
+            kind_by_code = {code_id: kind for kind, code_id in self.code_ids.items()}
+            for _, _, attrs in parsed:
+                if attrs.get("action") != "instantiate":
+                    continue
+                kind = kind_by_code.get(attrs.get("code_id"))
+                if kind is None:
+                    continue
+                contract = _first(attrs, "_contract_address", "contract_address")
+                if not contract:
+                    continue
+                conn.execute(
+                    "INSERT INTO discovered_vaults(address,kind,discovered_height,enabled) "
+                    "VALUES(?,?,?,1) ON CONFLICT(address) DO NOTHING",
+                    (contract, kind, height),
+                )

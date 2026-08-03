@@ -62,7 +62,12 @@ CREATE TABLE IF NOT EXISTS tx_attempts (
 CREATE TABLE IF NOT EXISTS cursors (
   name TEXT PRIMARY KEY, height INTEGER NOT NULL, value TEXT, updated_at INTEGER NOT NULL
 );
-PRAGMA user_version = 2;
+CREATE TABLE IF NOT EXISTS discovered_vaults (
+  address TEXT PRIMARY KEY, kind TEXT NOT NULL,
+  discovered_height INTEGER NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1, last_error TEXT
+);
+PRAGMA user_version = 3;
 """
 
 
@@ -77,15 +82,21 @@ class Database:
 
     def migrate(self) -> None:
         version = self.conn.execute("PRAGMA user_version").fetchone()[0]
-        if version > 2:
+        if version > 3:
             raise RuntimeError(f"database schema {version} is newer than this operator")
         if version == 0:
             self.conn.executescript(SCHEMA)
-        elif version == 1:
+            return
+        if version <= 2:
             with self.transaction(immediate=True) as conn:
-                conn.execute("ALTER TABLE batches ADD COLUMN failure_count INTEGER NOT NULL DEFAULT 0")
-                conn.execute("ALTER TABLE batches ADD COLUMN next_retry_at INTEGER")
-                conn.execute("PRAGMA user_version = 2")
+                if version == 1:
+                    conn.execute("ALTER TABLE batches ADD COLUMN failure_count INTEGER NOT NULL DEFAULT 0")
+                    conn.execute("ALTER TABLE batches ADD COLUMN next_retry_at INTEGER")
+                conn.execute("""CREATE TABLE IF NOT EXISTS discovered_vaults (
+                  address TEXT PRIMARY KEY, kind TEXT NOT NULL,
+                  discovered_height INTEGER NOT NULL,
+                  enabled INTEGER NOT NULL DEFAULT 1, last_error TEXT)""")
+                conn.execute("PRAGMA user_version = 3")
 
     @contextmanager
     def transaction(self, immediate: bool = False):

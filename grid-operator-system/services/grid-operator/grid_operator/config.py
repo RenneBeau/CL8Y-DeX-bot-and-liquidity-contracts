@@ -38,8 +38,6 @@ class Config:
         missing = [name for name, value in required.items() if not value]
         if missing:
             raise ValueError("missing environment: " + ", ".join(missing))
-        if not vaults:
-            raise ValueError("GRID_VAULTS must contain at least one address")
         return cls(
             db_path=Path(os.environ.get("GRID_DB_PATH", "./grid-operator.sqlite3")),
             rpc_url=required["GRID_RPC_URL"].rstrip("/"),

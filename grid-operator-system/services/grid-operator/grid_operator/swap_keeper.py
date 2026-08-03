@@ -16,11 +16,12 @@ Dry-run is the default. Pass --broadcast to sign and submit.
 """
 
 import argparse
-import hashlib
 import json
 import os
 import time
 
+from .protocol import fingerprint_v1 as plan_fingerprint
+from .protocol import grid_protocol
 from .rpc import RpcError, Terrad
 
 
@@ -95,21 +96,6 @@ class SwapTxTracker:
             os.close(directory_fd)
 
 
-FINGERPRINT_VERSION = 1
-
-
-def plan_fingerprint(plan: dict, message: dict, vault: str, deadline_seconds: int) -> str:
-    identity = {
-        "version": FINGERPRINT_VERSION,
-        "vault": vault.strip().lower(),
-        "deadline_seconds": deadline_seconds,
-        "action": next(iter(message)),
-        "plan": plan,
-    }
-    canonical = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
-    return f"v{FINGERPRINT_VERSION}:" + hashlib.sha256(canonical).hexdigest()
-
-
 def build_rebalance(plan: dict, deadline: int):
     """Translate a GridStatus response into an execute message, or None."""
     if not plan.get("should_rebalance"):
@@ -177,7 +163,14 @@ def poll_pending(args, tracker, terrad, sleep=time.sleep, clock=time.monotonic):
         sleep(args.tx_poll_seconds)
 
 
-def run_once(args, terrad, tracker):
+def keep_vault(args, terrad, tracker, vault, protocol=None):
+    """Run one keeper pass for a single vault under a protocol.
+
+    ``protocol`` defaults to the grid-swap protocol so ``keep-swap`` keeps its
+    exact current behavior.
+    """
+    if protocol is None:
+        protocol = grid_protocol
     if tracker.broadcasting and not tracker.pending_hash:
         print("previous broadcast outcome is unknown; operator intervention required")
         return
@@ -186,24 +179,19 @@ def run_once(args, terrad, tracker):
         return
 
     try:
-        plan = terrad.smart_query(args.vault, {"grid_status": {}})
+        plan = protocol.plan(terrad, vault)
     except RpcError as exc:
-        print(f"grid_status query failed: {exc}")
+        print(f"{protocol.query_label} query failed: {exc}")
         return
 
-    message = build_rebalance(plan, int(time.time()) + args.deadline_seconds)
+    message = protocol.build_message(plan, int(time.time()) + args.deadline_seconds)
     if message is None:
         tracker.suppressed_plan = None
         tracker.save()
-        print(f"no rebalance: should_rebalance={plan.get('should_rebalance')} "
-              f"pending_swap={plan.get('pending_swap')} "
-              f"cell={plan.get('current_cell')} "
-              f"deviation_bps={plan.get('allocation_deviation_bps')}")
+        print(protocol.noop_message(plan))
         return
 
-    fingerprint = plan_fingerprint(
-        plan, message, vault=args.vault, deadline_seconds=args.deadline_seconds
-    )
+    fingerprint = protocol.fingerprint(plan, message, vault, args)
     if tracker.suppressed_plan == fingerprint:
         print("rebalance suppressed after deterministic failure; plan is unchanged")
         return
@@ -214,13 +202,13 @@ def run_once(args, terrad, tracker):
         return
 
     try:
-        terrad.preflight(args.vault, message)
+        terrad.preflight(vault, message)
         tracker.broadcasting = True
-        tracker.pending_vault = args.vault
+        tracker.pending_vault = vault
         tracker.pending_plan = fingerprint
         tracker.pending_since = time.time()
         tracker.save()
-        tx_hash, _response = broadcast(args.vault, message, terrad)
+        tx_hash, _response = broadcast(vault, message, terrad)
     except DeterministicTxError as exc:
         tracker.broadcasting = False
         tracker.pending_vault = None
@@ -243,6 +231,10 @@ def run_once(args, terrad, tracker):
     tracker.save()
     print(f"broadcast tx: {tx_hash}")
     poll_pending(args, tracker, terrad)
+
+
+def run_once(args, terrad, tracker):
+    keep_vault(args, terrad, tracker, args.vault)
 
 
 def parse_args(argv=None):

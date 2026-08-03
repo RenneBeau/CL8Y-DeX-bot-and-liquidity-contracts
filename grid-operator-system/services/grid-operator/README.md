@@ -97,6 +97,46 @@ is never automatically rebroadcast, and a deterministic DeliverTx failure
 suppresses the identical plan until the vault state changes. It self-funds its
 own gas via the configured `GRID_SWAP_FEES`.
 
+## Discovery Keeper (keep-discover)
+
+`grid-operator keep-discover` removes the one-vault-per-process limitation:
+a single process scans the chain for both kinds of CL8Y vault and keeps every
+vault it finds. Each newly deployed vault is therefore kept automatically, with
+no per-vault configuration.
+
+Two kinds are discovered and kept, each matching a configured code id:
+
+| kind       | contract               | code id env              | query / execute                         | auth                      |
+|------------|------------------------|--------------------------|-----------------------------------------|---------------------------|
+| `grid`     | `grid-vault-swap`      | `GRID_SWAP_CODE_ID`      | `{"grid_status": {}}` → `{"rebalance"}` | permissionless            |
+| `rebalance`| `bot-vault`            | `GRID_REBALANCE_CODE_ID` | `{"rebalance_plan": {}}` → `{"rebalance"}` or `{"sync_reference"}` | keeper-restricted (`config.keeper`) |
+
+- Discovery is event-based: the block indexer records any instantiate event
+  whose `code_id` matches a configured kind into the `discovered_vaults` table.
+  No on-chain registry or external vault list is required.
+- The keep loop then behaves like the single-vault keepers for each enabled
+  discovered vault, using the protocol for its kind. A rebalance vault with a
+  pure reference-price drift (no `offer_token`) is handled with
+  `{"sync_reference": {}}` instead of a swap.
+- Signing is serial across all vaults — the single keeper key never signs
+  concurrently. Each vault owns a fail-closed tracker file under
+  `GRID_SWAP_STATE_DIR` (`<vault>.json`), preserving the same no-rebroadcast
+  guarantees as the single-vault keepers.
+- Grid rebalances remain fully permissionless; a grid vault with no running
+  keeper simply waits for any relayer. Rebalance vaults are keeper-restricted,
+  so the discovery keeper key must be the address each `bot-vault` authorizes
+  in its `config.keeper`.
+
+```sh
+GRID_RPC_URL=http://127.0.0.1:26657 \
+GRID_CHAIN_ID=localterra \
+GRID_DEPLOYMENT_HEIGHT=100 \
+GRID_SWAP_CODE_ID=123 \
+GRID_REBALANCE_CODE_ID=456 \
+GRID_DB_PATH=/var/lib/grid-operator/operator.sqlite3 \
+venv/bin/grid-operator keep-discover --broadcast
+```
+
 ## Tests
 
 ```sh
