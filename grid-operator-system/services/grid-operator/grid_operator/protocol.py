@@ -17,11 +17,10 @@ import hashlib
 import json
 
 
-def fingerprint_v1(plan, message, vault, deadline_seconds):
+def fingerprint_v1(plan, message, vault):
     identity = {
         "version": 1,
         "vault": vault.strip().lower(),
-        "deadline_seconds": deadline_seconds,
         "action": next(iter(message)),
         "plan": plan,
     }
@@ -48,13 +47,12 @@ def _canonical_value(value, key=""):
     return value
 
 
-def fingerprint_v2(plan, message, vault, chain_id, config_version, deadline_seconds):
+def fingerprint_v2(plan, message, vault, chain_id, config_version):
     identity = {
         "version": 2,
         "chain_id": chain_id.strip().lower(),
         "vault": vault.strip().lower(),
         "config_version": str(config_version),
-        "deadline_seconds": deadline_seconds,
         "action": next(iter(message)),
         "plan": plan,
     }
@@ -103,7 +101,7 @@ class GridSwapProtocol(VaultProtocol):
         )
 
     def fingerprint(self, plan, message, vault, args):
-        return fingerprint_v1(plan, message, vault, args.deadline_seconds)
+        return fingerprint_v1(plan, message, vault)
 
 
 class RebalanceProtocol(VaultProtocol):
@@ -129,7 +127,6 @@ class RebalanceProtocol(VaultProtocol):
             plan, message, vault,
             getattr(args, "chain_id", ""),
             getattr(args, "config_version", "1"),
-            args.deadline_seconds,
         )
 
 

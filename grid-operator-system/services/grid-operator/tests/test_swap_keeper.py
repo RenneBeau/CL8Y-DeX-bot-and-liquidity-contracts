@@ -100,11 +100,17 @@ class FingerprintTests(unittest.TestCase):
     def test_fingerprint_is_deterministic_and_plan_sensitive(self):
         plan = grid_status()
         message = {"rebalance": {"deadline": 12345}}
-        first = plan_fingerprint(plan, message, "VAULT1", 120)
-        second = plan_fingerprint(plan, message, "vault1", 120)
+        first = plan_fingerprint(plan, message, "VAULT1")
+        second = plan_fingerprint(plan, message, "vault1")
         self.assertEqual(first, second)
-        different = plan_fingerprint(plan, message, "vault2", 120)
+        different = plan_fingerprint(plan, message, "vault2")
         self.assertNotEqual(first, different)
+
+    def test_fingerprint_is_insensitive_to_deadline(self):
+        plan = grid_status()
+        early = plan_fingerprint(plan, {"rebalance": {"deadline": 1}}, "vault1")
+        late = plan_fingerprint(plan, {"rebalance": {"deadline": 999_999}}, "vault1")
+        self.assertEqual(early, late)
 
 
 class RunOnceTests(unittest.TestCase):

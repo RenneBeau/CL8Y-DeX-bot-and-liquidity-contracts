@@ -192,6 +192,17 @@ class RebalanceProtocolTests(unittest.TestCase):
         self.assertNotEqual(first, second)
         self.assertTrue(first.startswith("v2:"))
 
+    def test_fingerprint_is_insensitive_to_deadline(self):
+        plan = {"should_rebalance": True, "offer_token": None, "price_deviation_bps": 700}
+        args = type("Args", (), {"chain_id": "chain", "config_version": "1"})()
+        early = rebalance_protocol.fingerprint(
+            plan, {"rebalance": {"deadline": 1}}, "vault1", args
+        )
+        late = rebalance_protocol.fingerprint(
+            plan, {"rebalance": {"deadline": 999_999}}, "vault1", args
+        )
+        self.assertEqual(early, late)
+
 
 if __name__ == "__main__":
     unittest.main()
