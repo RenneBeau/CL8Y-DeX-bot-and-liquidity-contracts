@@ -2040,6 +2040,91 @@ fn protocol_fee_mints_collector_lp_and_redeems() {
 }
 
 #[test]
+fn fee_rate_at_full_base_charges_entire_collected_value() {
+    // A 100% rate (10_000 bps) must transfer the full credited token-0 value to
+    // the collector as LP, never rounding or partially charging.
+    let (mut h, collector) = new_fee_harness(10_000);
+    let treasury = h.app.api().addr_make("treasury");
+    h.create_bot();
+    h.deposit(1, &h.token_0.clone(), Uint128::new(1_000));
+    h.deposit(1, &h.token_1.clone(), Uint128::new(2_000));
+    let initial_shares = h.bot(1).total_shares;
+
+    let orders = h.orders(1);
+    let bid = orders
+        .iter()
+        .find(|order| order.side == LimitOrderSide::Bid)
+        .unwrap();
+    h.fill(bid.order_id, Uint128::new(1_000), Uint128::new(500));
+    h.reconcile(1, vec![bid.order_id]);
+
+    // 500 credited token_0; at 100% the entire value is credited to the collector.
+    let bot = h.bot(1);
+    let credited_0 = Uint128::new(500);
+    let expected_fee_shares = credited_0.multiply_ratio(10_000u16, 10_000u16);
+    assert_eq!(bot.total_shares, initial_shares + expected_fee_shares);
+    let collector_shares: cl8y_grid_vault::msg::ShareResponse = h
+        .app
+        .wrap()
+        .query_wasm_smart(
+            &h.vault,
+            &VaultQueryMsg::Shares {
+                bot_id: 1,
+                address: collector.to_string(),
+            },
+        )
+        .unwrap();
+    assert_eq!(collector_shares.shares, expected_fee_shares);
+
+    h.cancel_all(1);
+    h.app
+        .execute_contract(
+            collector.clone(),
+            h.vault.clone(),
+            &VaultExecuteMsg::RedeemShares {
+                bot_id: 1,
+                recipient: Some(treasury.to_string()),
+            },
+            &[],
+        )
+        .unwrap();
+    let treasury_0 = h.balance_of(&h.token_0, &treasury);
+    let treasury_1 = h.balance_of(&h.token_1, &treasury);
+    assert!(treasury_0 > Uint128::zero() || treasury_1 > Uint128::zero());
+}
+
+#[test]
+fn zero_rate_or_zero_value_charges_no_fee() {
+    // Zero and tiny rates must not dilute holders on reconcile.
+    for fee_bps in [0u16, 1u16] {
+        let (mut h, collector) = new_fee_harness(fee_bps);
+        h.create_bot();
+        h.deposit(1, &h.token_0.clone(), Uint128::new(1_000));
+        h.deposit(1, &h.token_1.clone(), Uint128::new(2_000));
+        let initial_shares = h.bot(1).total_shares;
+        let orders = h.orders(1);
+        let bid = orders
+            .iter()
+            .find(|order| order.side == LimitOrderSide::Bid)
+            .unwrap();
+        h.fill(bid.order_id, Uint128::new(1_000), Uint128::new(500));
+        h.reconcile(1, vec![bid.order_id]);
+
+        // A 1 bps rate on small value rounds to zero; no shares minted.
+        assert_eq!(h.bot(1).total_shares, initial_shares);
+        let collector_shares: cl8y_grid_vault::msg::ShareResponse = h
+            .app
+            .wrap()
+            .query_wasm_smart(
+                &h.vault,
+                &VaultQueryMsg::Shares { bot_id: 1, address: collector.to_string() },
+            )
+            .unwrap();
+        assert_eq!(collector_shares.shares, Uint128::zero());
+    }
+}
+
+#[test]
 fn redeem_shares_is_collector_only() {
     let (mut h, collector) = new_fee_harness(200);
 

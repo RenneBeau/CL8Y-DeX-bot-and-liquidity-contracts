@@ -22,10 +22,10 @@ working-tree corrections:
 
 | Command | Result | Scope |
 |---|---|---|
-| `cargo +1.81.0 test --locked --workspace --all-targets` in `limit-grid-system` | PASS: 48 tests (4 manager, 29 vault unit, 15 integration) | Grid limit-order contracts (reference) |
-| `cargo +1.81.0 test --locked --workspace --all-targets` in `market-grid-system` | PASS: 19 tests (10 vault unit, 9 swap integration incl. fee mint + redeem) | Grid swap contract (deployable) |
-| `cargo +1.81.0 test --locked --workspace --all-targets` in `rebalancer-system` | PASS: 33 Rust tests (11 liquidity, 18 vault incl. fee accrual/redeem, 4 proxy) | Rebalancer contracts/packages |
-| `cargo +1.81.0 test --locked --workspace --all-targets` in `fee-system` | PASS: 14 tests (10 fee-registry, 4 fee-collector) | Protocol fee-system (new workspace) |
+| `cargo +1.81.0 test --locked --workspace --all-targets` in `limit-grid-system` | PASS: 50 tests (4 manager, 29 vault unit, 17 integration incl. fee rate boundaries) | Grid limit-order contracts (reference) |
+| `cargo +1.81.0 test --locked --workspace --all-targets` in `market-grid-system` | PASS: 20 tests (10 vault unit, 10 swap integration incl. fee mint + redeem + non-blocking) | Grid swap contract (deployable) |
+| `cargo +1.81.0 test --locked --workspace --all-targets` in `rebalancer-system` | PASS: 35 Rust tests (11 liquidity, 20 vault incl. fee charge math/redeem, 4 proxy) | Rebalancer contracts/packages |
+| `cargo +1.81.0 test --locked --workspace --all-targets` in `fee-system` | PASS: 22 tests (10 fee-registry, 8 fee-ladder audit, 4 fee-collector) | Protocol fee-system (new workspace) |
 | `python3 -m unittest -v test_keeper.py` | PASS: 50 tests | Rebalancer keeper |
 | `python3 -m unittest discover -s grid-operator-system/services/grid-operator/tests -p 'test_*.py'` | PASS: 24 tests | Grid operator |
 | `make local-e2e` | PASS: 10 rebalancer and 10 grid scenarios | Signed LocalTerra, uncommitted tree |
@@ -121,10 +121,54 @@ live `EffectiveFee` tier. Gate: since the market-grid grid-vault is charged in
 the swap settle reply after the executed trade, the treasury claim is a genuine
 LP/fee-shares dilution of the vault rather than a fixed withdrawal fee.
 
-Unit and Clippy gates for `market-grid-system` (10 unit + 9 integration, incl.
-`rebalance_mints_fee_lp_to_collector_and_can_redistribute_to_treasury`) and
-`rebalancer-system` (18 bot-vault tests incl. fee admin gating, collector-only
-redeem, and no-fee-without-config) are clean after these additions.
+Unit and Clippy gates for `market-grid-system` (10 unit + 10 integration, incl.
+`rebalance_mints_fee_lp_to_collector_and_can_redistribute_to_treasury` and
+`rebalance_is_non_blocking_when_fee_registry_is_unreachable`) and
+`rebalancer-system` (20 bot-vault tests incl. fee admin gating, collector-only
+redeem, no-fee-without-config, charge math, and non-blocking registry skip) are
+clean after these additions.
+
+## Fee-System Audit Pass (2026-08-05)
+
+A fresh-eyes audit of the whole protocol-fee path (fee-registry + fee-collector +
+grid-vault + grid-vault-swap + bot-vault). New evidence:
+
+- `fee-registry` `tests/audit_tiers.rs` (8 tests): every holder tier (1..9) at its
+  exact CL8Y boundary, one raw wei below each boundary, a 31-point balance matrix
+  cross-checked against an independent reference resolution (never over-charged),
+  base-fee edge cases (0, 1, 180, 1800, 5000, 10000 bps), a governance-added 100%
+  discount tier driving the fee to zero, reserved-tier add/update rejection, and
+  ladder-version bumping.
+- `limit-grid` `grid_vault_integration.rs` (2 new tests): a 100% (10_000 bps) rate
+  credits the entire collected value to the collector; 0/1 bps rates round to zero
+  and never dilute holders.
+- `market-grid` `grid_vault_swap_integration.rs` (1 new test): re-pointing the
+  vault at a valid-but-empty registry address makes rebalance complete with a
+  `fee_skipped` attribute and no fee minted (non-blocking proof at vault level).
+- `bot-vault` `contract.rs` unit tests (2 new): `charge_fee` applies the
+  exact `value * fee_bps / 10_000` math and accrues to `FEE_SHARES`/`TOTAL_FEE_SHARES`;
+  a registry query failure skips non-blockingly and a zero rate skips.
+
+Audit conclusions (all gates green: `cargo test --workspace --all-targets` +
+`cargo clippy --workspace --all-targets -- -D warnings` in all four workspaces):
+
+1. Pricing is monotone and never under-fees: `EffectiveFee` is live-first,
+   cached-fallback-on-failure, otherwise the full base fee; `resolve_discount`
+   picks the highest met non-governance tier; `effective_fee` is an exact
+   floor `base * (10000 - discount) / 10000`.
+2. Governance tiers 0/255 are reserved and can never auto-apply to a holder
+   balance (verified by add + update tests). Note: there is currently no
+   mechanism to *assign* a specific address to tier 0/255, so "governance-assigned
+   market makers" are not yet reachable through `EffectiveFee`; this is
+   conservative (they simply keep paying the base fee) and is future work.
+3. Vault charge math (`value * fee_bps / 10_000`, capped at 10_000 bps, rounded
+   down) is identical across grid-vault / grid-vault-swap / bot-vault and is
+   exercised at 0, 1, 200/1800/10000 bps. Rounding always favors the protocol
+   slightly (floor of the discounted rate).
+4. Non-blocking invariant holds at every layer: unreachable registry → `fee_skipped`
+   attribute, trade commits, no fee minted, no revert.
+5. Redeem is strictly collector-only, refuses zero/insufficient shares, and burns
+   the claim after paying a pro-rata slice of the vault balances.
 
 ## Existing CI Evidence
 

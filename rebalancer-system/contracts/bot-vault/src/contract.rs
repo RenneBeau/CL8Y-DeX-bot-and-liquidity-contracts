@@ -1999,4 +1999,122 @@ mod tests {
             ChargeFee::None
         ));
     }
+
+    #[test]
+    fn charge_fee_applies_math_and_accrues_to_collector() {
+        let mut deps = mock_dependencies();
+        TOTAL_FEE_SHARES.save(&mut deps.storage, &Uint128::zero()).unwrap();
+        // The EffectiveFee query returns 1_800 bps from the mock registry.
+        deps.querier.update_wasm(|query| match query {
+            WasmQuery::Smart { msg, .. } => {
+                let query: FeeRegistryQueryMsg = from_json(msg).unwrap();
+                match query {
+                    FeeRegistryQueryMsg::EffectiveFee { .. } => SystemResult::Ok(
+                        ContractResult::Ok(to_json_binary(&FeeRegistryEffectiveFeeResponse {
+                            fee_bps: 1_000,
+                            discount_bps: 0,
+                            tier_id: None,
+                            holding: None,
+                            source: "live".to_string(),
+                        })
+                        .unwrap()),
+                    ),
+                }
+            }
+            _ => panic!("unexpected query"),
+        });
+        let config = Config {
+            admin: Addr::unchecked("admin"),
+            keeper: Addr::unchecked("keeper"),
+            liquidity_contract: None,
+            proxy: Addr::unchecked("proxy"),
+            pair: Addr::unchecked("pair"),
+            asset_tokens: [Addr::unchecked("t0"), Addr::unchecked("t1")],
+            decimals: 6,
+            twap_window_seconds: 300,
+            rebalance_threshold_bps: 500,
+            allocation_tolerance_bps: 100,
+            max_trade_bps: 2_500,
+            max_execution_deviation_bps: 500,
+            quote_slippage_bps: 200,
+            max_spot_twap_deviation_bps: 500,
+            max_trade_pool_bps: 1_000,
+            max_spread: Decimal::percent(5),
+            reference_price: Decimal::one(),
+            fee_registry: Some(Addr::unchecked("registry")),
+            fee_collector: Some(Addr::unchecked("collector")),
+        };
+        // 1_000 bps of 1_000 value = 100 shares.
+        let charge = charge_fee(&mut deps.as_mut(), &config, &mock_env(), Uint128::new(1_000))
+            .unwrap();
+        match charge {
+            ChargeFee::Applied(fee) => {
+                assert_eq!(fee.fee_bps, 1_000);
+                assert_eq!(fee.shares, Uint128::new(100));
+                assert_eq!(fee.tier, None);
+                assert_eq!(fee.source, "live");
+            }
+            _other => panic!("expected Applied fee, got a different ChargeFee variant"),        }
+        let collector = Addr::unchecked("collector");
+        assert_eq!(FEE_SHARES.load(&deps.storage, &collector).unwrap(), Uint128::new(100));
+        assert_eq!(TOTAL_FEE_SHARES.load(&deps.storage).unwrap(), Uint128::new(100));
+    }
+
+    #[test]
+    fn charge_fee_skips_when_registry_unreachable_or_zero_rate() {
+        // Registry query error => non-blocking skip (no fee, no revert).
+        let mut deps = mock_dependencies();
+        deps.querier.update_wasm(|query| match query {
+            WasmQuery::Smart { .. } => SystemResult::Err(cosmwasm_std::SystemError::InvalidRequest {
+                request: Default::default(),
+                error: "boom".to_string(),
+            }),
+            _ => panic!("unexpected query"),
+        });
+        let config = Config {
+            admin: Addr::unchecked("admin"),
+            keeper: Addr::unchecked("keeper"),
+            liquidity_contract: None,
+            proxy: Addr::unchecked("proxy"),
+            pair: Addr::unchecked("pair"),
+            asset_tokens: [Addr::unchecked("t0"), Addr::unchecked("t1")],
+            decimals: 6,
+            twap_window_seconds: 300,
+            rebalance_threshold_bps: 500,
+            allocation_tolerance_bps: 100,
+            max_trade_bps: 2_500,
+            max_execution_deviation_bps: 500,
+            quote_slippage_bps: 200,
+            max_spot_twap_deviation_bps: 500,
+            max_trade_pool_bps: 1_000,
+            max_spread: Decimal::percent(5),
+            reference_price: Decimal::one(),
+            fee_registry: Some(Addr::unchecked("registry")),
+            fee_collector: Some(Addr::unchecked("collector")),
+        };
+        assert!(matches!(
+            charge_fee(&mut deps.as_mut(), &config, &mock_env(), Uint128::new(1_000)).unwrap(),
+            ChargeFee::Unavailable(_)
+        ));
+
+        // Zero rate returned by the registry => skip without accruing.
+        let mut deps = mock_dependencies();
+        deps.querier.update_wasm(|query| match query {
+            WasmQuery::Smart { .. } => SystemResult::Ok(ContractResult::Ok(
+                to_json_binary(&FeeRegistryEffectiveFeeResponse {
+                    fee_bps: 0,
+                    discount_bps: 0,
+                    tier_id: None,
+                    holding: None,
+                    source: "lowest".to_string(),
+                })
+                .unwrap(),
+            )),
+            _ => panic!("unexpected query"),
+        });
+        assert!(matches!(
+            charge_fee(&mut deps.as_mut(), &config, &mock_env(), Uint128::new(5_000)).unwrap(),
+            ChargeFee::None
+        ));
+    }
 }

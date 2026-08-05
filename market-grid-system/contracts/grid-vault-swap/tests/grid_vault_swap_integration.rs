@@ -853,3 +853,61 @@ fn rebalance_mints_fee_lp_to_collector_and_can_redistribute_to_treasury() {
     assert!(balance_of(&h.app, &token1, &treasury) > t1_before);
     assert_eq!(shares_of(&h, &collector), Uint128::zero());
 }
+
+#[test]
+fn rebalance_is_non_blocking_when_fee_registry_is_unreachable() {
+    let mut h = setup_with_fee(true);
+    let (token0, token1) = (h.token0.clone(), h.token1.clone());
+    deposit(&mut h, &token0, Uint128::new(60_000_000_000));
+    deposit(&mut h, &token1, Uint128::new(60_000_000_000));
+    set_twap(&mut h, "1.75");
+
+    // Re-point the vault at a valid address that hosts no fee-registry contract.
+    let dead_registry = h.app.api().addr_make("dead-fee-registry");
+    h.app
+        .execute_contract(
+            h.admin.clone(),
+            h.vault.clone(),
+            &VaultExecuteMsg::UpdateConfig {
+                grid_count: None,
+                lower_price: None,
+                upper_price: None,
+                allocation_tolerance_bps: None,
+                max_trade_bps: None,
+                max_execution_deviation_bps: None,
+                quote_slippage_bps: None,
+                max_spot_twap_deviation_bps: None,
+                max_trade_pool_bps: None,
+                max_spread: None,
+                fee_registry: Some(dead_registry.to_string()),
+                fee_collector: None,
+            },
+            &[],
+        )
+        .unwrap();
+
+    // The rebalance must complete; the fee is skipped via `fee_skipped`.
+    let response = h
+        .app
+        .execute_contract(
+            h.depositor.clone(),
+            h.vault.clone(),
+            &VaultExecuteMsg::Rebalance { deadline: u64::MAX },
+            &[],
+        )
+        .unwrap();
+    let fee_skipped = response
+        .events
+        .iter()
+        .flat_map(|e| &e.attributes)
+        .filter(|a| a.key == "fee_skipped")
+        .count();
+    assert_eq!(fee_skipped, 1, "rebalance must skip the fee, not revert");
+    let fee_shares = response
+        .events
+        .iter()
+        .flat_map(|e| &e.attributes)
+        .filter(|a| a.key == "fee_shares")
+        .count();
+    assert_eq!(fee_shares, 0, "no fee may be minted against an unreachable registry");
+}
