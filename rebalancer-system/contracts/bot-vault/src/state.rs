@@ -1,6 +1,6 @@
 use cosmwasm_schema::cw_serde;
 use cosmwasm_std::{Addr, Decimal, Uint128};
-use cw_storage_plus::Item;
+use cw_storage_plus::{Item, Map};
 
 #[cw_serde]
 pub struct Config {
@@ -21,6 +21,8 @@ pub struct Config {
     pub max_trade_pool_bps: u16,
     pub max_spread: Decimal,
     pub reference_price: Decimal,
+    pub fee_registry: Option<Addr>,
+    pub fee_collector: Option<Addr>,
 }
 
 #[cw_serde]
@@ -38,3 +40,5 @@ pub const PENDING_REBALANCE: Item<PendingRebalance> = Item::new("pending_rebalan
 pub const PENDING_ADMIN: Item<Addr> = Item::new("pending_admin");
 pub const LIQUIDITY_CODE_ID: Item<u64> = Item::new("liquidity_code_id");
 pub const PAUSED: Item<bool> = Item::new("paused");
+pub const FEE_SHARES: Map<&Addr, Uint128> = Map::new("fee_shares");
+pub const TOTAL_FEE_SHARES: Item<Uint128> = Item::new("total_fee_shares");

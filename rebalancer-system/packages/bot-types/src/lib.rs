@@ -66,6 +66,14 @@ pub enum VaultExecuteMsg {
         max_spread: Option<Decimal>,
         twap_window_seconds: Option<u32>,
     },
+    UpdateFeeConfig {
+        fee_registry: Option<String>,
+        fee_collector: Option<String>,
+    },
+    RedeemShares {
+        bot_id: u64,
+        recipient: String,
+    },
     TransferAdmin {
         admin: String,
     },
@@ -83,6 +91,7 @@ pub enum VaultQueryMsg {
     Price {},
     RebalanceStatus {},
     RebalancePlan {},
+    Shares { bot_id: u64, address: String },
 }
 
 #[cw_serde]
@@ -106,11 +115,18 @@ pub struct VaultConfigResponse {
     pub max_spot_twap_deviation_bps: u16,
     pub max_trade_pool_bps: u16,
     pub max_spread: Decimal,
+    pub fee_registry: Option<String>,
+    pub fee_collector: Option<String>,
 }
 
 #[cw_serde]
 pub struct VaultBalancesResponse {
     pub balances: [Uint128; 2],
+}
+
+#[cw_serde]
+pub struct VaultFeeSharesResponse {
+    pub shares: Uint128,
 }
 
 #[cw_serde]

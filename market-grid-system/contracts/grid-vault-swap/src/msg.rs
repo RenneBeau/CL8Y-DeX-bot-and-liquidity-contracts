@@ -17,6 +17,8 @@ pub struct InstantiateMsg {
     pub max_spot_twap_deviation_bps: Option<u16>,
     pub max_trade_pool_bps: Option<u16>,
     pub max_spread: Option<Decimal>,
+    pub fee_registry: Option<String>,
+    pub fee_collector: Option<String>,
 }
 
 #[cw_serde]
@@ -40,6 +42,8 @@ pub enum ExecuteMsg {
         max_spot_twap_deviation_bps: Option<u16>,
         max_trade_pool_bps: Option<u16>,
         max_spread: Option<Decimal>,
+        fee_registry: Option<String>,
+        fee_collector: Option<String>,
     },
     TransferAdmin {
         admin: String,
@@ -47,6 +51,10 @@ pub enum ExecuteMsg {
     AcceptAdmin {},
     Pause {},
     Resume {},
+    RedeemShares {
+        bot_id: u64,
+        recipient: Option<String>,
+    },
 }
 
 #[cw_serde]
@@ -163,7 +171,7 @@ pub enum QueryMsg {
     #[returns(GridStatusResponse)]
     GridStatus {},
     #[returns(SharesResponse)]
-    Shares { address: String },
+    Shares { bot_id: u64, address: String },
     #[returns(VaultResponse)]
     Vault {},
 }
@@ -189,6 +197,8 @@ pub struct ConfigResponse {
     pub reference_price: Decimal,
     pub last_cell: u32,
     pub paused: bool,
+    pub fee_registry: Option<String>,
+    pub fee_collector: Option<String>,
 }
 
 #[cw_serde]

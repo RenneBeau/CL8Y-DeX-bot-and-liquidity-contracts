@@ -245,6 +245,42 @@ fn mock_vault_code() -> Box<dyn Contract<Empty, Empty>> {
     Box::new(contract)
 }
 
+#[cw_serde]
+enum MockFeeRegistryQueryMsg {
+    EffectiveFee { trader: String },
+}
+
+#[cw_serde]
+struct MockFeeRegistryEffectiveFeeResponse {
+    fee_bps: u16,
+    discount_bps: u16,
+    tier_id: Option<u8>,
+    holding: Option<Uint128>,
+    source: String,
+}
+
+fn mock_fee_registry_code() -> Box<dyn Contract<Empty, Empty>> {
+    let contract = ContractWrapper::new(
+        |_deps, _env, _info, _msg: Empty| -> StdResult<cosmwasm_std::Response> {
+            Ok(cosmwasm_std::Response::new())
+        },
+        |_deps, _env, _info, _msg: Empty| -> StdResult<cosmwasm_std::Response> {
+            Ok(cosmwasm_std::Response::new())
+        },
+        |_deps, _env, _msg: MockFeeRegistryQueryMsg| -> StdResult<Binary> {
+            let response = MockFeeRegistryEffectiveFeeResponse {
+                fee_bps: 1_800,
+                discount_bps: 0,
+                tier_id: None,
+                holding: Some(Uint128::new(1)),
+                source: "live".to_string(),
+            };
+            to_json_binary(&response)
+        },
+    );
+    Box::new(contract)
+}
+
 // ---------------------------------------------------------------------------
 // Harness
 // ---------------------------------------------------------------------------
@@ -261,9 +297,11 @@ struct Harness {
     depositor: Addr,
     admin: Addr,
     pair: Addr,
+    collector: Addr,
+    treasury: Addr,
 }
 
-fn setup() -> Harness {
+fn setup_with_fee(enable_fees: bool) -> Harness {
     let mut app = App::default();
     let admin = app.api().addr_make(ADMIN);
     let depositor = app.api().addr_make(DEPOSITOR);
@@ -271,6 +309,25 @@ fn setup() -> Harness {
     let cw20_code = app.store_code(mock_cw20_code());
     let pair_code = app.store_code(mock_pair_code());
     let vault_code = app.store_code(mock_vault_code());
+
+    let registry = if enable_fees {
+        let registry_code = app.store_code(mock_fee_registry_code());
+        let registry = app
+            .instantiate_contract(
+                registry_code,
+                admin.clone(),
+                &Empty {},
+                &[],
+                "fee_registry",
+                None,
+            )
+            .unwrap();
+        Some(registry)
+    } else {
+        None
+    };
+    let collector = app.api().addr_make("collector");
+    let treasury = app.api().addr_make("treasury");
 
     let token0 = app
         .instantiate_contract(
@@ -373,6 +430,12 @@ fn setup() -> Harness {
                 max_spot_twap_deviation_bps: Some(500),
                 max_trade_pool_bps: Some(1_000),
                 max_spread: Some(Decimal::percent(5)),
+                fee_registry: registry.as_ref().map(ToString::to_string),
+                fee_collector: if enable_fees {
+                    Some(collector.to_string())
+                } else {
+                    None
+                },
             },
             &[],
             "vault",
@@ -388,7 +451,13 @@ fn setup() -> Harness {
         depositor,
         admin,
         pair,
+        collector,
+        treasury,
     }
+}
+
+fn setup() -> Harness {
+    setup_with_fee(false)
 }
 
 fn deposit(h: &mut Harness, token: &Addr, amount: Uint128) {
@@ -427,6 +496,7 @@ fn shares_of(h: &Harness, address: &Addr) -> Uint128 {
         .query_wasm_smart(
             &h.vault,
             &QueryMsg::Shares {
+                bot_id: 0,
                 address: address.to_string(),
             },
         )
@@ -657,6 +727,8 @@ fn non_admin_cannot_update_config() {
                 max_spot_twap_deviation_bps: None,
                 max_trade_pool_bps: None,
                 max_spread: None,
+                fee_registry: None,
+                fee_collector: None,
             },
             &[],
         )
@@ -666,4 +738,118 @@ fn non_admin_cannot_update_config() {
         "{}",
         err
     );
+}
+
+#[test]
+fn update_config_can_clear_fee_settings() {
+    let mut h = setup_with_fee(true);
+    h.app
+        .execute_contract(
+            h.admin.clone(),
+            h.vault.clone(),
+            &VaultExecuteMsg::UpdateConfig {
+                grid_count: None,
+                lower_price: None,
+                upper_price: None,
+                allocation_tolerance_bps: None,
+                max_trade_bps: None,
+                max_execution_deviation_bps: None,
+                quote_slippage_bps: None,
+                max_spot_twap_deviation_bps: None,
+                max_trade_pool_bps: None,
+                max_spread: None,
+                fee_registry: Some(String::new()),
+                fee_collector: Some(String::new()),
+            },
+            &[],
+        )
+        .unwrap();
+    let response: cl8y_grid_vault_swap::msg::ConfigResponse = h
+        .app
+        .wrap()
+        .query_wasm_smart(&h.vault, &QueryMsg::Config {})
+        .unwrap();
+    assert!(response.fee_registry.is_none());
+    assert!(response.fee_collector.is_none());
+}
+
+#[test]
+fn rebalance_mints_fee_lp_to_collector_and_can_redistribute_to_treasury() {
+    let mut h = setup_with_fee(true);
+    let (token0, token1) = (h.token0.clone(), h.token1.clone());
+    let collector = h.collector.clone();
+    let treasury = h.treasury.clone();
+    deposit(&mut h, &token0, Uint128::new(60_000_000_000));
+    deposit(&mut h, &token1, Uint128::new(60_000_000_000));
+    set_twap(&mut h, "1.75");
+
+    let response = h
+        .app
+        .execute_contract(
+            h.depositor.clone(),
+            h.vault.clone(),
+            &VaultExecuteMsg::Rebalance { deadline: u64::MAX },
+            &[],
+        )
+        .unwrap();
+    let fee_shares = response
+        .events
+        .iter()
+        .flat_map(|e| &e.attributes)
+        .find(|a| a.key == "fee_shares")
+        .expect("fee_shares event")
+        .value
+        .clone();
+    assert!(
+        fee_shares.parse::<u128>().unwrap() > 0,
+        "fee must be > 0 per executed swap"
+    );
+    assert!(response.events.iter().any(|e| e
+        .attributes
+        .iter()
+        .any(|a| a.key == "fee_bps" && a.value == "1800")));
+
+    // The collector now holds the accrued fee as vault LP.
+    let collector_shares = shares_of(&h, &collector);
+    assert!(
+        collector_shares > Uint128::zero(),
+        "collector shares minted"
+    );
+
+    // A non-collector cannot redeem the fee.
+    let err = h
+        .app
+        .execute_contract(
+            treasury.clone(),
+            h.vault.clone(),
+            &VaultExecuteMsg::RedeemShares {
+                bot_id: 0,
+                recipient: Some(treasury.to_string()),
+            },
+            &[],
+        )
+        .unwrap_err();
+    assert!(
+        err.root_cause().to_string().contains("unauthorized"),
+        "{}",
+        err
+    );
+
+    // The collector redeems the fee LP to the treasury.
+    let t0_before = balance_of(&h.app, &token0, &treasury);
+    let t1_before = balance_of(&h.app, &token1, &treasury);
+    h.app
+        .execute_contract(
+            collector.clone(),
+            h.vault.clone(),
+            &VaultExecuteMsg::RedeemShares {
+                bot_id: 0,
+                recipient: Some(treasury.to_string()),
+            },
+            &[],
+        )
+        .unwrap();
+    assert!(balance_of(&h.app, &token0, &treasury) > t0_before);
+    assert!(balance_of(&h.app, &token1, &treasury) > t1_before);
+    assert_eq!(shares_of(&h, &collector), Uint128::zero());
 }

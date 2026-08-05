@@ -13,6 +13,7 @@
 /test-area/.cache/
 /test-area/.env
 /test-area/.fee-e2e-artifacts
+/test-area/.fee-e2e-multi-artifacts
 __pycache__/
 *.pyc
 /rebalancer-system/examples/keeper/config.env

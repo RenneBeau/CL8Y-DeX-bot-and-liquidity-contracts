@@ -23,8 +23,8 @@ working-tree corrections:
 | Command | Result | Scope |
 |---|---|---|
 | `cargo +1.81.0 test --locked --workspace --all-targets` in `limit-grid-system` | PASS: 48 tests (4 manager, 29 vault unit, 15 integration) | Grid limit-order contracts (reference) |
-| `cargo +1.81.0 test --locked --workspace --all-targets` in `market-grid-system` | PASS: 17 tests (10 vault unit, 7 swap integration) | Grid swap contract (deployable) |
-| `cargo +1.81.0 test --locked --workspace --all-targets` in `rebalancer-system` | PASS: 30 Rust tests (11 liquidity, 15 vault, 4 proxy) | Rebalancer contracts/packages |
+| `cargo +1.81.0 test --locked --workspace --all-targets` in `market-grid-system` | PASS: 19 tests (10 vault unit, 9 swap integration incl. fee mint + redeem) | Grid swap contract (deployable) |
+| `cargo +1.81.0 test --locked --workspace --all-targets` in `rebalancer-system` | PASS: 33 Rust tests (11 liquidity, 18 vault incl. fee accrual/redeem, 4 proxy) | Rebalancer contracts/packages |
 | `cargo +1.81.0 test --locked --workspace --all-targets` in `fee-system` | PASS: 14 tests (10 fee-registry, 4 fee-collector) | Protocol fee-system (new workspace) |
 | `python3 -m unittest -v test_keeper.py` | PASS: 50 tests | Rebalancer keeper |
 | `python3 -m unittest discover -s grid-operator-system/services/grid-operator/tests -p 'test_*.py'` | PASS: 24 tests | Grid operator |
@@ -81,6 +81,50 @@ exposed and fixed a real schema bug (the vault's local
 `FeeRegistryEffectiveFeeResponse` was missing the `holding` field, so
 `cw_serde` rejected the registry response and the fee was silently skipped).
 Unit and Clippy gates are clean for both workspaces after that fix.
+
+## On-Chain Per-Execution Fee E2E: market-grid + rebalancer (LocalTerra, 2026-08-05)
+
+Second on-chain proof on the same signed chain (chain ID `localterra`, height
+~535000). `test-area/fee-e2e-multi.sh` reuses the already-live fee-registry /
+fee-collector / dummy treasury from the run above (same base fee 180 bps), and
+deploys a fresh market-grid vault (`grid-vault-swap`) plus a fresh swap-proxy +
+bot-vault (`rebalancer-system`). It proves that **market-grid and rebalancer
+charge a protocol fee against the executed swap value** (never a percentage of
+total holdings), are **non-blocking** (fee emitted in the settle reply after the
+swap commits; a registry failure only skips the fee), and route the accrued
+claim through the same fee-collector → dummy treasury path.
+
+Latest run artifacts (`test-area/.fee-e2e-multi-artifacts`):
+
+- code ids: market-grid vault 64, bot-vault 65, swap-proxy 66 (raw release wasms)
+- market-grid vault: `terra1zlrmhd23gwr2mhw6ncw9cmkggyht5mlph62s953wjvpc3jvg59cq2a20kp`
+- swap-proxy: `terra1lqum4f08cf9cs7jc7482cu4wr96u2tmleqd4lvkhsg2m9vrsc2yqdq6sxt`
+- bot-vault: `terra17gw2jwn4fp0c0gkwp2u6nh4rzyz6qjxsnmu4lky2c9a3x97qpzjsygvegs`
+
+Scenarios verified on chain:
+
+| Scenario | Result |
+|---|---|
+| Market-grid: single-token deposit (EMBER only, no CL8Y) | `grid_status` allocation_deviation=10000, `should_rebalance=true` |
+| Market-grid rebalance (keeperless, executed swap EMBER→CORAL) | reply: `fee_bps=180`, `fee_source=live`, `fee_shares=34609105` |
+| Market-grid collector LP minted to fee-collector | `shares{bot_id:0,address:collector}=34609105` (== fee_shares, LP dilution path) |
+| Market-grid `collect` → dummy treasury | EMBER +27591791, CORAL +5392338; collector shares → 0 |
+| Rebalancer: single-token funding (EMBER only) | `rebalance_status` allocation_deviation=10000, `should_rebalance=true` |
+| Rebalancer keeper `Rebalance` through swap-proxy | reply: `fee_bps=180`, `fee_source=live`, `fee_shares=81626937` |
+| Rebalancer `FEE_SHARES` accrued to collector | `shares{bot_id:0,address:collector}=81626937` (== fee_shares) |
+| Rebalancer `collect` → dummy treasury (pro-rata of both balances) | EMBER +42722804, CORAL +31363604; collector fee-shares → 0 |
+
+The zero-CL8Y market-grid vault and bot-vault are both charged the full 180 bps
+`live` base fee. Note the source string is `live` here (raw registry string)
+versus `Live` in the limit-grid vault (its enum `Display`); both denote the same
+live `EffectiveFee` tier. Gate: since the market-grid grid-vault is charged in
+the swap settle reply after the executed trade, the treasury claim is a genuine
+LP/fee-shares dilution of the vault rather than a fixed withdrawal fee.
+
+Unit and Clippy gates for `market-grid-system` (10 unit + 9 integration, incl.
+`rebalance_mints_fee_lp_to_collector_and_can_redistribute_to_treasury`) and
+`rebalancer-system` (18 bot-vault tests incl. fee admin gating, collector-only
+redeem, and no-fee-without-config) are clean after these additions.
 
 ## Existing CI Evidence
 

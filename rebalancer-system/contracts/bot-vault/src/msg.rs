@@ -17,6 +17,8 @@ pub struct InstantiateMsg {
     pub max_spot_twap_deviation_bps: Option<u16>,
     pub max_trade_pool_bps: Option<u16>,
     pub max_spread: Option<Decimal>,
+    pub fee_registry: Option<String>,
+    pub fee_collector: Option<String>,
 }
 
 #[cw_serde]

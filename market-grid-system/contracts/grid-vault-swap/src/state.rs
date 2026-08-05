@@ -22,6 +22,8 @@ pub struct Config {
     pub max_spread: Decimal,
     pub reference_price: Decimal,
     pub last_cell: u32,
+    pub fee_registry: Option<Addr>,
+    pub fee_collector: Option<Addr>,
 }
 
 #[cw_serde]

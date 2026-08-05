@@ -1,7 +1,7 @@
 use bot_types::{
     AuthorizedTransfer, LiquidityAuthorizationResponse, RebalancePlanResponse,
     RebalanceStatusResponse, SwapParams, SwapProxyHookMsg, VaultBalancesResponse,
-    VaultConfigResponse, VaultExecuteMsg, VaultPriceResponse, VaultQueryMsg,
+    VaultConfigResponse, VaultExecuteMsg, VaultFeeSharesResponse, VaultPriceResponse, VaultQueryMsg,
 };
 use cl8y_dex::{
     Asset, AssetInfo, HybridSimulationResponse, HybridSwapParams, ObserveResponse, PairInfo,
@@ -18,7 +18,8 @@ use cw20::{BalanceResponse, Cw20ExecuteMsg, Cw20QueryMsg, TokenInfoResponse};
 use crate::error::ContractError;
 use crate::msg::{InstantiateMsg, MigrateMsg};
 use crate::state::{
-    Config, PendingRebalance, CONFIG, LIQUIDITY_CODE_ID, PAUSED, PENDING_ADMIN, PENDING_REBALANCE,
+    Config, PendingRebalance, CONFIG, FEE_SHARES, LIQUIDITY_CODE_ID, PAUSED, PENDING_ADMIN,
+    PENDING_REBALANCE, TOTAL_FEE_SHARES,
 };
 
 const CONTRACT_NAME: &str = "crates.io:cl8y-bot-vault";
@@ -113,6 +114,16 @@ pub fn instantiate(
         .unwrap_or(DEFAULT_MAX_SPOT_TWAP_DEVIATION_BPS);
     let max_trade_pool_bps = msg.max_trade_pool_bps.unwrap_or(DEFAULT_MAX_TRADE_POOL_BPS);
     let max_spread = msg.max_spread.unwrap_or(DEFAULT_MAX_SPREAD);
+    let fee_registry = msg
+        .fee_registry
+        .as_deref()
+        .map(|address| deps.api.addr_validate(address))
+        .transpose()?;
+    let fee_collector = msg
+        .fee_collector
+        .as_deref()
+        .map(|address| deps.api.addr_validate(address))
+        .transpose()?;
     validate_risk_controls(
         max_trade_bps,
         max_execution_deviation_bps,
@@ -139,11 +150,14 @@ pub fn instantiate(
         max_trade_pool_bps,
         max_spread,
         reference_price: Decimal::one(),
+        fee_registry,
+        fee_collector,
     };
     config.reference_price = query_price(deps.as_ref(), &env, &config)?;
     CONFIG.save(deps.storage, &config)?;
     LIQUIDITY_CODE_ID.save(deps.storage, &msg.liquidity_code_id)?;
     PAUSED.save(deps.storage, &false)?;
+    TOTAL_FEE_SHARES.save(deps.storage, &Uint128::zero())?;
     Ok(Response::new()
         .add_attribute("action", "instantiate")
         .add_attribute("vault", env.contract.address))
@@ -226,6 +240,13 @@ pub fn execute(
             max_spread,
             twap_window_seconds,
         ),
+        VaultExecuteMsg::UpdateFeeConfig {
+            fee_registry,
+            fee_collector,
+        } => execute_update_fee_config(deps, info, fee_registry, fee_collector),
+        VaultExecuteMsg::RedeemShares { bot_id, recipient } => {
+            execute_redeem_fee_shares(deps, env, info, bot_id, recipient)
+        }
         VaultExecuteMsg::TransferAdmin { admin } => execute_transfer_admin(deps, info, admin),
         VaultExecuteMsg::AcceptAdmin {} => execute_accept_admin(deps, info),
         VaultExecuteMsg::CancelAdminTransfer {} => execute_cancel_admin_transfer(deps, info),
@@ -450,6 +471,7 @@ pub fn reply(deps: DepsMut, env: Env, reply: Reply) -> Result<Response, Contract
     let pending = PENDING_REBALANCE
         .may_load(deps.storage)?
         .ok_or(ContractError::MissingPendingRebalance)?;
+    let mut deps = deps;
     let mut config = CONFIG.load(deps.storage)?;
     let settled = balances(deps.as_ref(), &env.contract.address, &config)?;
     validate_settlement(&pending, settled)?;
@@ -464,10 +486,34 @@ pub fn reply(deps: DepsMut, env: Env, reply: Reply) -> Result<Response, Contract
     }
     CONFIG.save(deps.storage, &config)?;
     PENDING_REBALANCE.remove(deps.storage);
-    Ok(Response::new()
+    let offer = pending.offer_index as usize;
+    let ask = 1 - offer;
+    let proceeds = settled[ask]
+        .checked_sub(pending.balances[ask])
+        .map_err(StdError::overflow)?;
+    let value_in_token0 = if ask == 0 {
+        proceeds
+    } else {
+        checked_ratio(proceeds, Decimal::one().atomics(), pending.captured_twap.atomics())?
+    };
+    let mut response = Response::new()
         .add_attribute("action", "complete_rebalance")
         .add_attribute("allocation_deviation_bps", current.to_string())
-        .add_attribute("reference_updated", within_tolerance.to_string()))
+        .add_attribute("reference_updated", within_tolerance.to_string());
+    match charge_fee(&mut deps, &config, &env, value_in_token0)? {
+        ChargeFee::None => {}
+        ChargeFee::Applied(fee) => {
+            response = response
+                .add_attribute("fee_bps", fee.fee_bps.to_string())
+                .add_attribute("fee_tier", fee.tier.map(|t| t.to_string()).unwrap_or_default())
+                .add_attribute("fee_source", fee.source)
+                .add_attribute("fee_shares", fee.shares.to_string());
+        }
+        ChargeFee::Unavailable(reason) => {
+            response = response.add_attribute("fee_skipped", reason);
+        }
+    }
+    Ok(response)
 }
 
 fn validate_settlement(
@@ -666,6 +712,8 @@ pub fn query(deps: Deps, env: Env, msg: VaultQueryMsg) -> StdResult<Binary> {
             max_spot_twap_deviation_bps: config.max_spot_twap_deviation_bps,
             max_trade_pool_bps: config.max_trade_pool_bps,
             max_spread: config.max_spread,
+            fee_registry: config.fee_registry.as_ref().map(ToString::to_string),
+            fee_collector: config.fee_collector.as_ref().map(ToString::to_string),
         }),
         VaultQueryMsg::Balances {} => to_json_binary(&VaultBalancesResponse {
             balances: balances(deps, &env.contract.address, &config)?,
@@ -677,6 +725,13 @@ pub fn query(deps: Deps, env: Env, msg: VaultQueryMsg) -> StdResult<Binary> {
             to_json_binary(&rebalance_status(deps, &env, &config)?)
         }
         VaultQueryMsg::RebalancePlan {} => to_json_binary(&rebalance_plan(deps, &env, &config)?),
+        VaultQueryMsg::Shares { bot_id: _, address } => {
+            let address = deps.api.addr_validate(&address)?;
+            let shares = FEE_SHARES
+                .may_load(deps.storage, &address)?
+                .unwrap_or_default();
+            to_json_binary(&VaultFeeSharesResponse { shares })
+        }
     }
 }
 
@@ -1076,6 +1131,181 @@ fn validate_rebalance_outcome(
     Ok(current <= tolerance)
 }
 
+#[cw_serde]
+enum FeeRegistryQueryMsg {
+    EffectiveFee { trader: String },
+}
+
+#[cw_serde]
+struct FeeRegistryEffectiveFeeResponse {
+    fee_bps: u16,
+    discount_bps: u16,
+    tier_id: Option<u8>,
+    /// The registry always returns the holding it used; if the vault fails to
+    /// mirror it here, `cw_serde` rejects the response and the fee is skipped.
+    holding: Option<Uint128>,
+    source: String,
+}
+
+struct FeeApplied {
+    fee_bps: u16,
+    shares: Uint128,
+    tier: Option<u8>,
+    source: String,
+}
+
+enum ChargeFee {
+    None,
+    Applied(FeeApplied),
+    /// Fee-registry read failed. The rebalance still completes; the fee is
+    /// skipped rather than reverting the swap.
+    Unavailable(String),
+}
+
+/// Protocol fee per executed rebalance swap (token-0 value based): resolve the
+/// vault's effective fee bps from its CL18Y holding, and accrue that fraction of
+/// the executed swap's token-0 value to the configured fee-collector as a value
+/// claim. No fee is charged when the vault has no fee configured or the rate is
+/// zero. A transient fee-registry failure is non-blocking.
+fn charge_fee(
+    deps: &mut DepsMut,
+    config: &Config,
+    env: &Env,
+    value_in_token0: Uint128,
+) -> Result<ChargeFee, ContractError> {
+    let (Some(registry), Some(collector)) = (&config.fee_registry, &config.fee_collector) else {
+        return Ok(ChargeFee::None);
+    };
+    if value_in_token0.is_zero() {
+        return Ok(ChargeFee::None);
+    }
+    let fee: FeeRegistryEffectiveFeeResponse = match deps.querier.query_wasm_smart(
+        registry,
+        &FeeRegistryQueryMsg::EffectiveFee {
+            trader: env.contract.address.to_string(),
+        },
+    ) {
+        Ok(fee) => fee,
+        Err(err) => return Ok(ChargeFee::Unavailable(err.to_string())),
+    };
+    // Defensive bound: cap the effective fee at 100% (10_000 bps).
+    let fee_bps = fee.fee_bps.min(10_000);
+    if fee_bps == 0 {
+        return Ok(ChargeFee::None);
+    }
+    let shares = value_in_token0.multiply_ratio(fee_bps, 10_000u16);
+    if shares.is_zero() {
+        return Ok(ChargeFee::None);
+    }
+    let previous = FEE_SHARES
+        .may_load(deps.storage, collector)?
+        .unwrap_or_default();
+    FEE_SHARES.save(
+        deps.storage,
+        collector,
+        &previous.checked_add(shares).map_err(StdError::overflow)?,
+    )?;
+    TOTAL_FEE_SHARES.update(deps.storage, |total| -> StdResult<Uint128> {
+        total.checked_add(shares).map_err(StdError::overflow)
+    })?;
+    Ok(ChargeFee::Applied(FeeApplied {
+        fee_bps,
+        shares,
+        tier: fee.tier_id,
+        source: fee.source,
+    }))
+}
+
+/// The fee-collector redeems its accrued value claim (the protocol fee) to
+/// `recipient`: it takes the collector's token-0-normalized claim as a fraction
+/// of the vault's current token-0 value and pays that fraction of each token
+/// balance. Only the configured fee-collector may call this.
+fn execute_redeem_fee_shares(
+    deps: DepsMut,
+    env: Env,
+    info: MessageInfo,
+    _bot_id: u64,
+    recipient: String,
+) -> Result<Response, ContractError> {
+    let config = CONFIG.load(deps.storage)?;
+    let collector = config
+        .fee_collector
+        .as_ref()
+        .ok_or(ContractError::Unauthorized)?;
+    if info.sender != *collector {
+        return Err(ContractError::Unauthorized);
+    }
+    let collector = collector.clone();
+    let shares = FEE_SHARES
+        .may_load(deps.storage, &collector)?
+        .unwrap_or_default();
+    if shares.is_zero() {
+        return Err(ContractError::ZeroAmount);
+    }
+    let total = TOTAL_FEE_SHARES.load(deps.storage)?;
+    if shares > total {
+        return Err(ContractError::ArithmeticOutOfRange);
+    }
+    let recipient = deps.api.addr_validate(&recipient)?;
+    let balances = balances(deps.as_ref(), &env.contract.address, &config)?;
+    let price = query_price(deps.as_ref(), &env, &config)?;
+    let token1_value_t0 = checked_ratio(balances[1], Decimal::one().atomics(), price.atomics())?;
+    let total_value_t0 = balances[0]
+        .checked_add(token1_value_t0)
+        .map_err(StdError::overflow)?;
+    if total_value_t0.is_zero() {
+        return Ok(Response::new().add_attribute("action", "redeem_fee_shares"));
+    }
+    let amounts = [
+        balances[0].multiply_ratio(shares, total_value_t0),
+        balances[1].multiply_ratio(shares, total_value_t0),
+    ];
+    let mut response = Response::new()
+        .add_attribute("action", "redeem_fee_shares")
+        .add_attribute("redeemed_shares", shares);
+    for (index, amount) in amounts.into_iter().enumerate() {
+        if !amount.is_zero() {
+            response = response.add_message(WasmMsg::Execute {
+                contract_addr: config.asset_tokens[index].to_string(),
+                msg: to_json_binary(&Cw20ExecuteMsg::Transfer {
+                    recipient: recipient.to_string(),
+                    amount,
+                })?,
+                funds: vec![],
+            });
+        }
+    }
+    FEE_SHARES.save(deps.storage, &collector, &Uint128::zero())?;
+    TOTAL_FEE_SHARES.update(deps.storage, |remaining| -> StdResult<Uint128> {
+        remaining.checked_sub(shares).map_err(StdError::overflow)
+    })?;
+    Ok(response)
+}
+
+fn execute_update_fee_config(
+    deps: DepsMut,
+    info: MessageInfo,
+    fee_registry: Option<String>,
+    fee_collector: Option<String>,
+) -> Result<Response, ContractError> {
+    let mut config = CONFIG.load(deps.storage)?;
+    assert_admin(&config, &info.sender)?;
+    if let Some(value) = fee_registry {
+        config.fee_registry = match value.as_str() {
+            "" => None,
+            address => Some(deps.api.addr_validate(address)?),
+        };
+    }
+    if let Some(value) = fee_collector {
+        config.fee_collector = match value.as_str() {
+            "" => None,
+            address => Some(deps.api.addr_validate(address)?),
+        };
+    }
+    CONFIG.save(deps.storage, &config)?;
+    Ok(Response::new().add_attribute("action", "update_fee_config"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1131,6 +1361,8 @@ mod tests {
                     max_trade_pool_bps: 1_000,
                     max_spread: Decimal::percent(5),
                     reference_price: Decimal::one(),
+                    fee_registry: None,
+                    fee_collector: None,
                 },
             )
             .unwrap();
@@ -1217,6 +1449,8 @@ mod tests {
                     max_trade_pool_bps: 1_000,
                     max_spread: Decimal::percent(5),
                     reference_price: Decimal::one(),
+                    fee_registry: None,
+                    fee_collector: None,
                 },
             )
             .unwrap();
@@ -1402,6 +1636,8 @@ mod tests {
             max_trade_pool_bps: 1_000,
             max_spread: Decimal::percent(5),
             reference_price: Decimal::one(),
+            fee_registry: None,
+            fee_collector: None,
         };
         CONFIG.save(deps.as_mut().storage, &config).unwrap();
         LIQUIDITY_CODE_ID.save(deps.as_mut().storage, &7).unwrap();
@@ -1503,6 +1739,8 @@ mod tests {
             max_trade_pool_bps: 1_000,
             max_spread: Decimal::percent(5),
             reference_price: Decimal::one(),
+            fee_registry: None,
+            fee_collector: None,
         };
         CONFIG.save(deps.as_mut().storage, &config).unwrap();
         set_contract_version(deps.as_mut().storage, CONTRACT_NAME, "0.0.1").unwrap();
@@ -1609,5 +1847,156 @@ mod tests {
             validate_settlement(&pending, [Uint128::new(151), Uint128::new(148)]),
             Err(ContractError::AllocationDidNotImprove)
         );
+    }
+
+    #[test]
+    fn fee_config_update_is_admin_gated_and_can_clear() {
+        let mut deps = mock_dependencies();
+        CONFIG
+            .save(
+                &mut deps.storage,
+                &Config {
+                    admin: Addr::unchecked("admin"),
+                    keeper: Addr::unchecked("keeper"),
+                    liquidity_contract: None,
+                    proxy: Addr::unchecked("proxy"),
+                    pair: Addr::unchecked("pair"),
+                    asset_tokens: [Addr::unchecked("t0"), Addr::unchecked("t1")],
+                    decimals: 6,
+                    twap_window_seconds: 300,
+                    rebalance_threshold_bps: 500,
+                    allocation_tolerance_bps: 100,
+                    max_trade_bps: 2_500,
+                    max_execution_deviation_bps: 500,
+                    quote_slippage_bps: 200,
+                    max_spot_twap_deviation_bps: 500,
+                    max_trade_pool_bps: 1_000,
+                    max_spread: Decimal::percent(5),
+                    reference_price: Decimal::one(),
+                    fee_registry: None,
+                    fee_collector: None,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            execute_update_fee_config(
+                deps.as_mut(),
+                mock_info("attacker", &[]),
+                Some("registry".to_string()),
+                Some("collector".to_string()),
+            )
+            .unwrap_err(),
+            ContractError::Unauthorized
+        );
+
+        execute_update_fee_config(
+            deps.as_mut(),
+            mock_info("admin", &[]),
+            Some("registry".to_string()),
+            Some("collector".to_string()),
+        )
+        .unwrap();
+        let config = CONFIG.load(&deps.storage).unwrap();
+        assert_eq!(config.fee_registry, Some(Addr::unchecked("registry")));
+        assert_eq!(config.fee_collector, Some(Addr::unchecked("collector")));
+
+        execute_update_fee_config(
+            deps.as_mut(),
+            mock_info("admin", &[]),
+            Some(String::new()),
+            Some(String::new()),
+        )
+        .unwrap();
+        let config = CONFIG.load(&deps.storage).unwrap();
+        assert_eq!(config.fee_registry, None);
+        assert_eq!(config.fee_collector, None);
+    }
+
+    #[test]
+    fn redeem_fee_shares_is_collector_only() {
+        let mut deps = mock_dependencies();
+        CONFIG
+            .save(
+                &mut deps.storage,
+                &Config {
+                    admin: Addr::unchecked("admin"),
+                    keeper: Addr::unchecked("keeper"),
+                    liquidity_contract: None,
+                    proxy: Addr::unchecked("proxy"),
+                    pair: Addr::unchecked("pair"),
+                    asset_tokens: [Addr::unchecked("t0"), Addr::unchecked("t1")],
+                    decimals: 6,
+                    twap_window_seconds: 300,
+                    rebalance_threshold_bps: 500,
+                    allocation_tolerance_bps: 100,
+                    max_trade_bps: 2_500,
+                    max_execution_deviation_bps: 500,
+                    quote_slippage_bps: 200,
+                    max_spot_twap_deviation_bps: 500,
+                    max_trade_pool_bps: 1_000,
+                    max_spread: Decimal::percent(5),
+                    reference_price: Decimal::one(),
+                    fee_registry: Some(Addr::unchecked("registry")),
+                    fee_collector: Some(Addr::unchecked("collector")),
+                },
+            )
+            .unwrap();
+
+        // A non-collector cannot redeem the accrued fee.
+        assert_eq!(
+            execute_redeem_fee_shares(
+                deps.as_mut(),
+                mock_env(),
+                mock_info("attacker", &[]),
+                0,
+                "treasury".to_string(),
+            )
+            .unwrap_err(),
+            ContractError::Unauthorized
+        );
+
+        // With no accrued shares the collector gets a ZeroAmount error.
+        assert_eq!(
+            execute_redeem_fee_shares(
+                deps.as_mut(),
+                mock_env(),
+                mock_info("collector", &[]),
+                0,
+                "treasury".to_string(),
+            )
+            .unwrap_err(),
+            ContractError::ZeroAmount
+        );
+    }
+
+    #[test]
+    fn charge_fee_skips_when_not_configured_or_zero_value() {
+        let mut deps = mock_dependencies();
+        let config = Config {
+            admin: Addr::unchecked("admin"),
+            keeper: Addr::unchecked("keeper"),
+            liquidity_contract: None,
+            proxy: Addr::unchecked("proxy"),
+            pair: Addr::unchecked("pair"),
+            asset_tokens: [Addr::unchecked("t0"), Addr::unchecked("t1")],
+            decimals: 6,
+            twap_window_seconds: 300,
+            rebalance_threshold_bps: 500,
+            allocation_tolerance_bps: 100,
+            max_trade_bps: 2_500,
+            max_execution_deviation_bps: 500,
+            quote_slippage_bps: 200,
+            max_spot_twap_deviation_bps: 500,
+            max_trade_pool_bps: 1_000,
+            max_spread: Decimal::percent(5),
+            reference_price: Decimal::one(),
+            fee_registry: None,
+            fee_collector: None,
+        };
+        assert!(matches!(
+            charge_fee(&mut deps.as_mut(), &config, &mock_env(), Uint128::new(1_000)).unwrap(),
+            ChargeFee::None
+        ));
     }
 }

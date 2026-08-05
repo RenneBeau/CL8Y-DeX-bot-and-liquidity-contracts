@@ -1,3 +1,4 @@
+use cosmwasm_schema::cw_serde;
 use cosmwasm_std::{
     entry_point, to_json_binary, Addr, Binary, Decimal, Deps, DepsMut, Env, MessageInfo, Reply,
     Response, StdError, StdResult, SubMsg, Uint128, Uint256, WasmMsg,
@@ -89,6 +90,16 @@ pub fn instantiate(
         .unwrap_or(DEFAULT_MAX_SPOT_TWAP_DEVIATION_BPS);
     let max_trade_pool_bps = msg.max_trade_pool_bps.unwrap_or(DEFAULT_MAX_TRADE_POOL_BPS);
     let max_spread = msg.max_spread.unwrap_or(DEFAULT_MAX_SPREAD);
+    let fee_registry = msg
+        .fee_registry
+        .as_deref()
+        .map(|address| deps.api.addr_validate(address))
+        .transpose()?;
+    let fee_collector = msg
+        .fee_collector
+        .as_deref()
+        .map(|address| deps.api.addr_validate(address))
+        .transpose()?;
     validate_risk_controls(
         max_trade_bps,
         max_execution_deviation_bps,
@@ -123,6 +134,8 @@ pub fn instantiate(
         max_spread,
         reference_price: initial_price,
         last_cell: initial_cell,
+        fee_registry,
+        fee_collector,
     };
     PAUSED.save(deps.storage, &false)?;
     TOTAL_SHARES.save(deps.storage, &Uint128::zero())?;
@@ -157,6 +170,8 @@ pub fn execute(
             max_spot_twap_deviation_bps,
             max_trade_pool_bps,
             max_spread,
+            fee_registry,
+            fee_collector,
         } => execute_update_config(
             deps,
             env,
@@ -171,11 +186,16 @@ pub fn execute(
             max_spot_twap_deviation_bps,
             max_trade_pool_bps,
             max_spread,
+            fee_registry,
+            fee_collector,
         ),
         ExecuteMsg::TransferAdmin { admin } => execute_transfer_admin(deps, info, admin),
         ExecuteMsg::AcceptAdmin {} => execute_accept_admin(deps, info),
         ExecuteMsg::Pause {} => execute_pause(deps, info),
         ExecuteMsg::Resume {} => execute_resume(deps, info),
+        ExecuteMsg::RedeemShares { bot_id, recipient } => {
+            execute_redeem_shares(deps, env, info, bot_id, recipient)
+        }
     }
 }
 
@@ -361,6 +381,7 @@ pub fn reply(deps: DepsMut, env: Env, reply: Reply) -> Result<Response, Contract
     let pending = PENDING_SWAP
         .may_load(deps.storage)?
         .ok_or(ContractError::MissingPendingRebalance)?;
+    let mut deps = deps;
     let mut config = CONFIG.load(deps.storage)?;
     let settled = balances(deps.as_ref(), &env.contract.address, &config)?;
     validate_settlement(&pending, settled)?;
@@ -381,10 +402,34 @@ pub fn reply(deps: DepsMut, env: Env, reply: Reply) -> Result<Response, Contract
     }
     CONFIG.save(deps.storage, &config)?;
     PENDING_SWAP.remove(deps.storage);
-    Ok(Response::new()
+    let offer = pending.offer_index as usize;
+    let ask = 1 - offer;
+    let proceeds = settled[ask]
+        .checked_sub(pending.balances[ask])
+        .map_err(StdError::overflow)?;
+    let value_in_token0 = if ask == 0 {
+        proceeds
+    } else {
+        checked_ratio(proceeds, Decimal::one().atomics(), pending.captured_twap.atomics())?
+    };
+    let mut response = Response::new()
         .add_attribute("action", "complete_rebalance")
         .add_attribute("allocation_deviation_bps", current.to_string())
-        .add_attribute("cell_updated", within_tolerance.to_string()))
+        .add_attribute("cell_updated", within_tolerance.to_string());
+    match charge_fee(&mut deps, &config, &env, value_in_token0)? {
+        ChargeFee::None => {}
+        ChargeFee::Applied(fee) => {
+            response = response
+                .add_attribute("fee_bps", fee.fee_bps.to_string())
+                .add_attribute("fee_tier", fee.tier.map(|t| t.to_string()).unwrap_or_default())
+                .add_attribute("fee_source", fee.source)
+                .add_attribute("fee_shares", fee.shares.to_string());
+        }
+        ChargeFee::Unavailable(reason) => {
+            response = response.add_attribute("fee_skipped", reason);
+        }
+    }
+    Ok(response)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -402,12 +447,26 @@ fn execute_update_config(
     max_spot_twap_deviation_bps: Option<u16>,
     max_trade_pool_bps: Option<u16>,
     max_spread: Option<Decimal>,
+    fee_registry: Option<String>,
+    fee_collector: Option<String>,
 ) -> Result<Response, ContractError> {
     assert_no_funds(&info)?;
     let mut config = CONFIG.load(deps.storage)?;
     assert_admin(&config, &info.sender)?;
     if PENDING_SWAP.may_load(deps.storage)?.is_some() {
         return Err(ContractError::RebalancePending);
+    }
+    if let Some(value) = fee_registry {
+        config.fee_registry = match value.as_str() {
+            "" => None,
+            address => Some(deps.api.addr_validate(address)?),
+        };
+    }
+    if let Some(value) = fee_collector {
+        config.fee_collector = match value.as_str() {
+            "" => None,
+            address => Some(deps.api.addr_validate(address)?),
+        };
     }
     if let Some(value) = grid_count {
         if value == 0 || value > MAX_GRID_COUNT {
@@ -505,12 +564,167 @@ fn execute_resume(deps: DepsMut, info: MessageInfo) -> Result<Response, Contract
     Ok(Response::new().add_attribute("action", "resume"))
 }
 
+#[cw_serde]
+enum FeeRegistryQueryMsg {
+    EffectiveFee { trader: String },
+}
+
+#[cw_serde]
+struct FeeRegistryEffectiveFeeResponse {
+    fee_bps: u16,
+    discount_bps: u16,
+    tier_id: Option<u8>,
+    /// The registry always returns the holding it used; if the vault fails to
+    /// mirror it here, `cw_serde` rejects the response and the fee is skipped.
+    holding: Option<Uint128>,
+    source: String,
+}
+
+struct FeeApplied {
+    fee_bps: u16,
+    shares: Uint128,
+    tier: Option<u8>,
+    source: String,
+}
+
+enum ChargeFee {
+    None,
+    Applied(FeeApplied),
+    /// Fee-registry read failed. The rebalance still completes; the fee is
+    /// skipped rather than reverting the swap.
+    Unavailable(String),
+}
+
+/// Protocol fee per executed rebalance swap (token-0 value based): resolve the
+/// vault's effective fee bps from its CL18Y holding, mint that fraction of the
+/// executed proceeds as LP to the configured fee-collector (diluting existing
+/// holders), and mint the same fraction of whatever the swap actually executed.
+/// No fee is charged when the vault has no fee configured or the rate is zero.
+/// A transient fee-registry failure is non-blocking.
+fn charge_fee(
+    deps: &mut DepsMut,
+    config: &Config,
+    env: &Env,
+    value_in_token0: Uint128,
+) -> Result<ChargeFee, ContractError> {
+    let (Some(registry), Some(collector)) = (&config.fee_registry, &config.fee_collector) else {
+        return Ok(ChargeFee::None);
+    };
+    if value_in_token0.is_zero() {
+        return Ok(ChargeFee::None);
+    }
+    let fee: FeeRegistryEffectiveFeeResponse = match deps.querier.query_wasm_smart(
+        registry,
+        &FeeRegistryQueryMsg::EffectiveFee {
+            trader: env.contract.address.to_string(),
+        },
+    ) {
+        Ok(fee) => fee,
+        Err(err) => return Ok(ChargeFee::Unavailable(err.to_string())),
+    };
+    // Defensive bound: cap the effective fee at 100% (10_000 bps).
+    let fee_bps = fee.fee_bps.min(10_000);
+    if fee_bps == 0 {
+        return Ok(ChargeFee::None);
+    }
+    let shares = value_in_token0.multiply_ratio(fee_bps, 10_000u16);
+    if shares.is_zero() {
+        return Ok(ChargeFee::None);
+    }
+    let previous = SHARES
+        .may_load(deps.storage, collector.as_str())?
+        .unwrap_or_default();
+    SHARES.save(
+        deps.storage,
+        collector.as_str(),
+        &previous
+            .checked_add(shares)
+            .map_err(StdError::overflow)?,
+    )?;
+    TOTAL_SHARES.update(deps.storage, |total| -> StdResult<Uint128> {
+        total.checked_add(shares).map_err(StdError::overflow)
+    })?;
+    Ok(ChargeFee::Applied(FeeApplied {
+        fee_bps,
+        shares,
+        tier: fee.tier_id,
+        source: fee.source,
+    }))
+}
+
+/// The fee-collector redeems its accrued LP shares (the protocol fee) to `recipient`
+/// by claiming a pro-rata slice of the vault's current balances. Only the configured
+/// fee-collector may call this.
+fn execute_redeem_shares(
+    deps: DepsMut,
+    env: Env,
+    info: MessageInfo,
+    _bot_id: u64,
+    recipient: Option<String>,
+) -> Result<Response, ContractError> {
+    assert_no_funds(&info)?;
+    assert_not_paused(deps.as_ref())?;
+    let config = CONFIG.load(deps.storage)?;
+    let collector = config
+        .fee_collector
+        .as_ref()
+        .ok_or(ContractError::Unauthorized)?;
+    if info.sender != *collector {
+        return Err(ContractError::Unauthorized);
+    }
+    let collector_addr = collector.clone();
+    let shares = SHARES
+        .may_load(deps.storage, collector_addr.as_str())?
+        .unwrap_or_default();
+    if shares.is_zero() {
+        return Err(ContractError::ZeroAmount);
+    }
+    let total_shares = TOTAL_SHARES.load(deps.storage)?;
+    if shares > total_shares {
+        return Err(ContractError::InsufficientShares);
+    }
+    if PENDING_SWAP.may_load(deps.storage)?.is_some() {
+        return Err(ContractError::RebalancePending);
+    }
+    let balances = balances(deps.as_ref(), &env.contract.address, &config)?;
+    let recipient = deps
+        .api
+        .addr_validate(recipient.as_deref().unwrap_or(collector_addr.as_str()))?;
+    let amounts = [
+        balances[0].multiply_ratio(shares, total_shares),
+        balances[1].multiply_ratio(shares, total_shares),
+    ];
+    let mut response = Response::new()
+        .add_attribute("action", "redeem_shares")
+        .add_attribute("burned_shares", shares);
+    for (index, amount) in amounts.into_iter().enumerate() {
+        if !amount.is_zero() {
+            response = response.add_message(WasmMsg::Execute {
+                contract_addr: config.asset_tokens[index].to_string(),
+                msg: to_json_binary(&Cw20ExecuteMsg::Transfer {
+                    recipient: recipient.to_string(),
+                    amount,
+                })?,
+                funds: vec![],
+            });
+        }
+    }
+    TOTAL_SHARES.save(
+        deps.storage,
+        &total_shares
+            .checked_sub(shares)
+            .map_err(StdError::overflow)?,
+    )?;
+    SHARES.save(deps.storage, collector_addr.as_str(), &Uint128::zero())?;
+    Ok(response)
+}
+
 #[entry_point]
 pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
     match msg {
         QueryMsg::Config {} => to_json_binary(&query_config(deps)?),
         QueryMsg::GridStatus {} => to_json_binary(&grid_status(deps, &env)?),
-        QueryMsg::Shares { address } => {
+        QueryMsg::Shares { bot_id: _, address } => {
             let address = deps.api.addr_validate(&address)?;
             let shares = SHARES
                 .may_load(deps.storage, address.as_str())?
@@ -546,6 +760,8 @@ fn query_config(deps: Deps) -> StdResult<crate::msg::ConfigResponse> {
         reference_price: config.reference_price,
         last_cell: config.last_cell,
         paused: PAUSED.may_load(deps.storage)?.unwrap_or(true),
+        fee_registry: config.fee_registry.as_ref().map(ToString::to_string),
+        fee_collector: config.fee_collector.as_ref().map(ToString::to_string),
     })
 }
 
@@ -1113,6 +1329,8 @@ mod tests {
             max_spread: Decimal::percent(5),
             reference_price: Decimal::from_atomics(150u128, 0).unwrap(),
             last_cell: 2,
+            fee_registry: None,
+            fee_collector: None,
         };
         assert_eq!(
             grid_cell(
@@ -1334,6 +1552,8 @@ mod tests {
             max_spread: Decimal::percent(5),
             reference_price: Decimal::from_atomics(150u128, 0).unwrap(),
             last_cell: 2,
+            fee_registry: None,
+            fee_collector: None,
         }
     }
 }
