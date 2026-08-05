@@ -48,6 +48,9 @@ struct FeeRegistryEffectiveFeeResponse {
     fee_bps: u16,
     discount_bps: u16,
     tier_id: Option<u8>,
+    /// The registry returns the holding it used; `cw_serde` rejects unknown
+    /// fields, so it must be mirrored here.
+    holding: Option<Uint128>,
     source: FeeRegistryTierSource,
 }
 

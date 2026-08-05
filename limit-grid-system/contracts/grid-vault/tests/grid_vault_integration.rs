@@ -86,6 +86,9 @@ pub struct MockFeeRegistryResponse {
     pub fee_bps: u16,
     pub discount_bps: u16,
     pub tier_id: Option<u8>,
+    /// The real registry always returns the holding it used; mirror it so the
+    /// vault's unknown-field handling is exercised like on-chain.
+    pub holding: Option<Uint128>,
     pub source: String,
 }
 
@@ -108,6 +111,7 @@ fn mock_fee_registry_code() -> Box<dyn Contract<Empty, Empty>> {
                         fee_bps,
                         discount_bps: 0,
                         tier_id: None,
+                        holding: Some(Uint128::new(1)),
                         source: "live".to_string(),
                     },
                 ),

@@ -25,7 +25,7 @@ working-tree corrections:
 | `cargo +1.81.0 test --locked --workspace --all-targets` in `limit-grid-system` | PASS: 48 tests (4 manager, 29 vault unit, 15 integration) | Grid limit-order contracts (reference) |
 | `cargo +1.81.0 test --locked --workspace --all-targets` in `market-grid-system` | PASS: 17 tests (10 vault unit, 7 swap integration) | Grid swap contract (deployable) |
 | `cargo +1.81.0 test --locked --workspace --all-targets` in `rebalancer-system` | PASS: 30 Rust tests (11 liquidity, 15 vault, 4 proxy) | Rebalancer contracts/packages |
-| `cargo +1.81.0 test --locked --workspace --all-targets` in `fee-system` | PASS: 10 tests (fee-registry) | Protocol fee-registry (new workspace) |
+| `cargo +1.81.0 test --locked --workspace --all-targets` in `fee-system` | PASS: 14 tests (10 fee-registry, 4 fee-collector) | Protocol fee-system (new workspace) |
 | `python3 -m unittest -v test_keeper.py` | PASS: 50 tests | Rebalancer keeper |
 | `python3 -m unittest discover -s grid-operator-system/services/grid-operator/tests -p 'test_*.py'` | PASS: 24 tests | Grid operator |
 | `make local-e2e` | PASS: 10 rebalancer and 10 grid scenarios | Signed LocalTerra, uncommitted tree |
@@ -44,6 +44,43 @@ image pinned by `Makefile`. Optimized hashes from that run were:
 - `cl8y_swap_proxy.wasm`: `732f146ed78269b50d2f013855a9d734b0ea355d19b351d90b3b39a5f4409fc2`
 - `cl8y_grid_manager.wasm`: `a276a70b25151567e0b3c4cb8df72e0a0607d9680a50bafceee0ffcf65c2b533`
 - `cl8y_grid_vault.wasm`: `c6687ddbb2eaf56f909a54757639c6f4670b61f18d66c357443e3cb2294bc0f4`
+
+## On-Chain Fee E2E (LocalTerra, 2026-08-05)
+
+Full end-to-end proof of the protocol fee path on a real signed chain (chain ID
+`localterra`, network node at height ~529500). `test-area/fee-e2e-test.sh`
+deploys a dummy CL8Y fee token (cw20-base, code id 1, 200 CL8Y minted to a
+holder that maps to tier 5), a dummy treasury, the fee-registry, the
+fee-collector, and two grid-vaults wired to both, then runs two bot lifecycles
+through the deployed exchange pair.
+
+Latest run artifacts (`test-area/.fee-e2e-artifacts`):
+
+- code ids: registry 46, collector 47, grid-vault 48 (raw `wasm32-unknown-unknown` release builds)
+- dummy CL8Y: `terra18hu00pwvd8kq0cgzk03l2nmp8rr0h5gp6tektz6qazwfapqsl4cqgcvy9h`
+- dummy treasury: `terra16xm26vq25wnvrr7aptun3jlk0ghgm82gh5w4gp`
+- fee-registry: `terra1mpys68uwajmcjn6lwctan39v5sf4yk3agxp8pns02kqfnym3racsunwpqy`
+- fee-collector: `terra1f9tjculwafs6qvrfaxxc9n3z29feel2vwelhj5h4xrvmtzvug76q67ykx2`
+- grid-vault 1 (tier-5 owner): `terra126qhftp95nceprux24252tn7klxpmfvpv9sftqsjmjqylrp34fwq7ndhem`
+- grid-vault 2 (zero-CL8Y owner): `terra1qpyj2nc9kzrp09k69l8wlrvzdarc42zs9q824mjuldvleu3dsqds3936nm`
+
+Scenarios verified on chain:
+
+| Scenario | Result |
+|---|---|
+| Tier-5 holder `EffectiveFee` | 90 bps, `Live` |
+| Zero-CL8Y address `EffectiveFee` | 180 bps (full base fee, never under-fee) |
+| Lifecycle 1: deposit, allocate, 6 fills + reconciles | fee_shares minted each reconcile: 24527, 12263, 6131, 3065, 1532, 766; collector LP grows 24527 → 48284 |
+| Fee source tracked | `fee_tier=5`, `fee_bps=90`, `fee_source=Live` on every fill |
+| Wind-down: cancel + keeper `Collect` | treasury receives EMBER +11659 and CORAL +34479; collector redeems all LP, vault shares 0 |
+| Lifecycle 2 (second bot, zero-CL8Y owner) | first reconcile: `changed=1`, `fee_bps=180`, `fee_source=Live`, `fee_shares=9810` |
+
+The invariant "a zero-CL8Y actor is always charged the full base fee" is
+demonstrated both at query time and in the reconcile mint on chain. This run
+exposed and fixed a real schema bug (the vault's local
+`FeeRegistryEffectiveFeeResponse` was missing the `holding` field, so
+`cw_serde` rejected the registry response and the fee was silently skipped).
+Unit and Clippy gates are clean for both workspaces after that fix.
 
 ## Existing CI Evidence
 
