@@ -22,10 +22,10 @@ operator/docs harness (`rebalancer-system` is the third, non-grid, system):
   standard swap grid (`grid-vault-swap`). The vault holds CW20 balances, reads
   the pool price, and executes classic `Swap` calls as the price crosses a grid
   level. Uses the exact CL8Y pair API as shipped; no fork or upstream merge.
-- [`limit-grid-system`](limit-grid-system/README.md) — the **reference-only**
-  limit-order grid (`grid-vault` + `grid-manager`). It is retained for
-  documentation but is **not deployable** because it needs pair queries that do
-  not exist in the shipped pair. Do not deploy or fund it.
+- [`limit-grid-system`](limit-grid-system/README.md) — the limit-order grid
+  (`grid-vault` + `grid-manager`). The vault reconciles against the shipped pair
+  by tracking its own cancels and treating an order that vanished without a
+  cancel as fully executed, so it needs no pair extension and no fork.
 - [`grid-operator-system`](grid-operator-system/README.md) — the shared
   `grid-operator` worker and the grid protocol/ops documentation used by both
   designs.

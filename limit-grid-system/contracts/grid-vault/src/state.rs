@@ -2,7 +2,7 @@ use cosmwasm_schema::cw_serde;
 use cosmwasm_std::{Addr, Decimal, Uint128};
 use cw_storage_plus::{Item, Map};
 
-use crate::msg::{LimitOrderSide, OrderStatusReason, OwnerOrderState};
+use crate::msg::LimitOrderSide;
 
 #[cw_serde]
 pub struct Config {
@@ -18,6 +18,8 @@ pub struct Config {
     pub max_grid_count: u32,
     pub max_orders_per_reconcile: u32,
     pub max_active_orders_per_bot: u32,
+    pub fee_registry: Option<Addr>,
+    pub fee_collector: Option<Addr>,
 }
 
 #[cw_serde]
@@ -66,6 +68,20 @@ pub struct PlacementPlan {
     pub gross_amounts: Vec<Uint128>,
 }
 
+// Terminal record of an order the vault cancelled on the pair. The vault is the
+// only address allowed to cancel its orders, so this set is authoritative: any
+// order that is no longer tracked locally and was never recorded here was
+// necessarily fully executed rather than cancelled. That lets the vault classify
+// ambiguous order status without the pair's owner-inventory API or an indexer.
+#[cw_serde]
+pub struct CancelledOrder {
+    pub rung_index: u32,
+    pub side: LimitOrderSide,
+    pub price: Decimal,
+    pub remaining: Uint128,
+    pub cancelled_at: u64,
+}
+
 pub const CONFIG: Item<Config> = Item::new("config");
 pub const VAULT_MODE: Item<VaultMode> = Item::new("vault_mode");
 pub const NEXT_BOT_ID: Item<u64> = Item::new("next_bot_id");
@@ -73,89 +89,12 @@ pub const NEXT_REPLY_ID: Item<u64> = Item::new("next_reply_id");
 pub const BOTS: Map<u64, Bot> = Map::new("bots");
 pub const RUNGS: Map<(u64, u32), Rung> = Map::new("rungs");
 pub const ORDERS: Map<(u64, u64), GridOrder> = Map::new("orders");
+pub const CANCELLED_ORDERS: Map<(u64, u64), CancelledOrder> = Map::new("cancelled_orders");
 pub const SHARES: Map<(u64, &Addr), Uint128> = Map::new("shares");
 pub const PLACEMENTS: Map<u64, PlacementPlan> = Map::new("placements");
 pub const ALLOWED_TOKENS: Map<&Addr, ()> = Map::new("allowed_tokens");
 pub const TOKEN_POLICY_ENABLED: Item<bool> = Item::new("token_policy_enabled");
 pub const QUARANTINE: Map<&Addr, ()> = Map::new("quarantine");
-// A legacy vault cannot prove that vulnerable versions did not forget pair orders.
-pub const INVENTORY_RECONCILIATION_REQUIRED: Item<bool> =
-    Item::new("inventory_reconciliation_required");
-
-#[cw_serde]
-pub enum InventoryReconciliationPhase {
-    NotStarted,
-    ScanningPair,
-    DrainingPair,
-    CleaningRecoveredInventory,
-    CleaningLocalOrders,
-    Complete,
-}
-
-#[cw_serde]
-pub struct InventorySnapshot {
-    pub generation: u64,
-    pub max_order_id: u64,
-}
-
-#[cw_serde]
-pub struct PendingInventoryAction {
-    pub reply_id: u64,
-    pub kind: PageKind,
-    pub order_ids: Vec<u64>,
-}
-
-#[cw_serde]
-pub struct InventoryReconciliation {
-    pub phase: InventoryReconciliationPhase,
-    pub snapshot: Option<InventorySnapshot>,
-    pub pair_code_id: Option<u64>,
-    #[serde(default)]
-    pub scan_cursor: Option<u64>,
-    #[serde(default)]
-    pub recovered_count: u64,
-    #[serde(default)]
-    pub recovery_epoch: u64,
-    pub pending: Option<PendingInventoryAction>,
-    pub successful_pair_pages: u64,
-    pub cleaned_local_orders: u64,
-    pub last_error: Option<String>,
-}
-
-impl InventoryReconciliation {
-    pub fn locked() -> Self {
-        Self {
-            phase: InventoryReconciliationPhase::NotStarted,
-            snapshot: None,
-            pair_code_id: None,
-            scan_cursor: None,
-            recovered_count: 0,
-            recovery_epoch: 0,
-            pending: None,
-            successful_pair_pages: 0,
-            cleaned_local_orders: 0,
-            last_error: None,
-        }
-    }
-}
-
-pub const INVENTORY_RECONCILIATION: Item<InventoryReconciliation> =
-    Item::new("inventory_reconciliation");
-
-#[cw_serde]
-pub struct RecoveredInventoryRow {
-    #[serde(default)]
-    pub recovery_epoch: u64,
-    pub owner: Addr,
-    pub state: OwnerOrderState,
-    pub side: LimitOrderSide,
-    pub price: Option<Decimal>,
-    pub remaining: Uint128,
-    pub expires_at: Option<u64>,
-    pub reason: Option<OrderStatusReason>,
-}
-
-pub const RECOVERED_INVENTORY: Map<u64, RecoveredInventoryRow> = Map::new("recovered_inventory");
 
 #[cw_serde]
 pub enum PageKind {

@@ -11,23 +11,21 @@ use cw20::{BalanceResponse, Cw20ExecuteMsg, Cw20QueryMsg, Cw20ReceiveMsg, TokenI
 use cw_storage_plus::Bound;
 use semver::Version;
 
+use cosmwasm_schema::cw_serde;
+
 use crate::error::ContractError;
 use crate::msg::{
-    AssetInfo, BotResponse, ConfigResponse, ExecuteMsg, ExpiredLimitRefundResponse,
-    FactoryQueryMsg, InstantiateMsg, InventoryReconciliationPhaseResponse,
-    InventoryReconciliationResponse, LimitOrderConfigResponse, LimitOrderPlacementItem,
-    LimitOrderResponse, LimitOrderSide, MigrateMsg, OrderResponse, OwnerInventoryResponse,
-    OwnerInventorySnapshot, OwnerOrderState, PairApiFeature, PairCw20HookMsg, PairExecuteMsg,
-    PairInfo, PairProtocolResponse, PairQueryMsg, PairResponse, PendingInventoryActionResponse,
-    PoolResponse, QueryMsg, ReceiveMsg, RungResponse, ShareResponse, SolvencyResponse,
-    TokenPolicyResponse, VaultModeResponse,
+    AssetInfo, BotResponse, CancelledOrderResponse, CancelledOrdersResponse, ConfigResponse,
+    ExecuteMsg, ExpiredLimitRefundResponse, FactoryQueryMsg, InstantiateMsg,
+    LimitOrderConfigResponse, LimitOrderPlacementItem, LimitOrderResponse, LimitOrderSide,
+    MigrateMsg, OrderResponse, PairCw20HookMsg, PairExecuteMsg, PairInfo, PairQueryMsg,
+    PairResponse, PoolResponse, QueryMsg, ReceiveMsg, RungResponse, ShareResponse,
+    SolvencyResponse, TokenPolicyResponse, VaultModeResponse,
 };
 use crate::state::{
-    Bot, Config, GridOrder, InventoryReconciliation, InventoryReconciliationPhase,
-    InventorySnapshot, PageKind, PendingInventoryAction, PendingPage, PendingPageEntry,
-    PlacementPlan, RecoveredInventoryRow, Rung, VaultMode, ALLOWED_TOKENS, BOTS, CONFIG,
-    INVENTORY_RECONCILIATION, INVENTORY_RECONCILIATION_REQUIRED, NEXT_BOT_ID, NEXT_REPLY_ID,
-    ORDERS, PENDING_PAGES, PLACEMENTS, QUARANTINE, RECOVERED_INVENTORY, RUNGS, SHARES,
+    Bot, CancelledOrder, Config, GridOrder, PageKind, PendingPage, PendingPageEntry,
+    PlacementPlan, Rung, VaultMode, ALLOWED_TOKENS, BOTS, CANCELLED_ORDERS, CONFIG, NEXT_BOT_ID,
+    NEXT_REPLY_ID, ORDERS, PENDING_PAGES, PLACEMENTS, QUARANTINE, RUNGS, SHARES,
     TOKEN_POLICY_ENABLED, VAULT_MODE,
 };
 
@@ -36,9 +34,29 @@ const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const FIRST_REPLY_ID: u64 = 1;
 const MAX_ADJUST_STEPS: u32 = 64;
 const BOT_ID: u64 = 1;
-const ORDER_API_SCHEMA_VERSION: u16 = 1;
-const MAX_OWNER_INVENTORY_PAGE_SIZE: u32 = 100;
 const MIN_MIGRATION_VERSION: &str = "0.1.0";
+const MAX_CANCELLED_ORDERS_PAGE_SIZE: u32 = 100;
+
+/// Minimal schema of the protocol fee-registry `EffectiveFee` query.
+#[cw_serde]
+enum FeeRegistryQueryMsg {
+    EffectiveFee { trader: String },
+}
+
+#[cw_serde]
+struct FeeRegistryEffectiveFeeResponse {
+    fee_bps: u16,
+    discount_bps: u16,
+    tier_id: Option<u8>,
+    source: FeeRegistryTierSource,
+}
+
+#[cw_serde]
+enum FeeRegistryTierSource {
+    Live,
+    Cached,
+    Lowest,
+}
 
 #[entry_point]
 pub fn instantiate(
@@ -75,13 +93,17 @@ pub fn instantiate(
             max_grid_count: msg.max_grid_count,
             max_orders_per_reconcile: msg.max_orders_per_reconcile,
             max_active_orders_per_bot: msg.max_active_orders_per_bot,
+            fee_registry: msg.fee_registry.map(|s| deps.api.addr_validate(&s)).transpose()?,
+            fee_collector: msg
+                .fee_collector
+                .map(|s| deps.api.addr_validate(&s))
+                .transpose()?,
         },
     )?;
     NEXT_BOT_ID.save(deps.storage, &1)?;
     NEXT_REPLY_ID.save(deps.storage, &FIRST_REPLY_ID)?;
     VAULT_MODE.save(deps.storage, &VaultMode::Active)?;
     TOKEN_POLICY_ENABLED.save(deps.storage, &false)?;
-    INVENTORY_RECONCILIATION_REQUIRED.save(deps.storage, &false)?;
     Ok(Response::new().add_attribute("action", "instantiate"))
 }
 
@@ -122,6 +144,9 @@ pub fn execute(
             shares,
             recipient,
         } => execute_withdraw(deps, info, bot_id, shares, recipient),
+        ExecuteMsg::RedeemShares { bot_id, recipient } => {
+            execute_redeem_shares(deps, info, bot_id, recipient)
+        }
         ExecuteMsg::UpdateKeeper { keeper } => execute_update_keeper(deps, info, keeper),
         ExecuteMsg::UpdatePairCode { bot_id, code_id } => {
             execute_update_pair_code(deps, info, bot_id, code_id)
@@ -139,14 +164,11 @@ pub fn execute(
         ExecuteMsg::EmergencyWithdraw { bot_id, recipient } => {
             execute_emergency_withdraw(deps, env, info, bot_id, recipient)
         }
-        ExecuteMsg::ContinueInventoryReconciliation { limit } => {
-            execute_continue_inventory_reconciliation(deps, env, info, limit)
-        }
     }
 }
 
 #[entry_point]
-pub fn migrate(deps: DepsMut, env: Env, _msg: MigrateMsg) -> Result<Response, ContractError> {
+pub fn migrate(deps: DepsMut, _env: Env, _msg: MigrateMsg) -> Result<Response, ContractError> {
     let previous = get_contract_version(deps.storage)?;
     if previous.contract != CONTRACT_NAME {
         return Err(ContractError::UnsupportedMigrationSource);
@@ -160,415 +182,10 @@ pub fn migrate(deps: DepsMut, env: Env, _msg: MigrateMsg) -> Result<Response, Co
     if previous_version < minimum_version || previous_version >= current_version {
         return Err(ContractError::UnsupportedMigrationSource);
     }
-
-    let existing = INVENTORY_RECONCILIATION.may_load(deps.storage)?;
-    if existing.is_none() && is_proven_empty_pre_bot_vault(deps.as_ref())? {
-        INVENTORY_RECONCILIATION_REQUIRED.save(deps.storage, &false)?;
-        INVENTORY_RECONCILIATION.remove(deps.storage);
-        set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
-        return Ok(Response::new()
-            .add_attribute("action", "migrate_grid_vault")
-            .add_attribute("from_version", previous.version)
-            .add_attribute("inventory_reconciliation_required", "false")
-            .add_attribute("reconciliation", "empty_pre_bot"));
-    }
-    // Vulnerable releases may already have deleted the only local order reference.
-    // Rollback state is never proof: every affected vault starts a new pair scan.
-    INVENTORY_RECONCILIATION_REQUIRED.save(deps.storage, &true)?;
-    let prior_epoch = existing
-        .as_ref()
-        .map(|state| state.recovery_epoch)
-        .unwrap_or_default();
-    let recovery_epoch = prior_epoch
-        .checked_add(1)
-        .ok_or(ContractError::ArithmeticOutOfRange)?
-        .max(env.block.height)
-        .max(1);
-    let mut reconciliation = InventoryReconciliation::locked();
-    reconciliation.recovery_epoch = recovery_epoch;
-    INVENTORY_RECONCILIATION.save(deps.storage, &reconciliation)?;
     set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
     Ok(Response::new()
         .add_attribute("action", "migrate_grid_vault")
-        .add_attribute("from_version", previous.version)
-        .add_attribute("inventory_reconciliation_required", "true"))
-}
-
-fn execute_continue_inventory_reconciliation(
-    mut deps: DepsMut,
-    env: Env,
-    info: MessageInfo,
-    limit: u32,
-) -> Result<Response, ContractError> {
-    assert_no_funds(&info)?;
-    if limit == 0 || limit > MAX_OWNER_INVENTORY_PAGE_SIZE {
-        return Err(ContractError::InvalidInventoryReconciliationLimit);
-    }
-    let config = CONFIG.load(deps.storage)?;
-    if info.sender != config.owner {
-        return Err(ContractError::Unauthorized);
-    }
-    require_reconciliation_required(deps.as_ref())?;
-    let bot = load_sole_bot(deps.as_ref())?;
-    assert_pair_code(deps.as_ref(), &bot)?;
-
-    let protocol = query_inventory_protocol(deps.as_ref(), &bot)?;
-    if limit > protocol.max_owner_inventory_page_size {
-        return Err(ContractError::InvalidInventoryReconciliationLimit);
-    }
-    let mut reconciliation = INVENTORY_RECONCILIATION
-        .may_load(deps.storage)?
-        .unwrap_or_else(InventoryReconciliation::locked);
-    if reconciliation.pending.is_some() {
-        return Err(ContractError::InventoryReconciliationPending);
-    }
-    if let Some(snapshot) = &reconciliation.snapshot {
-        if reconciliation.pair_code_id != Some(bot.pair_code_id)
-            || snapshot.generation != protocol.owner_inventory_generation
-        {
-            return Err(ContractError::UnsupportedPairInventoryProtocol);
-        }
-    }
-
-    match reconciliation.phase {
-        InventoryReconciliationPhase::NotStarted | InventoryReconciliationPhase::ScanningPair => {
-            scan_pair_inventory(&mut deps, &env, &bot, &protocol, &mut reconciliation, limit)
-        }
-        InventoryReconciliationPhase::DrainingPair => {
-            drain_pair_inventory(&mut deps, &env, &bot, &protocol, &mut reconciliation, limit)
-        }
-        InventoryReconciliationPhase::CleaningRecoveredInventory => {
-            clean_recovered_inventory(deps, &env, &bot, &protocol, reconciliation, limit)
-        }
-        InventoryReconciliationPhase::CleaningLocalOrders => {
-            clean_local_inventory(deps, &env, &bot, &protocol, reconciliation, limit)
-        }
-        InventoryReconciliationPhase::Complete => {
-            Err(ContractError::InventoryReconciliationRequired)
-        }
-    }
-}
-
-fn scan_pair_inventory(
-    deps: &mut DepsMut,
-    env: &Env,
-    bot: &Bot,
-    protocol: &PairProtocolResponse,
-    reconciliation: &mut InventoryReconciliation,
-    limit: u32,
-) -> Result<Response, ContractError> {
-    let requested_snapshot =
-        reconciliation
-            .snapshot
-            .as_ref()
-            .map(|snapshot| OwnerInventorySnapshot {
-                generation: snapshot.generation,
-                max_order_id: snapshot.max_order_id,
-            });
-    let page: OwnerInventoryResponse = deps.querier.query_wasm_smart(
-        &bot.pair,
-        &PairQueryMsg::OwnerInventory {
-            owner: env.contract.address.to_string(),
-            snapshot: requested_snapshot,
-            start_after: reconciliation.scan_cursor,
-            limit: Some(limit),
-        },
-    )?;
-    validate_inventory_page(
-        env,
-        &page,
-        reconciliation.snapshot.as_ref(),
-        reconciliation.scan_cursor,
-        limit,
-    )?;
-    if reconciliation.snapshot.is_none()
-        && page.snapshot.generation != protocol.owner_inventory_generation
-    {
-        return Err(ContractError::UnsupportedPairInventoryProtocol);
-    }
-    if reconciliation.snapshot.is_none() {
-        reconciliation.snapshot = Some(InventorySnapshot {
-            generation: page.snapshot.generation,
-            max_order_id: page.snapshot.max_order_id,
-        });
-        reconciliation.pair_code_id = Some(bot.pair_code_id);
-        reconciliation.phase = InventoryReconciliationPhase::ScanningPair;
-    }
-    for row in &page.rows {
-        RECOVERED_INVENTORY.save(
-            deps.storage,
-            row.order_id,
-            &RecoveredInventoryRow {
-                recovery_epoch: reconciliation.recovery_epoch,
-                owner: deps.api.addr_validate(&row.owner)?,
-                state: row.state.clone(),
-                side: row.side.clone(),
-                price: row.price,
-                remaining: row.remaining,
-                expires_at: row.expires_at,
-                reason: row.reason.clone(),
-            },
-        )?;
-    }
-    reconciliation.recovered_count = reconciliation
-        .recovered_count
-        .checked_add(page.rows.len() as u64)
-        .ok_or(ContractError::ArithmeticOutOfRange)?;
-    reconciliation.scan_cursor = page
-        .rows
-        .last()
-        .map(|row| row.order_id)
-        .or(reconciliation.scan_cursor);
-    reconciliation.last_error = None;
-    if page.complete {
-        reconciliation.phase = InventoryReconciliationPhase::DrainingPair;
-    }
-    INVENTORY_RECONCILIATION.save(deps.storage, reconciliation)?;
-    Ok(Response::new()
-        .add_attribute("action", "continue_inventory_reconciliation")
-        .add_attribute(
-            "phase",
-            if page.complete {
-                "draining_pair"
-            } else {
-                "scanning_pair"
-            },
-        )
-        .add_attribute("adopted", page.rows.len().to_string())
-        .add_attribute("scan_complete", page.complete.to_string()))
-}
-
-fn drain_pair_inventory(
-    deps: &mut DepsMut,
-    env: &Env,
-    bot: &Bot,
-    protocol: &PairProtocolResponse,
-    reconciliation: &mut InventoryReconciliation,
-    limit: u32,
-) -> Result<Response, ContractError> {
-    let batch_config: LimitOrderConfigResponse = deps
-        .querier
-        .query_wasm_smart(&bot.pair, &PairQueryMsg::LimitOrderConfig {})?;
-    validate_pair_batch_limit(batch_config.max_batch_rungs)?;
-    let requested_snapshot =
-        reconciliation
-            .snapshot
-            .as_ref()
-            .map(|snapshot| OwnerInventorySnapshot {
-                generation: snapshot.generation,
-                max_order_id: snapshot.max_order_id,
-            });
-    let page: OwnerInventoryResponse = deps.querier.query_wasm_smart(
-        &bot.pair,
-        &PairQueryMsg::OwnerInventory {
-            owner: env.contract.address.to_string(),
-            snapshot: requested_snapshot,
-            start_after: None,
-            limit: Some(limit),
-        },
-    )?;
-    validate_inventory_page(env, &page, reconciliation.snapshot.as_ref(), None, limit)?;
-
-    if page.rows.is_empty() {
-        if !page.complete || page.next_cursor.is_some() {
-            return Err(ContractError::InvalidOwnerInventory);
-        }
-        reconciliation.phase = InventoryReconciliationPhase::CleaningRecoveredInventory;
-        reconciliation.last_error = None;
-        INVENTORY_RECONCILIATION.save(deps.storage, reconciliation)?;
-        return clean_recovered_inventory(
-            deps.branch(),
-            env,
-            bot,
-            protocol,
-            reconciliation.clone(),
-            limit,
-        );
-    }
-
-    let kind = if page
-        .rows
-        .iter()
-        .any(|row| row.state == OwnerOrderState::Active)
-    {
-        PageKind::Cancel
-    } else {
-        PageKind::Claim
-    };
-    let order_ids: Vec<u64> = page
-        .rows
-        .iter()
-        .filter(|row| match kind {
-            PageKind::Cancel => row.state == OwnerOrderState::Active,
-            PageKind::Claim => row.state == OwnerOrderState::ParkedRefund,
-        })
-        .take(batch_config.max_batch_rungs as usize)
-        .map(|row| row.order_id)
-        .collect();
-    let reply_id = next_reply_id(deps.storage)?;
-    reconciliation.pending = Some(PendingInventoryAction {
-        reply_id,
-        kind: kind.clone(),
-        order_ids: order_ids.clone(),
-    });
-    reconciliation.last_error = None;
-    INVENTORY_RECONCILIATION.save(deps.storage, reconciliation)?;
-    let msg = match kind {
-        PageKind::Cancel => PairExecuteMsg::CancelLimitOrders {
-            order_ids: order_ids.clone(),
-        },
-        PageKind::Claim => PairExecuteMsg::ClaimExpiredLimitOrders {
-            order_ids: order_ids.clone(),
-        },
-    };
-    Ok(Response::new()
-        .add_submessage(SubMsg::reply_always(
-            WasmMsg::Execute {
-                contract_addr: bot.pair.to_string(),
-                msg: to_json_binary(&msg)?,
-                funds: vec![],
-            },
-            reply_id,
-        ))
-        .add_attribute("action", "continue_inventory_reconciliation")
-        .add_attribute("phase", "draining_pair")
-        .add_attribute("kind", page_kind_label(&kind))
-        .add_attribute("orders", order_ids.len().to_string()))
-}
-
-fn clean_local_inventory(
-    deps: DepsMut,
-    env: &Env,
-    bot: &Bot,
-    protocol: &PairProtocolResponse,
-    mut reconciliation: InventoryReconciliation,
-    limit: u32,
-) -> Result<Response, ContractError> {
-    if PENDING_PAGES
-        .range(deps.storage, None, None, Order::Ascending)
-        .next()
-        .transpose()?
-        .is_some()
-        || PLACEMENTS
-            .range(deps.storage, None, None, Order::Ascending)
-            .next()
-            .transpose()?
-            .is_some()
-    {
-        return Err(ContractError::InventoryReconciliationPending);
-    }
-    let order_ids: Vec<u64> = ORDERS
-        .prefix(BOT_ID)
-        .keys(deps.storage, None, None, Order::Ascending)
-        .take(limit as usize)
-        .collect::<StdResult<_>>()?;
-    for order_id in &order_ids {
-        ORDERS.remove(deps.storage, (BOT_ID, *order_id));
-    }
-    reconciliation.cleaned_local_orders = reconciliation
-        .cleaned_local_orders
-        .checked_add(order_ids.len() as u64)
-        .ok_or(ContractError::ArithmeticOutOfRange)?;
-    let orders_remain = ORDERS
-        .prefix(BOT_ID)
-        .keys(deps.storage, None, None, Order::Ascending)
-        .next()
-        .transpose()?
-        .is_some();
-    if orders_remain {
-        INVENTORY_RECONCILIATION.save(deps.storage, &reconciliation)?;
-        return Ok(Response::new()
-            .add_attribute("action", "continue_inventory_reconciliation")
-            .add_attribute("phase", "cleaning_local_orders")
-            .add_attribute("cleaned", order_ids.len().to_string()));
-    }
-
-    let current = load_sole_bot(deps.as_ref())?;
-    if current.pair != bot.pair
-        || current.pair_code_id != reconciliation.pair_code_id.unwrap_or_default()
-        || protocol.owner_inventory_generation
-            != reconciliation
-                .snapshot
-                .as_ref()
-                .ok_or(ContractError::InvalidOwnerInventory)?
-                .generation
-    {
-        return Err(ContractError::UnsupportedPairInventoryProtocol);
-    }
-    assert_pair_code(deps.as_ref(), &current)?;
-    let final_protocol = query_inventory_protocol(deps.as_ref(), &current)?;
-    if final_protocol.owner_inventory_generation != protocol.owner_inventory_generation {
-        return Err(ContractError::UnsupportedPairInventoryProtocol);
-    }
-    let mut current = current;
-    let remaining_local_ids = ORDERS
-        .prefix(BOT_ID)
-        .keys(deps.storage, None, None, Order::Ascending)
-        .collect::<StdResult<Vec<_>>>()?;
-    current.active_orders = u32::try_from(remaining_local_ids.len())
-        .map_err(|_| ContractError::ArithmeticOutOfRange)?;
-    if current.active_orders != 0 {
-        return Err(ContractError::InvalidBotInvariant);
-    }
-    for (index, token) in current.asset_tokens.iter().enumerate() {
-        current.free_balances[index] =
-            query_token_balance(deps.as_ref(), token, &env.contract.address)?;
-    }
-    BOTS.save(deps.storage, BOT_ID, &current)?;
-    reconciliation.phase = InventoryReconciliationPhase::Complete;
-    reconciliation.last_error = None;
-    INVENTORY_RECONCILIATION.save(deps.storage, &reconciliation)?;
-    INVENTORY_RECONCILIATION_REQUIRED.save(deps.storage, &false)?;
-    Ok(Response::new()
-        .add_attribute("action", "complete_inventory_reconciliation")
-        .add_attribute("cleaned", order_ids.len().to_string())
-        .add_attribute("inventory_reconciliation_required", "false"))
-}
-
-fn clean_recovered_inventory(
-    deps: DepsMut,
-    env: &Env,
-    bot: &Bot,
-    protocol: &PairProtocolResponse,
-    mut reconciliation: InventoryReconciliation,
-    limit: u32,
-) -> Result<Response, ContractError> {
-    let recovered_ids: Vec<u64> = RECOVERED_INVENTORY
-        .keys(deps.storage, None, None, Order::Ascending)
-        .take(limit as usize)
-        .collect::<StdResult<_>>()?;
-    let mut current_epoch_removed = 0u64;
-    for order_id in &recovered_ids {
-        let row = RECOVERED_INVENTORY.load(deps.storage, *order_id)?;
-        if row.recovery_epoch == reconciliation.recovery_epoch {
-            current_epoch_removed = current_epoch_removed
-                .checked_add(1)
-                .ok_or(ContractError::ArithmeticOutOfRange)?;
-        }
-        RECOVERED_INVENTORY.remove(deps.storage, *order_id);
-    }
-    reconciliation.recovered_count = reconciliation
-        .recovered_count
-        .checked_sub(current_epoch_removed)
-        .ok_or(ContractError::InvalidOwnerInventory)?;
-    let records_remain = RECOVERED_INVENTORY
-        .keys(deps.storage, None, None, Order::Ascending)
-        .next()
-        .transpose()?
-        .is_some();
-    if records_remain {
-        INVENTORY_RECONCILIATION.save(deps.storage, &reconciliation)?;
-        return Ok(Response::new()
-            .add_attribute("action", "continue_inventory_reconciliation")
-            .add_attribute("phase", "cleaning_recovered_inventory")
-            .add_attribute("cleaned", recovered_ids.len().to_string()));
-    }
-    if reconciliation.recovered_count != 0 {
-        return Err(ContractError::InvalidOwnerInventory);
-    }
-    reconciliation.phase = InventoryReconciliationPhase::CleaningLocalOrders;
-    INVENTORY_RECONCILIATION.save(deps.storage, &reconciliation)?;
-    clean_local_inventory(deps, env, bot, protocol, reconciliation, limit)
+        .add_attribute("from_version", previous.version))
 }
 
 fn execute_sync_balances(
@@ -601,7 +218,6 @@ fn execute_create_bot(
     grid_count: u32,
 ) -> Result<Response, ContractError> {
     require_active(deps.as_ref())?;
-    require_order_placement_enabled(deps.as_ref())?;
     if BOTS.has(deps.storage, BOT_ID) {
         return Err(ContractError::BotAlreadyExists);
     }
@@ -743,7 +359,6 @@ fn execute_receive(
     receive: Cw20ReceiveMsg,
 ) -> Result<Response, ContractError> {
     require_active(deps.as_ref())?;
-    require_order_placement_enabled(deps.as_ref())?;
     if receive.amount.is_zero() {
         return Err(ContractError::ZeroAmount);
     }
@@ -879,7 +494,6 @@ fn execute_allocate(
     bot_id: u64,
 ) -> Result<Response, ContractError> {
     require_active(deps.as_ref())?;
-    require_order_placement_enabled(deps.as_ref())?;
     assert_no_funds(&info)?;
     let bot = BOTS.load(deps.storage, bot_id)?;
     if info.sender != bot.owner {
@@ -969,6 +583,8 @@ fn execute_reconcile(
     let mut seen = BTreeSet::new();
     let mut claim_entries = vec![];
     let mut changed_orders = 0usize;
+    let mut executed_count = 0usize;
+    let mut cancelled_count = 0usize;
     for order_id in &order_ids {
         if !seen.insert(*order_id) {
             return Err(ContractError::InvalidFillReport);
@@ -1008,10 +624,20 @@ fn execute_reconcile(
                         return Err(ContractError::InvalidOrder);
                     }
                     (refund.remaining, true, refund.remaining)
+                } else if CANCELLED_ORDERS.has(deps.storage, (bot_id, *order_id)) {
+                    // The vault already cancelled this order, so its escrow was
+                    // returned to the vault when the cancel was confirmed.
+                    cancelled_count += 1;
+                    (Uint128::zero(), true, Uint128::zero())
                 } else {
-                    // The pair uses an untyped error for active-order absence. It is
-                    // indistinguishable here from a contract/query/schema failure.
-                    return Err(ContractError::OrderStatusUnverifiable);
+                    // The vault never cancelled this order, yet the pair no
+                    // longer reports it as active or parked. Orders can only
+                    // leave the pair through execution or a vault-initiated
+                    // cancel, so this order was fully executed. Its fill
+                    // proceeds were already credited to the vault balance by
+                    // sync_free_balances above.
+                    executed_count += 1;
+                    (Uint128::zero(), true, Uint128::zero())
                 }
             }
         };
@@ -1045,13 +671,30 @@ fn execute_reconcile(
     if changed_orders == 0 && credited == [Uint128::zero(), Uint128::zero()] {
         return Err(ContractError::NothingToReconcile);
     }
-    BOTS.save(deps.storage, bot_id, &bot)?;
     let mut response = Response::new()
         .add_attribute("action", "reconcile_grid")
         .add_attribute("bot_id", bot_id.to_string())
         .add_attribute("changed_orders", changed_orders.to_string())
+        .add_attribute("fully_executed", executed_count.to_string())
+        .add_attribute("cancelled", cancelled_count.to_string())
         .add_attribute("credited_token_0", credited[0])
         .add_attribute("credited_token_1", credited[1]);
+    match charge_fee(&mut deps, &config, bot_id, &mut bot, &credited)? {
+        ChargeFee::Applied(fee) => {
+            response = response
+                .add_attribute("fee_bps", fee.fee_bps.to_string())
+                .add_attribute("fee_shares", fee.shares.to_string())
+                .add_attribute("fee_tier", fee.tier.map(|t| t.to_string()).unwrap_or_default())
+                .add_attribute("fee_source", fee.source);
+        }
+        // Non-blocking: the reconcile completes even if the fee-registry is
+        // unreachable; the fill is processed without a fee.
+        ChargeFee::Unavailable(reason) => {
+            response = response.add_attribute("fee_skipped", reason);
+        }
+        ChargeFee::None => {}
+    }
+    BOTS.save(deps.storage, bot_id, &bot)?;
     if !claim_entries.is_empty() {
         let pair_batch_limit = query_pair_batch_limit(deps.as_ref(), &bot.pair)?;
         response = add_confirmable_pages(
@@ -1094,6 +737,9 @@ fn execute_recover_order(
         return Err(ContractError::Unauthorized);
     }
     if ORDERS.has(deps.storage, (bot_id, order_id)) {
+        return Err(ContractError::InvalidOrder);
+    }
+    if CANCELLED_ORDERS.has(deps.storage, (bot_id, order_id)) {
         return Err(ContractError::InvalidOrder);
     }
     assert_pair_code(deps.as_ref(), &bot)?;
@@ -1241,7 +887,6 @@ fn execute_withdraw(
     if VAULT_MODE.load(deps.storage)? == VaultMode::Exit {
         return Err(ContractError::InvalidMode);
     }
-    require_reconciled_inventory(deps.as_ref())?;
     let mut bot = BOTS.load(deps.storage, bot_id)?;
     if info.sender != bot.owner {
         return Err(ContractError::Unauthorized);
@@ -1288,6 +933,67 @@ fn execute_withdraw(
         (bot_id, &info.sender),
         &owner_shares.checked_sub(shares)?,
     )?;
+    BOTS.save(deps.storage, bot_id, &bot)?;
+    Ok(response)
+}
+
+/// The configured fee-collector redeems its own LP from a bot, sending the
+/// underlying assets to `recipient` (or itself). This is the redemption side of
+/// the per-fill protocol fee: the collector holds the LP the vault minted and
+/// forwards the proceeds to the CMM treasury.
+fn execute_redeem_shares(
+    deps: DepsMut,
+    info: MessageInfo,
+    bot_id: u64,
+    recipient: Option<String>,
+) -> Result<Response, ContractError> {
+    assert_no_funds(&info)?;
+    if VAULT_MODE.load(deps.storage)? == VaultMode::Exit {
+        return Err(ContractError::InvalidMode);
+    }
+    let config = CONFIG.load(deps.storage)?;
+    let collector = config
+        .fee_collector
+        .ok_or(ContractError::Unauthorized)?;
+    if info.sender != collector {
+        return Err(ContractError::Unauthorized);
+    }
+    let mut bot = BOTS.load(deps.storage, bot_id)?;
+    let shares = SHARES
+        .may_load(deps.storage, (bot_id, &info.sender))?
+        .unwrap_or_default();
+    if shares.is_zero() {
+        return Err(ContractError::InsufficientShares);
+    }
+    if bot.active_orders != 0 {
+        return Err(ContractError::ActiveOrders);
+    }
+    let amounts = [
+        bot.free_balances[0].multiply_ratio(shares, bot.total_shares),
+        bot.free_balances[1].multiply_ratio(shares, bot.total_shares),
+    ];
+    let recipient = deps
+        .api
+        .addr_validate(recipient.as_deref().unwrap_or(info.sender.as_str()))?;
+    let mut response = Response::new()
+        .add_attribute("action", "redeem_grid_shares")
+        .add_attribute("bot_id", bot_id.to_string())
+        .add_attribute("burned_shares", shares);
+    for (index, amount) in amounts.into_iter().enumerate() {
+        if !amount.is_zero() {
+            bot.free_balances[index] = bot.free_balances[index].checked_sub(amount)?;
+            response = response.add_message(WasmMsg::Execute {
+                contract_addr: bot.asset_tokens[index].to_string(),
+                msg: to_json_binary(&Cw20ExecuteMsg::Transfer {
+                    recipient: recipient.to_string(),
+                    amount,
+                })?,
+                funds: vec![],
+            });
+        }
+    }
+    bot.total_shares = bot.total_shares.checked_sub(shares)?;
+    SHARES.save(deps.storage, (bot_id, &info.sender), &Uint128::zero())?;
     BOTS.save(deps.storage, bot_id, &bot)?;
     Ok(response)
 }
@@ -1510,7 +1216,6 @@ fn execute_emergency_withdraw(
     if VAULT_MODE.load(deps.storage)? != VaultMode::Exit {
         return Err(ContractError::InvalidMode);
     }
-    require_reconciled_inventory(deps.as_ref())?;
     let mut bot = BOTS.load(deps.storage, bot_id)?;
     if info.sender != bot.owner {
         return Err(ContractError::Unauthorized);
@@ -1715,42 +1420,8 @@ fn add_placement(
 
 #[entry_point]
 pub fn reply(deps: DepsMut, env: Env, reply: Reply) -> Result<Response, ContractError> {
-    if let Some(mut reconciliation) = INVENTORY_RECONCILIATION.may_load(deps.storage)? {
-        if reconciliation
-            .pending
-            .as_ref()
-            .is_some_and(|pending| pending.reply_id == reply.id)
-        {
-            let pending = reconciliation
-                .pending
-                .take()
-                .ok_or(ContractError::UnknownReply)?;
-            let result = reply.result.into_result();
-            if result.is_ok() {
-                reconciliation.successful_pair_pages = reconciliation
-                    .successful_pair_pages
-                    .checked_add(1)
-                    .ok_or(ContractError::ArithmeticOutOfRange)?;
-                reconciliation.last_error = None;
-            } else {
-                reconciliation.last_error = result.err();
-            }
-            INVENTORY_RECONCILIATION.save(deps.storage, &reconciliation)?;
-            return Ok(Response::new()
-                .add_attribute(
-                    "action",
-                    if reconciliation.last_error.is_some() {
-                        "inventory_reconciliation_page_failed"
-                    } else {
-                        "inventory_reconciliation_page_confirmed"
-                    },
-                )
-                .add_attribute("kind", page_kind_label(&pending.kind))
-                .add_attribute("orders", pending.order_ids.len().to_string()));
-        }
-    }
     if let Some(page) = PENDING_PAGES.may_load(deps.storage, reply.id)? {
-        return handle_pending_page(deps, reply.id, &page, reply.result.into_result());
+        return handle_pending_page(deps, &env, reply.id, &page, reply.result.into_result());
     }
     let plan = PLACEMENTS
         .may_load(deps.storage, reply.id)?
@@ -1874,11 +1545,9 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
                 max_grid_count: config.max_grid_count,
                 max_orders_per_reconcile: config.max_orders_per_reconcile,
                 max_active_orders_per_bot: config.max_active_orders_per_bot,
+                fee_registry: config.fee_registry.map(|registry| registry.to_string()),
+                fee_collector: config.fee_collector.map(|collector| collector.to_string()),
                 mode,
-                inventory_reconciliation_required: INVENTORY_RECONCILIATION_REQUIRED
-                    .may_load(deps.storage)?
-                    .unwrap_or(true),
-                inventory_reconciliation: inventory_reconciliation_response(deps)?,
             })
         }
         QueryMsg::Bot { bot_id } => {
@@ -1928,6 +1597,38 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
                 })
                 .collect::<StdResult<Vec<_>>>()?,
         ),
+        QueryMsg::CancelledOrders {
+            bot_id,
+            start_after,
+            limit,
+        } => {
+            let limit = limit
+                .unwrap_or(MAX_CANCELLED_ORDERS_PAGE_SIZE)
+                .min(MAX_CANCELLED_ORDERS_PAGE_SIZE);
+            let start = start_after.map(Bound::exclusive);
+            let mut rows = Vec::with_capacity(limit as usize);
+            let mut next_cursor = None;
+            for item in CANCELLED_ORDERS
+                .prefix(bot_id)
+                .range(deps.storage, start, None, Order::Ascending)
+                .take((limit as usize).saturating_add(1))
+            {
+                let (order_id, cancelled) = item?;
+                if rows.len() as u32 >= limit {
+                    next_cursor = Some(order_id);
+                    break;
+                }
+                rows.push(CancelledOrderResponse {
+                    order_id,
+                    rung_index: cancelled.rung_index,
+                    side: cancelled.side,
+                    price: cancelled.price,
+                    remaining: cancelled.remaining,
+                    cancelled_at: cancelled.cancelled_at,
+                });
+            }
+            to_json_binary(&CancelledOrdersResponse { rows, next_cursor })
+        }
         QueryMsg::Shares { bot_id, address } => {
             let address = deps.api.addr_validate(&address)?;
             to_json_binary(&ShareResponse {
@@ -2070,226 +1771,95 @@ fn checked_ratio(
         .map_err(|_| ContractError::ArithmeticOutOfRange)
 }
 
-fn require_reconciled_inventory(deps: Deps) -> Result<(), ContractError> {
-    if INVENTORY_RECONCILIATION_REQUIRED
-        .may_load(deps.storage)?
-        .unwrap_or(true)
-    {
-        return Err(ContractError::InventoryReconciliationRequired);
-    }
-    Ok(())
+struct FeeApplied {
+    fee_bps: u16,
+    shares: Uint128,
+    tier: Option<u8>,
+    source: String,
 }
 
-fn require_reconciliation_required(deps: Deps) -> Result<(), ContractError> {
-    if !INVENTORY_RECONCILIATION_REQUIRED
-        .may_load(deps.storage)?
-        .unwrap_or(true)
-    {
-        return Err(ContractError::InventoryReconciliationRequired);
-    }
-    Ok(())
+/// Outcome of a protocol-fee charge attempt. Keeping it an enum rather than
+/// `Option` lets reconcile distinguish "no fee configured/applicable" from a
+/// fee that could not be charged because the fee-registry is unreachable.
+enum ChargeFee {
+    None,
+    Applied(FeeApplied),
+    /// Fee-registry read failed. The reconcile must NOT revert -- the bot's
+    /// fill is processed anyway and the fee is skipped for this fill.
+    Unavailable(String),
 }
 
-fn require_order_placement_enabled(deps: Deps) -> Result<(), ContractError> {
-    require_reconciled_inventory(deps)
-}
-
-fn load_sole_bot(deps: Deps) -> Result<Bot, ContractError> {
-    let mut bots = BOTS.range(deps.storage, None, None, Order::Ascending);
-    let (bot_id, bot) = bots
-        .next()
-        .transpose()?
-        .ok_or(ContractError::InvalidBotInvariant)?;
-    if bot_id != BOT_ID || bots.next().transpose()?.is_some() {
-        return Err(ContractError::InvalidBotInvariant);
-    }
-    Ok(bot)
-}
-
-fn is_proven_empty_pre_bot_vault(deps: Deps) -> StdResult<bool> {
-    let no_bots = BOTS
-        .range(deps.storage, None, None, Order::Ascending)
-        .next()
-        .transpose()?
-        .is_none();
-    let no_orders = ORDERS
-        .range(deps.storage, None, None, Order::Ascending)
-        .next()
-        .transpose()?
-        .is_none();
-    let no_pending_pages = PENDING_PAGES
-        .range(deps.storage, None, None, Order::Ascending)
-        .next()
-        .transpose()?
-        .is_none();
-    let no_placements = PLACEMENTS
-        .range(deps.storage, None, None, Order::Ascending)
-        .next()
-        .transpose()?
-        .is_none();
-    let no_recovered_inventory = RECOVERED_INVENTORY
-        .range(deps.storage, None, None, Order::Ascending)
-        .next()
-        .transpose()?
-        .is_none();
-    let no_prior_bot_id = NEXT_BOT_ID.may_load(deps.storage)? == Some(BOT_ID);
-    Ok(no_bots
-        && no_orders
-        && no_pending_pages
-        && no_placements
-        && no_recovered_inventory
-        && no_prior_bot_id)
-}
-
-fn query_inventory_protocol(deps: Deps, bot: &Bot) -> Result<PairProtocolResponse, ContractError> {
-    let protocol: PairProtocolResponse = deps
-        .querier
-        .query_wasm_smart(&bot.pair, &PairQueryMsg::Protocol {})?;
-    let required = [
-        PairApiFeature::TypedOrderStatus,
-        PairApiFeature::OwnerInventory,
-        PairApiFeature::OwnerIndexBackfill,
-    ];
-    if protocol.schema_version != ORDER_API_SCHEMA_VERSION
-        || !protocol.owner_inventory_ready
-        || protocol.max_owner_inventory_page_size == 0
-        || protocol.max_owner_inventory_page_size > MAX_OWNER_INVENTORY_PAGE_SIZE
-        || required
-            .iter()
-            .any(|feature| !protocol.features.contains(feature))
-    {
-        return Err(ContractError::UnsupportedPairInventoryProtocol);
-    }
-    Ok(protocol)
-}
-
-fn validate_pair_batch_limit(limit: u32) -> Result<(), ContractError> {
-    if limit == 0 || limit > MAX_OWNER_INVENTORY_PAGE_SIZE {
-        return Err(ContractError::InvalidPairBatchLimit);
-    }
-    Ok(())
-}
-
-fn validate_inventory_page(
-    env: &Env,
-    page: &OwnerInventoryResponse,
-    expected_snapshot: Option<&InventorySnapshot>,
-    start_after: Option<u64>,
-    limit: u32,
-) -> Result<(), ContractError> {
-    if page.schema_version != ORDER_API_SCHEMA_VERSION || page.rows.len() > limit as usize {
-        return Err(ContractError::InvalidOwnerInventory);
-    }
-    if let Some(expected) = expected_snapshot {
-        if page.snapshot.generation != expected.generation
-            || page.snapshot.max_order_id != expected.max_order_id
-        {
-            return Err(ContractError::InvalidOwnerInventory);
-        }
-    }
-    let mut previous = None;
-    for row in &page.rows {
-        if row.owner != env.contract.address
-            || row.order_id == 0
-            || row.order_id > page.snapshot.max_order_id
-            || row.remaining.is_zero()
-            || start_after.is_some_and(|cursor| row.order_id <= cursor)
-            || previous.is_some_and(|id| row.order_id <= id)
-            || (row.state == OwnerOrderState::Active
-                && (row.price.is_none() || row.reason.is_some()))
-        {
-            return Err(ContractError::InvalidOwnerInventory);
-        }
-        previous = Some(row.order_id);
-    }
-    match (page.complete, page.next_cursor, page.rows.last()) {
-        (true, None, _) => {}
-        (false, Some(cursor), Some(last)) if cursor == last.order_id => {}
-        _ => return Err(ContractError::InvalidOwnerInventory),
-    }
-    Ok(())
-}
-
-fn page_kind_label(kind: &PageKind) -> &'static str {
-    match kind {
-        PageKind::Cancel => "cancel",
-        PageKind::Claim => "claim",
-    }
-}
-
-fn inventory_reconciliation_response(deps: Deps) -> StdResult<InventoryReconciliationResponse> {
-    let required = INVENTORY_RECONCILIATION_REQUIRED
-        .may_load(deps.storage)?
-        .unwrap_or(true);
-    let state = INVENTORY_RECONCILIATION.may_load(deps.storage)?;
-    let phase = if !required && state.is_none() {
-        InventoryReconciliationPhaseResponse::NotRequired
-    } else {
-        match state
-            .as_ref()
-            .map(|state| &state.phase)
-            .unwrap_or(&InventoryReconciliationPhase::NotStarted)
-        {
-            InventoryReconciliationPhase::NotStarted => {
-                InventoryReconciliationPhaseResponse::NotStarted
-            }
-            InventoryReconciliationPhase::ScanningPair => {
-                InventoryReconciliationPhaseResponse::ScanningPair
-            }
-            InventoryReconciliationPhase::DrainingPair => {
-                InventoryReconciliationPhaseResponse::DrainingPair
-            }
-            InventoryReconciliationPhase::CleaningRecoveredInventory => {
-                InventoryReconciliationPhaseResponse::CleaningRecoveredInventory
-            }
-            InventoryReconciliationPhase::CleaningLocalOrders => {
-                InventoryReconciliationPhaseResponse::CleaningLocalOrders
-            }
-            InventoryReconciliationPhase::Complete => {
-                InventoryReconciliationPhaseResponse::Complete
-            }
+/// Protocol fee per fill (v1, value-based): on a reconcile that credited fill
+/// proceeds, the fee-registry resolves the bot owner's effective fee bps from
+/// their CL18Y holding, and the vault mints that fraction of the credited value
+/// as LP to the configured fee-collector, diluting existing holders. No fee is
+/// charged when the vault has no configured or the resolved fee is zero.
+/// A transient fee-registry failure is non-blocking: the reconcile proceeds and
+/// the fee is skipped rather than reverting the trader's fill.
+fn charge_fee(
+    deps: &mut DepsMut,
+    config: &Config,
+    bot_id: u64,
+    bot: &mut Bot,
+    credited: &[Uint128; 2],
+) -> Result<ChargeFee, ContractError> {
+    let (Some(registry), Some(collector)) = (&config.fee_registry, &config.fee_collector) else {
+        return Ok(ChargeFee::None);
+    };
+    let fee: FeeRegistryEffectiveFeeResponse = match deps.querier.query_wasm_smart(
+        registry,
+        &FeeRegistryQueryMsg::EffectiveFee {
+            trader: bot.owner.to_string(),
+        },
+    ) {
+        Ok(fee) => fee,
+        Err(err) => {
+            // Non-blocking: record why and carry on with the reconcile.
+            return Ok(ChargeFee::Unavailable(err.to_string()));
         }
     };
-    Ok(InventoryReconciliationResponse {
-        phase,
-        snapshot: state.as_ref().and_then(|state| {
-            state
-                .snapshot
-                .as_ref()
-                .map(|snapshot| OwnerInventorySnapshot {
-                    generation: snapshot.generation,
-                    max_order_id: snapshot.max_order_id,
-                })
-        }),
-        pair_code_id: state.as_ref().and_then(|state| state.pair_code_id),
-        scan_cursor: state.as_ref().and_then(|state| state.scan_cursor),
-        recovered_count: state
-            .as_ref()
-            .map(|state| state.recovered_count)
-            .unwrap_or_default(),
-        recovery_epoch: state
-            .as_ref()
-            .map(|state| state.recovery_epoch)
-            .unwrap_or_default(),
-        pending: state.as_ref().and_then(|state| {
-            state
-                .pending
-                .as_ref()
-                .map(|pending| PendingInventoryActionResponse {
-                    kind: page_kind_label(&pending.kind).to_string(),
-                    order_ids: pending.order_ids.clone(),
-                })
-        }),
-        successful_pair_pages: state
-            .as_ref()
-            .map(|state| state.successful_pair_pages)
-            .unwrap_or_default(),
-        cleaned_local_orders: state
-            .as_ref()
-            .map(|state| state.cleaned_local_orders)
-            .unwrap_or_default(),
-        last_error: state.and_then(|state| state.last_error),
-    })
+    // Defensive bound: cap the effective fee at 100% (10_000 bps) so a corrupt
+    // registry response can never dilute holders beyond the credited value.
+    let fee_bps = fee.fee_bps.min(10_000);
+    if fee_bps == 0 {
+        return Ok(ChargeFee::None);
+    }
+    if fee_bps == 0 {
+        return Ok(ChargeFee::None);
+    }
+    // Value the credited proceeds in token-0 terms using the bot's reference
+    // price (shares are token-0 normalized, same as `deposit_shares`).
+    let mut value_in_token0 = credited[0];
+    if !credited[1].is_zero() {
+        if bot.reference_price.is_zero() {
+            return Err(ContractError::InvalidPair);
+        }
+        let token1_as_token0 = checked_ratio(
+            credited[1],
+            Decimal::one().atomics(),
+            bot.reference_price.atomics(),
+        )?;
+        value_in_token0 = value_in_token0.checked_add(token1_as_token0)?;
+    }
+    let shares = value_in_token0.multiply_ratio(fee_bps, 10_000u16);
+    if shares.is_zero() {
+        return Ok(ChargeFee::None);
+    }
+    let previous = SHARES
+        .may_load(deps.storage, (bot_id, collector))?
+        .unwrap_or_default();
+    SHARES.save(
+        deps.storage,
+        (bot_id, collector),
+        &previous.checked_add(shares)?,
+    )?;
+    bot.total_shares = bot.total_shares.checked_add(shares)?;
+    Ok(ChargeFee::Applied(FeeApplied {
+        fee_bps,
+        shares,
+        tier: fee.tier_id,
+        source: format!("{:?}", fee.source),
+    }))
 }
 
 fn next_reply_id(storage: &mut dyn cosmwasm_std::Storage) -> StdResult<u64> {
@@ -2351,6 +1921,7 @@ fn add_confirmable_pages(
 
 fn handle_pending_page(
     deps: DepsMut,
+    env: &Env,
     reply_id: u64,
     page: &PendingPage,
     result: Result<SubMsgResponse, String>,
@@ -2361,6 +1932,22 @@ fn handle_pending_page(
             for entry in &page.entries {
                 bot.free_balances[entry.token_index as usize] =
                     bot.free_balances[entry.token_index as usize].checked_add(entry.refund)?;
+                if page.kind == PageKind::Cancel {
+                    if let Some(order) = ORDERS.may_load(deps.storage, (page.bot_id, entry.order_id))?
+                    {
+                        CANCELLED_ORDERS.save(
+                            deps.storage,
+                            (page.bot_id, entry.order_id),
+                            &CancelledOrder {
+                                rung_index: order.rung_index,
+                                side: order.side,
+                                price: order.price,
+                                remaining: entry.refund,
+                                cancelled_at: env.block.height,
+                            },
+                        )?;
+                    }
+                }
                 ORDERS.remove(deps.storage, (page.bot_id, entry.order_id));
             }
             bot.active_orders = bot
@@ -2445,7 +2032,8 @@ fn check_solvency(deps: Deps, env: &Env, bot_id: u64) -> StdResult<SolvencyRespo
     let mut on_chain_escrow = [Uint128::zero(), Uint128::zero()];
     let mut active_escrow_orders = 0u32;
     let mut parked_refund_orders = 0u32;
-    let terminal_orders = 0u32;
+    let mut executed_orders = 0u32;
+    let mut cancelled_orders = 0u32;
     let mut unverifiable_orders = 0u32;
     let mut warnings = Vec::new();
     for item in ORDERS
@@ -2498,10 +2086,15 @@ fn check_solvency(deps: Deps, env: &Env, bot_id: u64) -> StdResult<SolvencyRespo
                     warnings.push(format!("order {order_id} parked refund fields are invalid"));
                 }
                 Ok(None) => {
-                    unverifiable_orders += 1;
-                    warnings.push(format!(
-                        "order {order_id} is absent from parked refunds but active status failed"
-                    ));
+                    if CANCELLED_ORDERS.has(deps.storage, (bot_id, order_id)) {
+                        // Cancelled via the vault: the escrow was returned when
+                        // the cancel was confirmed and the order was re-tracked.
+                        cancelled_orders += 1;
+                    } else {
+                        // Never cancelled: the order fully executed and its fill
+                        // proceeds are already part of the vault balance.
+                        executed_orders += 1;
+                    }
                 }
                 Err(_) => {
                     unverifiable_orders += 1;
@@ -2522,7 +2115,8 @@ fn check_solvency(deps: Deps, env: &Env, bot_id: u64) -> StdResult<SolvencyRespo
         token_1_actual: actual[1],
         active_escrow_orders,
         parked_refund_orders,
-        terminal_orders,
+        executed_orders,
+        cancelled_orders,
         unverifiable_orders,
         warnings,
     })
@@ -2536,7 +2130,6 @@ mod tests {
         coin, from_json, ContractInfoResponse, ContractResult, Reply, ReplyOn, SubMsgResponse,
         SubMsgResult, SystemResult, WasmQuery,
     };
-    use std::sync::{Arc, Mutex};
 
     fn contract_info(code_id: u64) -> ContractInfoResponse {
         let mut response = ContractInfoResponse::default();
@@ -2582,6 +2175,8 @@ mod tests {
                 max_grid_count: 20,
                 max_orders_per_reconcile: 10,
                 max_active_orders_per_bot: 40,
+                fee_registry: None,
+                fee_collector: None,
             },
         )
         .unwrap();
@@ -2689,11 +2284,6 @@ mod tests {
                     PairQueryMsg::ExpiredLimitRefund { .. } => {
                         to_json_binary(&Option::<ExpiredLimitRefundResponse>::None).unwrap()
                     }
-                    PairQueryMsg::Protocol {} | PairQueryMsg::OwnerInventory { .. } => {
-                        return SystemResult::Ok(ContractResult::Err(
-                            "owner inventory API not installed".into(),
-                        ))
-                    }
                 };
                 SystemResult::Ok(ContractResult::Ok(response))
             }
@@ -2800,52 +2390,10 @@ mod tests {
     }
 
     #[test]
-    fn migration_blocks_withdrawals_until_pair_inventory_can_be_proven() {
+    fn migration_accepts_live_vault_without_inventory_gate() {
         let mut deps = mock_dependencies();
         instantiate_default(deps.as_mut());
         BOTS.save(deps.as_mut().storage, BOT_ID, &test_bot("alice", 0))
-            .unwrap();
-        set_contract_version(deps.as_mut().storage, CONTRACT_NAME, "0.1.0").unwrap();
-        migrate(deps.as_mut(), mock_env(), MigrateMsg {}).unwrap();
-        assert!(INVENTORY_RECONCILIATION_REQUIRED
-            .load(&deps.storage)
-            .unwrap());
-        assert_eq!(
-            require_reconciled_inventory(deps.as_ref()).unwrap_err(),
-            ContractError::InventoryReconciliationRequired
-        );
-    }
-
-    #[test]
-    fn migration_is_repeat_safe_and_rollback_complete_is_never_authoritative() {
-        let mut deps = mock_dependencies();
-        instantiate_default(deps.as_mut());
-        BOTS.save(deps.as_mut().storage, BOT_ID, &test_bot("alice", 0))
-            .unwrap();
-        set_contract_version(deps.as_mut().storage, CONTRACT_NAME, "0.1.0").unwrap();
-        migrate(deps.as_mut(), mock_env(), MigrateMsg {}).unwrap();
-        let locked = INVENTORY_RECONCILIATION.load(&deps.storage).unwrap();
-        assert_eq!(
-            migrate(deps.as_mut(), mock_env(), MigrateMsg {}).unwrap_err(),
-            ContractError::UnsupportedMigrationSource
-        );
-        assert_eq!(
-            INVENTORY_RECONCILIATION.load(&deps.storage).unwrap(),
-            locked
-        );
-
-        let mut complete = locked;
-        complete.phase = InventoryReconciliationPhase::Complete;
-        complete.snapshot = Some(InventorySnapshot {
-            generation: 9,
-            max_order_id: 77,
-        });
-        complete.scan_cursor = Some(77);
-        INVENTORY_RECONCILIATION
-            .save(deps.as_mut().storage, &complete)
-            .unwrap();
-        INVENTORY_RECONCILIATION_REQUIRED
-            .save(deps.as_mut().storage, &false)
             .unwrap();
         ORDERS
             .save(
@@ -2861,20 +2409,22 @@ mod tests {
             .unwrap();
         set_contract_version(deps.as_mut().storage, CONTRACT_NAME, "0.1.0").unwrap();
         migrate(deps.as_mut(), mock_env(), MigrateMsg {}).unwrap();
-        assert!(INVENTORY_RECONCILIATION_REQUIRED
-            .load(&deps.storage)
-            .unwrap());
-        let reset = INVENTORY_RECONCILIATION.load(&deps.storage).unwrap();
-        assert_eq!(reset.phase, InventoryReconciliationPhase::NotStarted);
-        assert!(reset.snapshot.is_none());
-        assert!(reset.scan_cursor.is_none());
-        assert_eq!(reset.recovered_count, 0);
-        assert!(reset.recovery_epoch > complete.recovery_epoch);
         assert!(ORDERS.has(&deps.storage, (BOT_ID, 77)));
         assert_eq!(
             BOTS.load(&deps.storage, BOT_ID).unwrap().owner,
             Addr::unchecked("alice")
         );
+        assert_eq!(BOTS.load(&deps.storage, BOT_ID).unwrap().active_orders, 0);
+    }
+
+    #[test]
+    fn migration_is_repeat_safe() {
+        let mut deps = mock_dependencies();
+        instantiate_default(deps.as_mut());
+        BOTS.save(deps.as_mut().storage, BOT_ID, &test_bot("alice", 0))
+            .unwrap();
+        set_contract_version(deps.as_mut().storage, CONTRACT_NAME, "0.1.0").unwrap();
+        migrate(deps.as_mut(), mock_env(), MigrateMsg {}).unwrap();
         assert_eq!(
             migrate(deps.as_mut(), mock_env(), MigrateMsg {}).unwrap_err(),
             ContractError::UnsupportedMigrationSource
@@ -2892,18 +2442,11 @@ mod tests {
         ] {
             let mut deps = mock_dependencies();
             instantiate_default(deps.as_mut());
-            INVENTORY_RECONCILIATION_REQUIRED
-                .save(deps.as_mut().storage, &false)
-                .unwrap();
             set_contract_version(deps.as_mut().storage, contract, version).unwrap();
             assert_eq!(
                 migrate(deps.as_mut(), mock_env(), MigrateMsg {}).unwrap_err(),
                 ContractError::UnsupportedMigrationSource
             );
-            assert!(!INVENTORY_RECONCILIATION_REQUIRED
-                .load(&deps.storage)
-                .unwrap());
-            assert!(!INVENTORY_RECONCILIATION.exists(&deps.storage));
         }
     }
 
@@ -2914,32 +2457,8 @@ mod tests {
         instantiate_default(deps.as_mut());
         set_contract_version(deps.as_mut().storage, CONTRACT_NAME, "0.1.0").unwrap();
         migrate(deps.as_mut(), mock_env(), MigrateMsg {}).unwrap();
-        assert!(!INVENTORY_RECONCILIATION_REQUIRED
-            .load(&deps.storage)
-            .unwrap());
-        assert!(!INVENTORY_RECONCILIATION.exists(&deps.storage));
         create_bot(deps.as_mut(), "alice");
         assert!(BOTS.has(&deps.storage, BOT_ID));
-    }
-
-    #[test]
-    fn pre_change_raw_reconciliation_value_deserializes_and_is_reset_for_full_scan() {
-        let mut deps = mock_dependencies();
-        instantiate_default(deps.as_mut());
-        BOTS.save(deps.as_mut().storage, BOT_ID, &test_bot("alice", 1))
-            .unwrap();
-        deps.as_mut().storage.set(
-            b"inventory_reconciliation",
-            br#"{"phase":"draining_pair","snapshot":{"generation":3,"max_order_id":8},"pair_code_id":7,"pending":null,"successful_pair_pages":2,"cleaned_local_orders":0,"last_error":null}"#,
-        );
-        let decoded = INVENTORY_RECONCILIATION.load(&deps.storage).unwrap();
-        assert_eq!(decoded.scan_cursor, None);
-        assert_eq!(decoded.recovered_count, 0);
-        set_contract_version(deps.as_mut().storage, CONTRACT_NAME, "0.1.0").unwrap();
-        migrate(deps.as_mut(), mock_env(), MigrateMsg {}).unwrap();
-        let reset = INVENTORY_RECONCILIATION.load(&deps.storage).unwrap();
-        assert_eq!(reset.phase, InventoryReconciliationPhase::NotStarted);
-        assert!(reset.snapshot.is_none());
     }
 
     #[test]
@@ -3834,7 +3353,8 @@ mod tests {
         assert_eq!(response.token_0_actual, Uint128::new(140));
         assert_eq!(response.active_escrow_orders, 0);
         assert_eq!(response.parked_refund_orders, 1);
-        assert_eq!(response.terminal_orders, 0);
+        assert_eq!(response.executed_orders, 0);
+        assert_eq!(response.cancelled_orders, 0);
         assert_eq!(response.unverifiable_orders, 0);
         assert!(response.warnings.is_empty());
     }
@@ -4115,696 +3635,5 @@ mod tests {
             from_json(query(deps.as_ref(), mock_env(), QueryMsg::TokenPolicy {}).unwrap()).unwrap();
         assert!(response.allowed_tokens.is_empty());
         assert!(response.quarantined_tokens.is_empty());
-    }
-
-    fn inventory_row(order_id: u64, state: OwnerOrderState) -> crate::msg::OwnerInventoryRow {
-        crate::msg::OwnerInventoryRow {
-            order_id,
-            owner: mock_env().contract.address.to_string(),
-            state: state.clone(),
-            side: LimitOrderSide::Ask,
-            price: Some(Decimal::percent(250)),
-            remaining: Uint128::new(25),
-            expires_at: Some(1_000),
-            reason: if state == OwnerOrderState::Active {
-                None
-            } else {
-                Some(crate::msg::OrderStatusReason::TimeExpired)
-            },
-        }
-    }
-
-    #[test]
-    fn inventory_page_validation_rejects_foreign_duplicate_replayed_and_bad_fields() {
-        let env = mock_env();
-        let valid = OwnerInventoryResponse {
-            schema_version: 1,
-            snapshot: OwnerInventorySnapshot {
-                generation: 4,
-                max_order_id: 10,
-            },
-            rows: vec![
-                inventory_row(2, OwnerOrderState::Active),
-                inventory_row(7, OwnerOrderState::ParkedRefund),
-            ],
-            next_cursor: None,
-            complete: true,
-        };
-        validate_inventory_page(&env, &valid, None, None, 2).unwrap();
-        assert_eq!(
-            validate_inventory_page(&env, &valid, None, Some(2), 2),
-            Err(ContractError::InvalidOwnerInventory)
-        );
-        assert_eq!(
-            validate_pair_batch_limit(0),
-            Err(ContractError::InvalidPairBatchLimit)
-        );
-        assert_eq!(
-            validate_pair_batch_limit(101),
-            Err(ContractError::InvalidPairBatchLimit)
-        );
-        validate_pair_batch_limit(1).unwrap();
-
-        let mut malformed = Vec::new();
-        let mut foreign = valid.clone();
-        foreign.rows[0].owner = "foreign".into();
-        malformed.push(foreign);
-        let mut duplicate = valid.clone();
-        duplicate.rows[1].order_id = duplicate.rows[0].order_id;
-        malformed.push(duplicate);
-        let mut replayed = valid.clone();
-        replayed.rows.swap(0, 1);
-        malformed.push(replayed);
-        let mut zero = valid.clone();
-        zero.rows[0].remaining = Uint128::zero();
-        malformed.push(zero);
-        let mut beyond_snapshot = valid.clone();
-        beyond_snapshot.rows[1].order_id = 11;
-        malformed.push(beyond_snapshot);
-        let mut bad_cursor = valid.clone();
-        bad_cursor.complete = false;
-        bad_cursor.next_cursor = Some(2);
-        malformed.push(bad_cursor);
-        let mut stale_snapshot = valid.clone();
-        stale_snapshot.snapshot.generation = 5;
-        assert_eq!(
-            validate_inventory_page(
-                &env,
-                &stale_snapshot,
-                Some(&InventorySnapshot {
-                    generation: 4,
-                    max_order_id: 10,
-                }),
-                None,
-                2,
-            ),
-            Err(ContractError::InvalidOwnerInventory)
-        );
-        for page in malformed {
-            assert_eq!(
-                validate_inventory_page(&env, &page, None, None, 2),
-                Err(ContractError::InvalidOwnerInventory)
-            );
-        }
-    }
-
-    #[test]
-    fn inventory_protocol_query_schema_readiness_features_and_code_fail_closed() {
-        let mut deps = mock_dependencies();
-        instantiate_default(deps.as_mut());
-        BOTS.save(deps.as_mut().storage, BOT_ID, &test_bot("alice", 0))
-            .unwrap();
-        set_contract_version(deps.as_mut().storage, CONTRACT_NAME, "0.1.0").unwrap();
-        migrate(deps.as_mut(), mock_env(), MigrateMsg {}).unwrap();
-        let mode = Arc::new(Mutex::new(0u8));
-        let query_mode = Arc::clone(&mode);
-        deps.querier.update_wasm(move |query| match query {
-            WasmQuery::ContractInfo { contract_addr } if contract_addr == "pair" => {
-                SystemResult::Ok(ContractResult::Ok(
-                    to_json_binary(&contract_info(7)).unwrap(),
-                ))
-            }
-            WasmQuery::Smart { contract_addr, msg } if contract_addr == "pair" => {
-                let query: PairQueryMsg = from_json(msg).unwrap();
-                if !matches!(query, PairQueryMsg::Protocol {}) {
-                    return SystemResult::Ok(ContractResult::Err("unexpected query".into()));
-                }
-                let mode = *query_mode.lock().unwrap();
-                if mode == 0 {
-                    return SystemResult::Ok(ContractResult::Err("query unavailable".into()));
-                }
-                let mut protocol = PairProtocolResponse {
-                    schema_version: 1,
-                    features: vec![
-                        PairApiFeature::TypedOrderStatus,
-                        PairApiFeature::OwnerInventory,
-                        PairApiFeature::OwnerIndexBackfill,
-                    ],
-                    owner_inventory_ready: true,
-                    owner_inventory_generation: 4,
-                    max_owner_inventory_page_size: 100,
-                };
-                match mode {
-                    1 => protocol.schema_version = 2,
-                    2 => protocol.owner_inventory_ready = false,
-                    3 => {
-                        protocol.features.pop();
-                    }
-                    4 => protocol.max_owner_inventory_page_size = 101,
-                    _ => {}
-                }
-                SystemResult::Ok(ContractResult::Ok(to_json_binary(&protocol).unwrap()))
-            }
-            _ => SystemResult::Ok(ContractResult::Err("unsupported query".into())),
-        });
-
-        for invalid_mode in 0..=4 {
-            *mode.lock().unwrap() = invalid_mode;
-            let before = INVENTORY_RECONCILIATION.load(&deps.storage).unwrap();
-            assert!(execute_continue_inventory_reconciliation(
-                deps.as_mut(),
-                mock_env(),
-                mock_info("alice", &[]),
-                10,
-            )
-            .is_err());
-            assert_eq!(
-                INVENTORY_RECONCILIATION.load(&deps.storage).unwrap(),
-                before
-            );
-        }
-
-        assert_eq!(
-            execute_continue_inventory_reconciliation(
-                deps.as_mut(),
-                mock_env(),
-                mock_info("alice", &[]),
-                0,
-            )
-            .unwrap_err(),
-            ContractError::InvalidInventoryReconciliationLimit
-        );
-        BOTS.update(deps.as_mut().storage, BOT_ID, |bot| -> StdResult<_> {
-            let mut bot = bot.unwrap();
-            bot.pair_code_id = 8;
-            Ok(bot)
-        })
-        .unwrap();
-        assert_eq!(
-            execute_continue_inventory_reconciliation(
-                deps.as_mut(),
-                mock_env(),
-                mock_info("alice", &[]),
-                10,
-            )
-            .unwrap_err(),
-            ContractError::PairCodeMismatch
-        );
-    }
-
-    #[test]
-    fn migrated_inventory_drain_retries_races_cleans_locals_and_syncs_actual_balances() {
-        let mut deps = mock_dependencies();
-        instantiate_default(deps.as_mut());
-        let mut bot = test_bot("alice", 99);
-        bot.free_balances = [Uint128::new(999), Uint128::new(999)];
-        bot.total_shares = Uint128::new(100);
-        BOTS.save(deps.as_mut().storage, BOT_ID, &bot).unwrap();
-        for order_id in [2u64, 7] {
-            ORDERS
-                .save(
-                    deps.as_mut().storage,
-                    (BOT_ID, order_id),
-                    &GridOrder {
-                        rung_index: 3,
-                        side: LimitOrderSide::Ask,
-                        price: Decimal::percent(250),
-                        remaining: Uint128::new(100),
-                    },
-                )
-                .unwrap();
-        }
-        // Model a rolled-back 0.1.1 attempt with stale progress and recovery rows.
-        let mut stale = InventoryReconciliation::locked();
-        stale.phase = InventoryReconciliationPhase::ScanningPair;
-        stale.snapshot = Some(InventorySnapshot {
-            generation: 2,
-            max_order_id: 99,
-        });
-        stale.scan_cursor = Some(5);
-        stale.recovered_count = 1;
-        stale.recovery_epoch = 41;
-        INVENTORY_RECONCILIATION
-            .save(deps.as_mut().storage, &stale)
-            .unwrap();
-        INVENTORY_RECONCILIATION_REQUIRED
-            .save(deps.as_mut().storage, &false)
-            .unwrap();
-        for order_id in [5u64, 99] {
-            RECOVERED_INVENTORY
-                .save(
-                    deps.as_mut().storage,
-                    order_id,
-                    &RecoveredInventoryRow {
-                        recovery_epoch: 41,
-                        owner: mock_env().contract.address,
-                        state: OwnerOrderState::Active,
-                        side: LimitOrderSide::Ask,
-                        price: Some(Decimal::percent(250)),
-                        remaining: Uint128::new(25),
-                        expires_at: None,
-                        reason: None,
-                    },
-                )
-                .unwrap();
-        }
-        set_contract_version(deps.as_mut().storage, CONTRACT_NAME, "0.1.0").unwrap();
-        migrate(deps.as_mut(), mock_env(), MigrateMsg {}).unwrap();
-        let reset = INVENTORY_RECONCILIATION.load(&deps.storage).unwrap();
-        assert_eq!(reset.phase, InventoryReconciliationPhase::NotStarted);
-        assert_eq!(reset.recovered_count, 0);
-        assert!(reset.recovery_epoch > 41);
-        assert!(RECOVERED_INVENTORY.has(&deps.storage, 99));
-        assert_eq!(
-            execute_allocate(deps.as_mut(), mock_env(), mock_info("alice", &[]), BOT_ID,)
-                .unwrap_err(),
-            ContractError::InventoryReconciliationRequired
-        );
-        assert_eq!(
-            execute_receive(
-                deps.as_mut(),
-                mock_env(),
-                mock_info("token_a", &[]),
-                Cw20ReceiveMsg {
-                    sender: "alice".into(),
-                    amount: Uint128::one(),
-                    msg: to_json_binary(&ReceiveMsg::Deposit { bot_id: BOT_ID }).unwrap(),
-                },
-            )
-            .unwrap_err(),
-            ContractError::InventoryReconciliationRequired
-        );
-
-        let rows = Arc::new(Mutex::new(vec![
-            inventory_row(5, OwnerOrderState::Active),
-            inventory_row(6, OwnerOrderState::Active),
-            inventory_row(7, OwnerOrderState::ParkedRefund),
-        ]));
-        let query_rows = Arc::clone(&rows);
-        let fail_inventory_query = Arc::new(Mutex::new(false));
-        let query_failure = Arc::clone(&fail_inventory_query);
-        let replay_inventory_page = Arc::new(Mutex::new(false));
-        let query_replay = Arc::clone(&replay_inventory_page);
-        deps.querier.update_wasm(move |query| match query {
-            WasmQuery::ContractInfo { contract_addr } if contract_addr == "pair" => {
-                SystemResult::Ok(ContractResult::Ok(
-                    to_json_binary(&contract_info(7)).unwrap(),
-                ))
-            }
-            WasmQuery::Smart { contract_addr, msg } if contract_addr == "pair" => {
-                match from_json::<PairQueryMsg>(msg).unwrap() {
-                    PairQueryMsg::Protocol {} => SystemResult::Ok(ContractResult::Ok(
-                        to_json_binary(&PairProtocolResponse {
-                            schema_version: 1,
-                            features: vec![
-                                PairApiFeature::TypedOrderStatus,
-                                PairApiFeature::OwnerInventory,
-                                PairApiFeature::OwnerIndexBackfill,
-                            ],
-                            owner_inventory_ready: true,
-                            owner_inventory_generation: 4,
-                            max_owner_inventory_page_size: 100,
-                        })
-                        .unwrap(),
-                    )),
-                    PairQueryMsg::LimitOrderConfig {} => SystemResult::Ok(ContractResult::Ok(
-                        to_json_binary(&LimitOrderConfigResponse { max_batch_rungs: 1 }).unwrap(),
-                    )),
-                    PairQueryMsg::OwnerInventory {
-                        snapshot,
-                        start_after,
-                        limit,
-                        ..
-                    } => {
-                        if *query_failure.lock().unwrap() {
-                            return SystemResult::Ok(ContractResult::Err(
-                                "inventory query failed".into(),
-                            ));
-                        }
-                        let replay = *query_replay.lock().unwrap();
-                        let all: Vec<_> = query_rows
-                            .lock()
-                            .unwrap()
-                            .iter()
-                            .filter(|row| {
-                                replay || start_after.map_or(true, |cursor| row.order_id > cursor)
-                            })
-                            .cloned()
-                            .collect();
-                        let limit = limit.unwrap() as usize;
-                        let mut page_rows = all;
-                        let complete = page_rows.len() <= limit;
-                        page_rows.truncate(limit);
-                        let next_cursor = if complete {
-                            None
-                        } else {
-                            page_rows.last().map(|row| row.order_id)
-                        };
-                        SystemResult::Ok(ContractResult::Ok(
-                            to_json_binary(&OwnerInventoryResponse {
-                                schema_version: 1,
-                                snapshot: snapshot.unwrap_or(OwnerInventorySnapshot {
-                                    generation: 4,
-                                    max_order_id: 7,
-                                }),
-                                rows: page_rows,
-                                next_cursor,
-                                complete,
-                            })
-                            .unwrap(),
-                        ))
-                    }
-                    _ => SystemResult::Ok(ContractResult::Err("unsupported pair query".into())),
-                }
-            }
-            WasmQuery::Smart { contract_addr, msg }
-                if contract_addr == "token_a" || contract_addr == "token_b" =>
-            {
-                let _: Cw20QueryMsg = from_json(msg).unwrap();
-                SystemResult::Ok(ContractResult::Ok(
-                    to_json_binary(&BalanceResponse {
-                        balance: if contract_addr == "token_a" {
-                            Uint128::new(123)
-                        } else {
-                            Uint128::new(456)
-                        },
-                    })
-                    .unwrap(),
-                ))
-            }
-            _ => SystemResult::Ok(ContractResult::Err("unsupported query".into())),
-        });
-
-        let first_scan = execute_continue_inventory_reconciliation(
-            deps.as_mut(),
-            mock_env(),
-            mock_info("alice", &[]),
-            2,
-        )
-        .unwrap();
-        assert!(first_scan.messages.is_empty());
-        let state = INVENTORY_RECONCILIATION.load(&deps.storage).unwrap();
-        assert_eq!(state.snapshot.as_ref().unwrap().max_order_id, 7);
-        assert_eq!(state.scan_cursor, Some(6));
-        assert_eq!(state.recovered_count, 2);
-        assert!(RECOVERED_INVENTORY.has(&deps.storage, 5));
-        assert!(RECOVERED_INVENTORY.has(&deps.storage, 6));
-        assert!(!RECOVERED_INVENTORY.has(&deps.storage, 7));
-        let persisted = state;
-
-        *fail_inventory_query.lock().unwrap() = true;
-        assert!(execute_continue_inventory_reconciliation(
-            deps.as_mut(),
-            mock_env(),
-            mock_info("alice", &[]),
-            2,
-        )
-        .is_err());
-        assert_eq!(
-            INVENTORY_RECONCILIATION.load(&deps.storage).unwrap(),
-            persisted
-        );
-        assert_eq!(
-            RECOVERED_INVENTORY
-                .keys(&deps.storage, None, None, Order::Ascending)
-                .collect::<StdResult<Vec<_>>>()
-                .unwrap(),
-            vec![5, 6, 99]
-        );
-        *fail_inventory_query.lock().unwrap() = false;
-        *replay_inventory_page.lock().unwrap() = true;
-        assert!(execute_continue_inventory_reconciliation(
-            deps.as_mut(),
-            mock_env(),
-            mock_info("alice", &[]),
-            2,
-        )
-        .is_err());
-        assert_eq!(
-            INVENTORY_RECONCILIATION.load(&deps.storage).unwrap(),
-            persisted
-        );
-        assert_eq!(
-            RECOVERED_INVENTORY
-                .keys(&deps.storage, None, None, Order::Ascending)
-                .collect::<StdResult<Vec<_>>>()
-                .unwrap(),
-            vec![5, 6, 99]
-        );
-        *replay_inventory_page.lock().unwrap() = false;
-
-        let second_scan = execute_continue_inventory_reconciliation(
-            deps.as_mut(),
-            mock_env(),
-            mock_info("alice", &[]),
-            2,
-        )
-        .unwrap();
-        assert!(second_scan.messages.is_empty());
-        let state = INVENTORY_RECONCILIATION.load(&deps.storage).unwrap();
-        assert_eq!(persisted.snapshot, state.snapshot);
-        assert_eq!(state.scan_cursor, Some(7));
-        assert_eq!(state.recovered_count, 3);
-        assert_eq!(state.phase, InventoryReconciliationPhase::DrainingPair);
-        assert_eq!(
-            RECOVERED_INVENTORY.load(&deps.storage, 5).unwrap().state,
-            OwnerOrderState::Active
-        );
-        assert_eq!(
-            RECOVERED_INVENTORY.load(&deps.storage, 7).unwrap().state,
-            OwnerOrderState::ParkedRefund
-        );
-        // A fully filled row disappears after scan; canonical drain must not infer a refund.
-        rows.lock().unwrap().retain(|row| row.order_id != 6);
-
-        let first = execute_continue_inventory_reconciliation(
-            deps.as_mut(),
-            mock_env(),
-            mock_info("alice", &[]),
-            100,
-        )
-        .unwrap();
-        let first_id = first.messages[0].id;
-        let state = INVENTORY_RECONCILIATION.load(&deps.storage).unwrap();
-        assert_eq!(state.pending.unwrap().kind, PageKind::Cancel);
-        let reported: ConfigResponse =
-            from_json(query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap()).unwrap();
-        assert_eq!(
-            reported.inventory_reconciliation.phase,
-            InventoryReconciliationPhaseResponse::DrainingPair
-        );
-        assert_eq!(
-            reported.inventory_reconciliation.pending.unwrap().order_ids,
-            vec![5]
-        );
-        assert_eq!(reported.inventory_reconciliation.scan_cursor, Some(7));
-        assert_eq!(reported.inventory_reconciliation.recovered_count, 3);
-        assert_eq!(BOTS.load(&deps.storage, BOT_ID).unwrap().active_orders, 99);
-        assert!(ORDERS.has(&deps.storage, (BOT_ID, 2)));
-
-        reply(
-            deps.as_mut(),
-            mock_env(),
-            Reply {
-                id: first_id,
-                result: SubMsgResult::Err("active became parked".into()),
-            },
-        )
-        .unwrap();
-        let failed = INVENTORY_RECONCILIATION.load(&deps.storage).unwrap();
-        assert!(failed.pending.is_none());
-        assert_eq!(failed.last_error.as_deref(), Some("active became parked"));
-        let reported: ConfigResponse =
-            from_json(query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap()).unwrap();
-        assert_eq!(
-            reported.inventory_reconciliation.last_error.as_deref(),
-            Some("active became parked")
-        );
-        assert!(INVENTORY_RECONCILIATION_REQUIRED
-            .load(&deps.storage)
-            .unwrap());
-
-        rows.lock().unwrap()[0].state = OwnerOrderState::ParkedRefund;
-        rows.lock().unwrap()[0].reason = Some(crate::msg::OrderStatusReason::TimeExpired);
-        let claim = execute_continue_inventory_reconciliation(
-            deps.as_mut(),
-            mock_env(),
-            mock_info("alice", &[]),
-            100,
-        )
-        .unwrap();
-        assert_eq!(
-            INVENTORY_RECONCILIATION
-                .load(&deps.storage)
-                .unwrap()
-                .pending
-                .unwrap()
-                .kind,
-            PageKind::Claim
-        );
-        reply(
-            deps.as_mut(),
-            mock_env(),
-            Reply {
-                id: claim.messages[0].id,
-                result: SubMsgResult::Err("claim paused".into()),
-            },
-        )
-        .unwrap();
-        assert!(INVENTORY_RECONCILIATION_REQUIRED
-            .load(&deps.storage)
-            .unwrap());
-        assert!(ORDERS.has(&deps.storage, (BOT_ID, 7)));
-        let claim_retry = execute_continue_inventory_reconciliation(
-            deps.as_mut(),
-            mock_env(),
-            mock_info("alice", &[]),
-            100,
-        )
-        .unwrap();
-        reply(
-            deps.as_mut(),
-            mock_env(),
-            Reply {
-                id: claim_retry.messages[0].id,
-                result: SubMsgResult::Ok(SubMsgResponse {
-                    events: vec![],
-                    data: None,
-                }),
-            },
-        )
-        .unwrap();
-        rows.lock().unwrap().retain(|row| row.order_id != 5);
-        let final_claim = execute_continue_inventory_reconciliation(
-            deps.as_mut(),
-            mock_env(),
-            mock_info("alice", &[]),
-            100,
-        )
-        .unwrap();
-        assert_eq!(
-            INVENTORY_RECONCILIATION
-                .load(&deps.storage)
-                .unwrap()
-                .pending
-                .unwrap()
-                .order_ids,
-            vec![7]
-        );
-        reply(
-            deps.as_mut(),
-            mock_env(),
-            Reply {
-                id: final_claim.messages[0].id,
-                result: SubMsgResult::Ok(SubMsgResponse {
-                    events: vec![],
-                    data: None,
-                }),
-            },
-        )
-        .unwrap();
-        rows.lock().unwrap().clear();
-
-        execute_continue_inventory_reconciliation(
-            deps.as_mut(),
-            mock_env(),
-            mock_info("alice", &[]),
-            1,
-        )
-        .unwrap();
-        assert!(INVENTORY_RECONCILIATION_REQUIRED
-            .load(&deps.storage)
-            .unwrap());
-        assert_eq!(
-            INVENTORY_RECONCILIATION
-                .load(&deps.storage)
-                .unwrap()
-                .recovered_count,
-            2
-        );
-        assert_eq!(
-            ORDERS
-                .prefix(BOT_ID)
-                .keys(&deps.storage, None, None, Order::Ascending)
-                .count(),
-            2
-        );
-        execute_continue_inventory_reconciliation(
-            deps.as_mut(),
-            mock_env(),
-            mock_info("alice", &[]),
-            1,
-        )
-        .unwrap();
-        assert_eq!(
-            INVENTORY_RECONCILIATION
-                .load(&deps.storage)
-                .unwrap()
-                .recovered_count,
-            1
-        );
-        assert_eq!(
-            ORDERS
-                .prefix(BOT_ID)
-                .keys(&deps.storage, None, None, Order::Ascending)
-                .count(),
-            2
-        );
-        execute_continue_inventory_reconciliation(
-            deps.as_mut(),
-            mock_env(),
-            mock_info("alice", &[]),
-            1,
-        )
-        .unwrap();
-        assert_eq!(
-            INVENTORY_RECONCILIATION
-                .load(&deps.storage)
-                .unwrap()
-                .recovered_count,
-            0
-        );
-        assert_eq!(
-            ORDERS
-                .prefix(BOT_ID)
-                .keys(&deps.storage, None, None, Order::Ascending)
-                .count(),
-            2
-        );
-        assert!(RECOVERED_INVENTORY.has(&deps.storage, 99));
-        execute_continue_inventory_reconciliation(
-            deps.as_mut(),
-            mock_env(),
-            mock_info("alice", &[]),
-            1,
-        )
-        .unwrap();
-        assert!(!RECOVERED_INVENTORY.has(&deps.storage, 99));
-        assert_eq!(
-            ORDERS
-                .prefix(BOT_ID)
-                .keys(&deps.storage, None, None, Order::Ascending)
-                .count(),
-            1
-        );
-        assert_eq!(
-            execute_withdraw(
-                deps.as_mut(),
-                mock_info("alice", &[]),
-                BOT_ID,
-                Uint128::one(),
-                None,
-            )
-            .unwrap_err(),
-            ContractError::InventoryReconciliationRequired
-        );
-
-        execute_continue_inventory_reconciliation(
-            deps.as_mut(),
-            mock_env(),
-            mock_info("alice", &[]),
-            1,
-        )
-        .unwrap();
-        let bot = BOTS.load(&deps.storage, BOT_ID).unwrap();
-        assert_eq!(bot.active_orders, 0);
-        assert_eq!(bot.free_balances, [Uint128::new(123), Uint128::new(456)]);
-        assert!(!INVENTORY_RECONCILIATION_REQUIRED
-            .load(&deps.storage)
-            .unwrap());
-        assert_eq!(
-            INVENTORY_RECONCILIATION.load(&deps.storage).unwrap().phase,
-            InventoryReconciliationPhase::Complete
-        );
     }
 }

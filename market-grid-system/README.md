@@ -62,5 +62,5 @@ cargo test --manifest-path market-grid-system/Cargo.toml
 cargo clippy --manifest-path market-grid-system/Cargo.toml --all-targets -- -D warnings
 ```
 
-The related reference-only limit-order grid is in
-[`limit-grid-system`](../limit-grid-system/README.md) and must not be deployed.
+The related limit-order grid is in
+[`limit-grid-system`](../limit-grid-system/README.md).

@@ -5,6 +5,8 @@
 /grid-operator-system/artifacts/
 /market-grid-system/target/
 /market-grid-system/artifacts/
+/fee-system/target/
+/fee-system/artifacts/
 /limit-grid-system/target/
 /limit-grid-system/artifacts/
 /artifacts/

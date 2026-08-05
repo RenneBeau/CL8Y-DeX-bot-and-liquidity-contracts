@@ -1,6 +1,6 @@
 # Verification Evidence
 
-Last updated: 2026-08-01
+Last updated: 2026-08-05
 
 This file distinguishes local execution from GitHub Actions evidence. A workflow
 definition is not proof that it ran, and source tests are not a security audit.
@@ -22,9 +22,10 @@ working-tree corrections:
 
 | Command | Result | Scope |
 |---|---|---|
-| `cargo +1.81.0 test --locked --workspace --all-targets` in `limit-grid-system` | PASS: 49 tests (4 manager, 33 vault unit, 12 integration) | Grid limit-order contracts (reference) |
+| `cargo +1.81.0 test --locked --workspace --all-targets` in `limit-grid-system` | PASS: 48 tests (4 manager, 29 vault unit, 15 integration) | Grid limit-order contracts (reference) |
 | `cargo +1.81.0 test --locked --workspace --all-targets` in `market-grid-system` | PASS: 17 tests (10 vault unit, 7 swap integration) | Grid swap contract (deployable) |
 | `cargo +1.81.0 test --locked --workspace --all-targets` in `rebalancer-system` | PASS: 30 Rust tests (11 liquidity, 15 vault, 4 proxy) | Rebalancer contracts/packages |
+| `cargo +1.81.0 test --locked --workspace --all-targets` in `fee-system` | PASS: 10 tests (fee-registry) | Protocol fee-registry (new workspace) |
 | `python3 -m unittest -v test_keeper.py` | PASS: 50 tests | Rebalancer keeper |
 | `python3 -m unittest discover -s grid-operator-system/services/grid-operator/tests -p 'test_*.py'` | PASS: 24 tests | Grid operator |
 | `make local-e2e` | PASS: 10 rebalancer and 10 grid scenarios | Signed LocalTerra, uncommitted tree |
@@ -73,6 +74,5 @@ profitability, oracle robustness, or production safety.
 ## Interpretation
 
 Passing tests demonstrate only the behavior covered by those tests. Independent
-review, external audit, complete grid pair-status semantics, legacy order inventory
-reconciliation, migration rehearsal, and staged deployment evidence remain required
-before economic deployment.
+review, external audit, migration rehearsal, and staged deployment evidence
+remain required before economic deployment.

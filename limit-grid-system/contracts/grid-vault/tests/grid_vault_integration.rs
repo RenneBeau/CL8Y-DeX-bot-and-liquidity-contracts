@@ -21,11 +21,9 @@ use cl8y_grid_manager::msg::{
 };
 use cl8y_grid_vault::msg::{
     Asset, AssetInfo, ExecuteMsg as VaultExecuteMsg, ExpiredLimitRefundResponse, FactoryQueryMsg,
-    InstantiateMsg as VaultInstantiateMsg, InventoryReconciliationPhaseResponse,
-    LimitOrderConfigResponse, LimitOrderResponse, LimitOrderSide, MigrateMsg as VaultMigrateMsg,
-    OrderStatusReason, OwnerInventoryResponse, OwnerInventoryRow, OwnerInventorySnapshot,
-    OwnerOrderState, PairApiFeature, PairCw20HookMsg, PairInfo, PairProtocolResponse, PairQueryMsg,
-    PoolResponse, QueryMsg as VaultQueryMsg, ReceiveMsg, TokenPolicyResponse,
+    InstantiateMsg as VaultInstantiateMsg, LimitOrderConfigResponse, LimitOrderResponse,
+    LimitOrderSide, PairCw20HookMsg, PairInfo, PairQueryMsg, PoolResponse,
+    QueryMsg as VaultQueryMsg, ReceiveMsg, TokenPolicyResponse,
 };
 
 // ---------------------------------------------------------------------------
@@ -63,6 +61,57 @@ fn mock_factory_code() -> Box<dyn Contract<Empty, Empty>> {
                 },
             };
             to_json_binary(&response)
+        },
+    );
+    Box::new(contract)
+}
+
+// ---------------------------------------------------------------------------
+// Mock fee-registry
+// ---------------------------------------------------------------------------
+
+#[cw_serde]
+pub struct MockFeeRegistryInstantiateMsg {
+    pub fee_bps: u16,
+}
+
+#[cw_serde]
+pub enum MockFeeRegistryQueryMsg {
+    EffectiveFee { trader: String },
+}
+
+/// Shape must match the vault's internal `FeeRegistryEffectiveFeeResponse`.
+#[cw_serde]
+pub struct MockFeeRegistryResponse {
+    pub fee_bps: u16,
+    pub discount_bps: u16,
+    pub tier_id: Option<u8>,
+    pub source: String,
+}
+
+const MOCK_FEE_BPS: Item<u16> = Item::new("mock_fee_bps");
+
+fn mock_fee_registry_code() -> Box<dyn Contract<Empty, Empty>> {
+    let contract = ContractWrapper::new(
+        |_deps, _env, _info, _msg: Empty| -> StdResult<cosmwasm_std::Response> {
+            Err(StdError::generic_err("registry has no execute"))
+        },
+        |deps, _env, _info, msg: MockFeeRegistryInstantiateMsg| -> StdResult<cosmwasm_std::Response> {
+            MOCK_FEE_BPS.save(deps.storage, &msg.fee_bps)?;
+            Ok(cosmwasm_std::Response::new())
+        },
+        |deps, _env, msg: MockFeeRegistryQueryMsg| -> StdResult<Binary> {
+            let fee_bps = MOCK_FEE_BPS.load(deps.storage)?;
+            match msg {
+                MockFeeRegistryQueryMsg::EffectiveFee { .. } => to_json_binary(
+                    &MockFeeRegistryResponse {
+                        fee_bps,
+                        discount_bps: 0,
+                        tier_id: None,
+                        source: "live".to_string(),
+                    },
+                ),
+            }
         },
     );
     Box::new(contract)
@@ -358,91 +407,6 @@ fn mock_pair_query(
             });
             to_json_binary(&refund)
         }
-        PairQueryMsg::Protocol {} => to_json_binary(&PairProtocolResponse {
-            schema_version: 1,
-            features: vec![
-                PairApiFeature::TypedOrderStatus,
-                PairApiFeature::OwnerInventory,
-                PairApiFeature::OwnerIndexBackfill,
-            ],
-            owner_inventory_ready: true,
-            owner_inventory_generation: 1,
-            max_owner_inventory_page_size: 100,
-        }),
-        PairQueryMsg::OwnerInventory {
-            owner,
-            snapshot,
-            start_after,
-            limit,
-        } => {
-            let max_order_id = PAIR_NEXT_ORDER.load(deps.storage)?.saturating_sub(1);
-            let snapshot = snapshot.unwrap_or(OwnerInventorySnapshot {
-                generation: 1,
-                max_order_id,
-            });
-            if snapshot.generation != 1 || snapshot.max_order_id > max_order_id {
-                return Err(StdError::generic_err("snapshot mismatch"));
-            }
-            let mut rows = Vec::new();
-            for item in PAIR_ORDERS.range(
-                deps.storage,
-                start_after.map(cw_storage_plus::Bound::exclusive),
-                Some(cw_storage_plus::Bound::inclusive(snapshot.max_order_id)),
-                cosmwasm_std::Order::Ascending,
-            ) {
-                let (order_id, order) = item?;
-                if order.owner == owner {
-                    rows.push(OwnerInventoryRow {
-                        order_id,
-                        owner: order.owner,
-                        state: OwnerOrderState::Active,
-                        side: order.side,
-                        price: Some(order.price),
-                        remaining: order.remaining,
-                        expires_at: order.expires_at,
-                        reason: None,
-                    });
-                }
-            }
-            for item in PAIR_PARKED.range(
-                deps.storage,
-                start_after.map(cw_storage_plus::Bound::exclusive),
-                Some(cw_storage_plus::Bound::inclusive(snapshot.max_order_id)),
-                cosmwasm_std::Order::Ascending,
-            ) {
-                let (order_id, order) = item?;
-                if order.owner == owner {
-                    rows.push(OwnerInventoryRow {
-                        order_id,
-                        owner: order.owner,
-                        state: OwnerOrderState::ParkedRefund,
-                        side: order.side,
-                        price: Some(order.price),
-                        remaining: order.remaining,
-                        expires_at: order.expires_at,
-                        reason: Some(OrderStatusReason::TimeExpired),
-                    });
-                }
-            }
-            rows.sort_by_key(|row| row.order_id);
-            let limit = limit.unwrap_or(50) as usize;
-            let complete = rows.len() <= limit;
-            if !complete {
-                rows.truncate(limit);
-            }
-            let next_cursor = if complete {
-                None
-            } else {
-                rows.last().map(|row| row.order_id)
-            };
-            to_json_binary(&OwnerInventoryResponse {
-                schema_version: 1,
-                snapshot,
-                rows,
-                next_cursor,
-                complete,
-            })
-        }
     }
 }
 
@@ -661,28 +625,44 @@ struct Harness {
     token_1: Addr,
     alice: Addr,
     keeper: Addr,
-    vault_code_id: u64,
 }
 
 impl Harness {
     fn new() -> Self {
-        Self::new_with_tokens(None)
+        Self::new_with_tokens(None, None, None)
     }
 
     fn new_with_malicious(lie: Uint128) -> Self {
-        Self::new_with_tokens(Some(lie))
+        Self::new_with_tokens(Some(lie), None, None)
     }
 
-    fn new_with_tokens(malicious_lie: Option<Uint128>) -> Self {
+    fn new_with_fee_on(app: App, fee_registry: &str, fee_collector: &str) -> Self {
+        Self::build(app, None, Some(fee_registry.to_string()), Some(fee_collector.to_string()))
+    }
+
+    fn new_with_tokens(
+        malicious_lie: Option<Uint128>,
+        fee_registry: Option<String>,
+        fee_collector: Option<String>,
+    ) -> Self {
+        let app = App::new(|router, _api, storage| {
+            router
+                .bank
+                .init_balance(storage, &Addr::unchecked("alice"), vec![coin(1_000_000_000, GAS_DENOM)])
+                .unwrap();
+        });
+        Self::build(app, malicious_lie, fee_registry, fee_collector)
+    }
+
+    fn build(
+        mut app: App,
+        malicious_lie: Option<Uint128>,
+        fee_registry: Option<String>,
+        fee_collector: Option<String>,
+    ) -> Self {
         let alice = Addr::unchecked("alice");
         let admin = Addr::unchecked("admin");
         let keeper = Addr::unchecked("keeper");
-        let mut app = App::new(|router, _api, storage| {
-            router
-                .bank
-                .init_balance(storage, &alice, vec![coin(1_000_000_000, GAS_DENOM)])
-                .unwrap();
-        });
 
         let cw20 = app.store_code(cw20_code());
         let malicious = app.store_code(malicious_token_code());
@@ -818,6 +798,8 @@ impl Harness {
                     max_grid_count: 12,
                     max_orders_per_reconcile: 20,
                     max_active_orders_per_bot: 20,
+                    fee_registry,
+                    fee_collector,
                 },
                 &[],
                 "grid-vault",
@@ -858,7 +840,6 @@ impl Harness {
             token_1,
             alice,
             keeper,
-            vault_code_id,
         }
     }
 
@@ -1399,7 +1380,7 @@ fn unsolicited_transfer_can_be_synchronized_without_minting_shares() {
 }
 
 #[test]
-fn generic_pair_query_error_retains_order_and_blocks_withdrawal() {
+fn generic_pair_query_error_never_cancelled_is_classified_fully_executed() {
     let mut h = Harness::new();
     h.create_bot();
     h.deposit(1, &h.token_0.clone(), Uint128::new(1_000));
@@ -1409,27 +1390,20 @@ fn generic_pair_query_error_retains_order_and_blocks_withdrawal() {
     let target = orders.first().unwrap();
     h.set_limit_order_error(target.order_id, Some("query reverted".to_string()));
 
-    // An untyped pair failure is not evidence that the order is terminal.
+    // The vault never cancelled it, and the pair reports no parked refund, so
+    // the order left the book through execution: it is fully executed.
     let ids: Vec<u64> = h.orders(1).iter().map(|order| order.order_id).collect();
-    let error = h
-        .app
-        .execute_contract(
-            h.keeper.clone(),
-            h.vault.clone(),
-            &VaultExecuteMsg::Reconcile {
-                bot_id: 1,
-                order_ids: ids,
-            },
-            &[],
-        )
-        .unwrap_err();
-    assert!(!error.to_string().is_empty());
+    h.reconcile(1, ids);
 
     let bot = h.bot(1);
-    assert_eq!(bot.active_orders, 2);
-    assert_eq!(h.orders(1).len(), 2);
-    assert_eq!(bot.free_balances[0], Uint128::zero());
+    assert_eq!(bot.active_orders, 1);
+    assert_eq!(h.orders(1).len(), 1);
+    assert!(!h
+        .orders(1)
+        .iter()
+        .any(|order| order.order_id == target.order_id));
 
+    // The survivor keeps blocking withdrawals until cleared.
     let withdraw = h.app.execute_contract(
         h.alice.clone(),
         h.vault.clone(),
@@ -1442,19 +1416,11 @@ fn generic_pair_query_error_retains_order_and_blocks_withdrawal() {
     );
     assert!(withdraw.is_err());
 
-    h.set_limit_order_error(target.order_id, None);
-    let retry_ids: Vec<u64> = h.orders(1).iter().map(|order| order.order_id).collect();
-    let retry = h.app.execute_contract(
-        h.keeper.clone(),
-        h.vault.clone(),
-        &VaultExecuteMsg::Reconcile {
-            bot_id: 1,
-            order_ids: retry_ids,
-        },
-        &[],
-    );
-    assert!(retry.is_err()); // No change is safe and reported explicitly.
-    assert_eq!(h.orders(1).len(), 2);
+    // Once the survivor is gone the bot is fully withdrawn.
+    h.cancel_all(1);
+    let bot = h.bot(1);
+    assert_eq!(bot.active_orders, 0);
+    h.withdraw(1, bot.total_shares);
 }
 
 #[test]
@@ -1553,141 +1519,83 @@ fn manager_create_vault_then_full_vault_flow() {
 }
 
 #[test]
-fn migrated_vault_scans_mixed_inventory_and_retries_failed_drain_end_to_end() {
+fn fills_expiry_and_cancels_classify_orders_end_to_end() {
     let mut h = Harness::new();
     h.create_bot();
     h.deposit(1, &h.token_0.clone(), Uint128::new(1_000));
     h.deposit(1, &h.token_1.clone(), Uint128::new(2_000));
-    let parked_id = h.orders(1)[0].order_id;
+
+    let orders = h.orders(1);
+    assert_eq!(orders.len(), 4);
+
+    // Parked: the refund must be claimed on reconcile.
+    let parked_id = orders[0].order_id;
     h.expire(parked_id);
-    let bot_before = h.bot(1);
-    let shares_before: cl8y_grid_vault::msg::ShareResponse = h
+
+    // Fully executed: a single fill consumes the whole order.
+    let ask = orders
+        .iter()
+        .find(|order| order.side == LimitOrderSide::Ask && order.order_id != parked_id)
+        .expect("a second ask order exists");
+    h.fill(ask.order_id, ask.remaining, ask.remaining);
+
+    // Never cancelled and no longer on the pair => fully executed. Parked =>
+    // refund claimed. The vault absorbs both without any pair inventory API.
+    let ids: Vec<u64> = h.orders(1).iter().map(|order| order.order_id).collect();
+    h.reconcile(1, ids);
+
+    let bot = h.bot(1);
+    assert_eq!(bot.active_orders, 2);
+    assert_eq!(h.orders(1).len(), 2);
+
+    let solvency: cl8y_grid_vault::msg::SolvencyResponse = h
         .app
         .wrap()
-        .query_wasm_smart(
-            &h.vault,
-            &VaultQueryMsg::Shares {
-                bot_id: 1,
-                address: h.alice.to_string(),
-            },
-        )
+        .query_wasm_smart(&h.vault, &VaultQueryMsg::Solvency { bot_id: 1 })
         .unwrap();
+    assert_eq!(solvency.token_0_expected, solvency.token_0_actual);
+    assert_eq!(solvency.token_1_expected, solvency.token_1_actual);
+    assert_eq!(solvency.active_escrow_orders, 2);
+    assert_eq!(solvency.parked_refund_orders, 0);
+    assert_eq!(solvency.executed_orders, 0);
+    assert_eq!(solvency.cancelled_orders, 0);
+    assert!(solvency.warnings.is_empty());
 
-    h.app
-        .migrate_contract(
-            h.alice.clone(),
-            h.vault.clone(),
-            &VaultMigrateMsg {},
-            h.vault_code_id,
-        )
-        .unwrap();
-
-    for _ in 0..10 {
-        let config: cl8y_grid_vault::msg::ConfigResponse = h
-            .app
-            .wrap()
-            .query_wasm_smart(&h.vault, &VaultQueryMsg::Config {})
-            .unwrap();
-        if config.inventory_reconciliation.phase
-            == InventoryReconciliationPhaseResponse::DrainingPair
-        {
-            assert_eq!(config.inventory_reconciliation.recovered_count, 4);
-            assert!(config.inventory_reconciliation.scan_cursor.is_some());
-            break;
-        }
-        h.app
-            .execute_contract(
-                h.alice.clone(),
-                h.vault.clone(),
-                &VaultExecuteMsg::ContinueInventoryReconciliation { limit: 1 },
-                &[],
-            )
-            .unwrap();
-    }
-    let scanned: cl8y_grid_vault::msg::ConfigResponse = h
-        .app
-        .wrap()
-        .query_wasm_smart(&h.vault, &VaultQueryMsg::Config {})
-        .unwrap();
-    assert_eq!(
-        scanned.inventory_reconciliation.phase,
-        InventoryReconciliationPhaseResponse::DrainingPair
-    );
-
-    h.set_paused(true);
-    h.app
-        .execute_contract(
-            h.alice.clone(),
-            h.vault.clone(),
-            &VaultExecuteMsg::ContinueInventoryReconciliation { limit: 100 },
-            &[],
-        )
-        .unwrap();
-    let failed: cl8y_grid_vault::msg::ConfigResponse = h
-        .app
-        .wrap()
-        .query_wasm_smart(&h.vault, &VaultQueryMsg::Config {})
-        .unwrap();
-    assert!(failed.inventory_reconciliation_required);
-    assert!(failed.inventory_reconciliation.pending.is_none());
-    assert!(failed.inventory_reconciliation.last_error.is_some());
-    assert_eq!(h.orders(1).len(), 4);
-
-    h.set_paused(false);
-    for _ in 0..20 {
-        let config: cl8y_grid_vault::msg::ConfigResponse = h
-            .app
-            .wrap()
-            .query_wasm_smart(&h.vault, &VaultQueryMsg::Config {})
-            .unwrap();
-        if !config.inventory_reconciliation_required {
-            break;
-        }
-        h.app
-            .execute_contract(
-                h.alice.clone(),
-                h.vault.clone(),
-                &VaultExecuteMsg::ContinueInventoryReconciliation { limit: 2 },
-                &[],
-            )
-            .unwrap();
-    }
-
-    let complete: cl8y_grid_vault::msg::ConfigResponse = h
-        .app
-        .wrap()
-        .query_wasm_smart(&h.vault, &VaultQueryMsg::Config {})
-        .unwrap();
-    assert!(!complete.inventory_reconciliation_required);
-    assert_eq!(
-        complete.inventory_reconciliation.phase,
-        InventoryReconciliationPhaseResponse::Complete
-    );
-    assert_eq!(complete.inventory_reconciliation.recovered_count, 0);
-    assert!(h.orders(1).is_empty());
+    // Cancel the survivors: the vault records them as cancelled.
+    h.cancel_all(1);
     let bot = h.bot(1);
     assert_eq!(bot.active_orders, 0);
-    assert_eq!(bot.owner, bot_before.owner);
-    assert_eq!(bot.total_shares, bot_before.total_shares);
-    let shares_after: cl8y_grid_vault::msg::ShareResponse = h
+    assert!(h.orders(1).is_empty());
+
+    let cancelled: cl8y_grid_vault::msg::CancelledOrdersResponse = h
         .app
         .wrap()
         .query_wasm_smart(
             &h.vault,
-            &VaultQueryMsg::Shares {
+            &VaultQueryMsg::CancelledOrders {
                 bot_id: 1,
-                address: h.alice.to_string(),
+                start_after: None,
+                limit: None,
             },
         )
         .unwrap();
-    assert_eq!(shares_after.shares, shares_before.shares);
-    assert_eq!(
-        bot.free_balances,
-        [
-            h.balance_of(&h.token_0, &h.vault),
-            h.balance_of(&h.token_1, &h.vault),
-        ]
-    );
+    assert_eq!(cancelled.rows.len(), 2);
+    assert!(cancelled.next_cursor.is_none());
+    assert!(cancelled
+        .rows
+        .iter()
+        .all(|row| !row.remaining.is_zero() && row.cancelled_at > 0));
+
+    let solvency: cl8y_grid_vault::msg::SolvencyResponse = h
+        .app
+        .wrap()
+        .query_wasm_smart(&h.vault, &VaultQueryMsg::Solvency { bot_id: 1 })
+        .unwrap();
+    assert_eq!(solvency.token_0_expected, solvency.token_0_actual);
+    assert_eq!(solvency.token_1_expected, solvency.token_1_actual);
+    assert_eq!(solvency.cancelled_orders, 0);
+    assert_eq!(solvency.executed_orders, 0);
+    assert!(solvency.warnings.is_empty());
 }
 
 // ---------------------------------------------------------------------------
@@ -1998,4 +1906,228 @@ fn allowlist_and_quarantine_block_usage_until_cleared() {
     assert_eq!(h.orders(1).len(), 4);
     let bot = h.bot(1);
     assert_eq!(bot.active_orders, 4);
+}
+
+// ---------------------------------------------------------------------------
+// Protocol fee (per-fill LP to the fee-collector)
+// ---------------------------------------------------------------------------
+
+/// A mock fee-registry whose `EffectiveFee` returns `fee_bps`, plus a Harness
+/// wired to that registry and the given collector (all on one App).
+fn new_fee_harness(fee_bps: u16) -> (Harness, Addr) {
+    let mut app = App::new(|router, _api, storage| {
+        router
+            .bank
+            .init_balance(
+                storage,
+                &Addr::unchecked("alice"),
+                vec![coin(1_000_000_000, GAS_DENOM)],
+            )
+            .unwrap();
+    });
+    let fee_registry_id = app.store_code(mock_fee_registry_code());
+    let fee_registry = app
+        .instantiate_contract(
+            fee_registry_id,
+            Addr::unchecked("governance"),
+            &MockFeeRegistryInstantiateMsg { fee_bps },
+            &[],
+            "fee-registry",
+            None,
+        )
+        .unwrap();
+
+    let collector = Addr::unchecked("collector");
+    let h = Harness::new_with_fee_on(app, fee_registry.as_str(), collector.as_str());
+    (h, collector)
+}
+
+#[test]
+fn protocol_fee_mints_collector_lp_and_redeems() {
+    let (mut h, collector) = new_fee_harness(200);
+    let treasury = Addr::unchecked("treasury");
+    let vault = h.vault.clone();
+
+    h.create_bot();
+    h.deposit(1, &h.token_0.clone(), Uint128::new(1_000));
+    h.deposit(1, &h.token_1.clone(), Uint128::new(2_000));
+    let initial_shares = h.bot(1).total_shares;
+    assert_eq!(initial_shares, Uint128::new(2_000));
+
+    // Fill a partial Ask (escrows token_0 -> +100 token_1) and a full Bid
+    // (escrows token_1 -> +500 token_0), then reconcile.
+    let orders = h.orders(1);
+    let ask = orders
+        .iter()
+        .find(|order| order.side == LimitOrderSide::Ask)
+        .unwrap();
+    let bid = orders
+        .iter()
+        .find(|order| order.side == LimitOrderSide::Bid)
+        .unwrap();
+    h.fill(ask.order_id, Uint128::new(200), Uint128::new(100));
+    h.fill(bid.order_id, Uint128::new(1_000), Uint128::new(500));
+    h.reconcile(1, vec![ask.order_id, bid.order_id]);
+
+    // Expected fee: 2% of the credited value (token-0 normalized).
+    let bot = h.bot(1);
+    let credited_0 = Uint128::new(500);
+    let credited_1 = Uint128::new(100);
+    let value_in_token_0 = credited_0
+        .checked_add(credited_1.multiply_ratio(
+            Decimal::one().atomics(),
+            bot.reference_price.atomics(),
+        ))
+        .unwrap();
+    let expected_fee_shares = value_in_token_0.multiply_ratio(200u16, 10_000u16);
+    assert!(expected_fee_shares > Uint128::zero());
+
+    assert_eq!(
+        bot.total_shares,
+        initial_shares.checked_add(expected_fee_shares).unwrap()
+    );
+
+    let collector_shares: cl8y_grid_vault::msg::ShareResponse = h
+        .app
+        .wrap()
+        .query_wasm_smart(
+            &vault,
+            &VaultQueryMsg::Shares {
+                bot_id: 1,
+                address: collector.to_string(),
+            },
+        )
+        .unwrap();
+    assert_eq!(collector_shares.shares, expected_fee_shares);
+
+    // Wind the bot down so the collector can redeem (withdrawal requires no
+    // active orders, mirroring the owner-withdraw guard).
+    h.cancel_all(1);
+
+    // The configured collector redeems its own LP straight to the treasury.
+    h.app
+        .execute_contract(
+            collector.clone(),
+            vault.clone(),
+            &VaultExecuteMsg::RedeemShares {
+                bot_id: 1,
+                recipient: Some(treasury.to_string()),
+            },
+            &[],
+        )
+        .unwrap();
+
+    let collector_shares: cl8y_grid_vault::msg::ShareResponse = h
+        .app
+        .wrap()
+        .query_wasm_smart(
+            &vault,
+            &VaultQueryMsg::Shares {
+                bot_id: 1,
+                address: collector.to_string(),
+            },
+        )
+        .unwrap();
+    assert_eq!(collector_shares.shares, Uint128::zero());
+
+    let treasury_0 = h.balance_of(&h.token_0, &treasury);
+    let treasury_1 = h.balance_of(&h.token_1, &treasury);
+    assert!(treasury_0 > Uint128::zero() || treasury_1 > Uint128::zero());
+}
+
+#[test]
+fn redeem_shares_is_collector_only() {
+    let (mut h, collector) = new_fee_harness(200);
+
+    // Non-collector (the owner) is rejected.
+    let err = h
+        .app
+        .execute_contract(
+            h.alice.clone(),
+            h.vault.clone(),
+            &VaultExecuteMsg::RedeemShares {
+                bot_id: 1,
+                recipient: None,
+            },
+            &[],
+        )
+        .unwrap_err();
+    assert!(err.root_cause().to_string().contains("unauthorized"));
+
+    // Even the collector cannot redeem before it owns shares.
+    h.create_bot();
+    let err = h
+        .app
+        .execute_contract(
+            collector.clone(),
+            h.vault.clone(),
+            &VaultExecuteMsg::RedeemShares {
+                bot_id: 1,
+                recipient: None,
+            },
+            &[],
+        )
+        .unwrap_err();
+    assert!(err.root_cause().to_string().contains("insufficient"));
+}
+
+#[test]
+fn reconcile_is_non_blocking_when_fee_registry_is_unreachable() {
+    // A fee_registry address that is not a contract makes the EffectiveFee
+    // query fail. The reconcile must NOT revert: the fill is processed and the
+    // fee is skipped via a `fee_skipped` attribute.
+    let bogus_registry = "does-not-exist";
+    let collector = Addr::unchecked("collector");
+    let mut h = Harness::new_with_tokens(
+        None,
+        Some(bogus_registry.to_string()),
+        Some(collector.to_string()),
+    );
+
+    h.create_bot();
+    h.deposit(1, &h.token_0.clone(), Uint128::new(1_000));
+    h.deposit(1, &h.token_1.clone(), Uint128::new(2_000));
+    let initial_shares = h.bot(1).total_shares;
+
+    let orders = h.orders(1);
+    let ask = orders
+        .iter()
+        .find(|order| order.side == LimitOrderSide::Ask)
+        .unwrap();
+    h.fill(ask.order_id, Uint128::new(200), Uint128::new(100));
+
+    let res = h
+        .app
+        .execute_contract(
+            h.keeper.clone(),
+            h.vault.clone(),
+            &VaultExecuteMsg::Reconcile {
+                bot_id: 1,
+                order_ids: vec![ask.order_id],
+            },
+            &[],
+        )
+        .unwrap();
+    let attrs: Vec<_> = res
+        .events
+        .iter()
+        .flat_map(|e| e.attributes.iter())
+        .filter(|a| a.key == "fee_skipped")
+        .collect();
+    assert_eq!(attrs.len(), 1, "reconcile must skip the unreachable fee, not revert");
+
+    // No fee was minted and holders were not diluted.
+    assert_eq!(h.bot(1).total_shares, initial_shares);
+    let collector_shares: cl8y_grid_vault::msg::ShareResponse = h
+        .app
+        .wrap()
+        .query_wasm_smart(
+            &h.vault,
+            &VaultQueryMsg::Shares {
+                bot_id: 1,
+                address: collector.to_string(),
+            },
+        )
+        .unwrap();
+    assert_eq!(collector_shares.shares, Uint128::zero());
 }

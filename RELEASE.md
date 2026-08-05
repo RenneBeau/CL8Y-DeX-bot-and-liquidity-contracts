@@ -48,10 +48,11 @@ two vault designs are split into two independent Cargo workspaces:
 `limit-grid-system` and `market-grid-system`:
 
 - `limit-grid-system` (`grid-vault`/`grid-manager`, the limit-order maker design)
-  is retained for reference only. It is **not deployable** because it requires
-  pair queries that do not exist in the shipped pair (typed order status, owner
-  inventory, owner-index backfill). Do not deploy or fund it.
-- `market-grid-system` (`grid-vault-swap`) is the deployable swap-only design. It
+  reconciles against the shipped pair using only its shipped queries. The vault
+  records its own cancels locally and classifies any order that vanished without
+  a recorded cancel as fully executed, so it needs no pair queries beyond
+  `LimitOrder` and `ExpiredLimitRefund`, and no fork or upstream PR.
+- `market-grid-system` (`grid-vault-swap`) is the swap-only design. It
   holds CW20 balances in the vault, reads the pool price, and executes classic
   `Swap` calls when the price crosses a grid level. No limit orders, no pair
   custody, no reconciliation state. It uses the exact pair API as shipped

@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = ["contracts/fee-registry", "contracts/fee-collector"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+cosmwasm-schema = "1.5.9"
+cosmwasm-std = "1.5.11"
+cw-storage-plus = "1.2.0"
+cw2 = "1.1.2"
+cw20 = "1.1.2"
+schemars = "0.8.15"
+serde = { version = "1.0.188", default-features = false, features = ["derive"] }
+thiserror = "1.0.4"
+semver = "1.0.23"
+
+[profile.release]
+codegen-units = 1
+debug = false
+lto = true
+opt-level = 3
+overflow-checks = true

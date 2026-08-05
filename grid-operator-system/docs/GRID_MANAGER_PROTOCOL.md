@@ -34,9 +34,12 @@ The design does not protect against:
   reconcile/cancel/allocate/deposit interactions after a code change, but the
   admin must re-pin the replacement code ID only after independently verifying
   the new implementation.
-- Temporary inability to distinguish a missing order from an unrelated pair query
-  error. Emergency processing is owner-only and should be retried after pair/RPC
-  health is restored.
+- An order whose *both* active and parked queries fail at once. The vault returns
+  `OrderStatusUnverifiable` and leaves the row and counter intact; emergency
+  processing is owner-only and should be retried after pair/RPC health is
+  restored. A missing order combined with a healthy parked query is not
+  ambiguous: the vault classifies it using its own cancel ledger (see
+  *Cancelled Orders*).
 
 - Exact event-by-event opposite-rung recreation. The current pair does not retain
   cumulative maker output, and per-fill rounding prevents exact reconstruction
@@ -117,20 +120,40 @@ assets over configured empty-side capacity. This intentionally replaces exact
 fill-to-opposite-rung behavior, which cannot be proven through the current pair
 query interface.
 
-### Terminal And Parked Orders
+### Terminal, Parked, And Cancelled Orders
 
-If the active query fails, the vault queries `expired_limit_refund`. A valid owned
-refund is claimed through a reply-confirmed page. `Err + None` is indeterminate,
-not terminal: the transaction returns `OrderStatusUnverifiable`, preserves the
-local row and counter, and must be retried. A zero-remaining active response is a
-positive completion proof and may retire the row. The current pair API cannot
-otherwise distinguish genuine absence from contract/query/schema failure.
+If the active query fails, the vault queries `expired_limit_refund`:
+
+- A zero-remaining active response is a positive completion proof and may retire
+  the row.
+
+- A valid owned refund is claimed through a reply-confirmed page and the row is
+  retired (`parked`).
+- A valid `Err + None` refund leaves the order absent from the pair with no
+  parked refund. The vault then checks its own cancel ledger
+  (`CANCELLED_ORDERS`):
+  - A recorded cancel means the vault already refunded the escrow and the row is
+    retired (`cancelled`).
+  - No recorded cancel means the order could only have left the pair through
+    execution, so it is retired as fully executed; the fill proceeds were
+    already credited to the vault balance by balance synchronization.
+- A failed parked query (both queries errored) is indeterminate, not terminal:
+  the transaction returns `OrderStatusUnverifiable`, preserves the local row and
+  counter, and must be retried. The current pair API cannot otherwise distinguish
+  genuine absence from contract/query/schema failure when *no* query succeeds.
+
+Because pair cancellations can only be initiated by this vault, its local cancel
+ledger is authoritative: an order that is absent from the pair, unclaimed, and
+never cancelled was necessarily fully executed. This lets the vault reconcile
+against the shipped pair without any owner-inventory or typed-status pair
+extension.
 
 An owner can submit `recover_order` with a known pair order ID and rung. The vault
 adopts it only after positively verifying active ownership, side, price and
 remaining amount, or positively verifying an owned parked refund. It cannot be
-used to declare an order terminal. This recovers known IDs from placement records,
-but does not prove that the owner supplied a complete inventory.
+used to declare an order terminal, and it rejects an order already recorded as
+cancelled. This recovers known IDs from placement records, but does not prove
+that the owner supplied a complete inventory.
 
 ### Cancellation
 
@@ -155,54 +178,24 @@ the vault's actual liquid CW20 balances. Expired orders may require a CL8Y clean
 walk before their refund row becomes claimable. Pair pause can delay this flow but
 cannot redirect the funds.
 
-### Legacy Inventory Reconciliation
+### Cancelled-Order Ledger
 
-Vaults migrated from a release that could forget pair orders remain locked behind
-`inventory_reconciliation_required`. The owner advances the bounded state machine
-with `{"continue_inventory_reconciliation":{"limit":<1..100>}}`. New bot creation,
-deposits, and allocation are disabled for the entire reconciliation; normal and
-emergency withdrawals remain disabled. Administrative configuration and pair-code
-pinning remain available, but there is no administrative unlock.
+Cancellation is owner-only and bounded. On a confirmed cancel page, the vault
+persists a `CancelledOrder` record — rung, side, price, refunded remaining, and
+cancel height — keyed by `(bot_id, order_id)` before removing the local row. The
+records are exposed through the paginated `cancelled_orders` query and are never
+reused: `recover_order` rejects an order already in the ledger.
 
-Before taking a snapshot, the vault verifies the pair's runtime code ID and
-requires pair protocol schema v1 with `typed_order_status`, `owner_inventory`, and
-`owner_index_backfill`, a ready owner index, and the protocol page cap. It persists
-the pair-issued generation and order-ID high-water. The scanning phase walks that
-snapshot with a contract-owned exclusive cursor. Every validated active or parked
-row is copied into a migration-only recovery map; it is observable custody evidence
-and is never assigned a strategy rung or credited to accounting. Invalid, duplicate,
-out-of-order, or replayed pages and query failures leave the prior cursor and map
-unchanged.
+The ledger exists to make the *absent-order* classification sound. Since only
+this vault can cancel its orders on the pair, any tracked order that is absent
+from the pair, holds no parked refund, and is not in the ledger was necessarily
+fully executed. Reconciliation therefore needs no pair-side inventory index or
+typed status query and works against the pair exactly as shipped.
 
-After the complete scan, draining repeatedly queries page one under the same
-snapshot. Active IDs are atomically cancelled first; when no active row is present,
-parked IDs are atomically claimed. Each batch is capped by the caller limit, owner
-inventory limit, and pair `LimitOrderConfig`. Failed pair replies keep the snapshot,
-recovery records, local rows, and lock and expose the error in `config` for retry.
-
-Only a complete empty pair page is terminal proof. The vault then removes recovery
-records and stale local rows in separate bounded phases, verifies that this contract
-contains exactly bot 1, sets `active_orders` to zero from the empty map, and replaces
-both free balances with actual vault CW20 balances. It unlocks only if the pair code
-and protocol generation still match and no pair/local page is pending. Pair custody,
-not a client cursor or the vulnerable local order map, is canonical during this flow.
-
-A fully filled order can disappear between scanning and draining. The vault does
-not query or interpret pair tombstones during migration and does not claim
-vault-side knowledge of why a row disappeared. The subsequent complete empty
-owner-inventory proof is what safely permits stale recovery and local rows to be
-retired; actual CW20 balances are then synchronized exactly.
-
-Migration validates the stored `cw2` contract name and semantic version and accepts
-only an older supported source. Repeating migration at the same or a newer version
-fails before changing the lock. For every supported migration from vulnerable
-`0.1.0` with a bot or history, rollback storage is never authoritative: even a
-stored `Complete` phase is discarded, the Boolean gate is set, and the pair proof
-starts again from a fresh snapshot. Stale recovery rows are tagged with an older
-epoch, may be overwritten idempotently during adoption, and are removed by the same
-bounded recovery cleanup without affecting the new scan's count. A pre-bot vault
-stays unlocked only when reconciliation/recovery, bot, order, pending-page and
-placement state are absent and `next_bot_id` proves no bot was previously allocated.
+Migrating from a release that predates the ledger is safe for this vault: every
+current order is reconciled directly against live pair state (active, parked, or
+executed) on the next `reconcile`, and past cancels are detected the same way.
+No pre-deployment scan or recovery state is required; there is no lock.
 
 ### Pair Code Pinning
 
@@ -234,10 +227,14 @@ actual   = queried vault CW20 balance + sum(on-chain pair escrow for that token)
 
 Each tracked order is first queried as active escrow, then as an expired parked
 refund. Owner, order ID, side, immutable price (when active), and nonincreasing
-remaining amount are validated before custody is counted. The response reports
-`active_escrow_orders`, `parked_refund_orders`, `terminal_orders`, and
-`unverifiable_orders`; `Err + None`, invalid, or unqueryable escrow produces a warning
-rather than being counted as terminal.
+remaining amount are validated before custody is counted. A missing order with no
+parked refund is reported as `cancelled_orders` if the vault's cancel ledger holds
+it, otherwise as `executed_orders`; the proceeds of an executed order are expected
+to already sit in the vault's liquid balance. The response reports
+`active_escrow_orders`, `parked_refund_orders`, `executed_orders`,
+`cancelled_orders`, and `unverifiable_orders`; an order whose *both* queries fail,
+or invalid or unqueryable escrow, produces a warning rather than being counted as
+terminal.
 Fills consume one token's escrow and credit the opposite token's liquid balance.
 This query is therefore a custody/reconciliation diagnostic, not a same-token
 profit invariant: equality is expected after complete reconciliation, while a
@@ -264,10 +261,8 @@ Vault state:
 - `Rung`: price and initial side.
 - `GridOrder`: pair-local ID key, rung, side, price, and last remaining escrow.
 - `PlacementPlan`: reply-scoped expected rungs and gross amounts.
-- `InventoryReconciliation`: phase, pair snapshot/code pin, exclusive scan cursor,
-  recovered-row count, pending drain action, bounded-work counters, and last error.
-- `RecoveredInventoryRow`: migration-only validated pair custody metadata keyed by
-  order ID; it is cleaned before stale strategy orders and never affects shares.
+- `CancelledOrder`: pair-local ID key, rung, side, price, refunded remaining, and
+  cancel height; written on a confirmed cancel page and queryable, never reused.
 
 ## Security Invariants
 
@@ -284,7 +279,11 @@ Vault state:
    maintenance is disabled.
 10. Repeated reconciliation cannot credit the same physical balance increase twice.
 11. Pair interactions require the deployed pair code ID to match the pinned ID.
-12. No local order is removed solely because an active or parked query failed.
+12. No local order is removed solely because both active and parked queries failed
+    at once; the row survives as `OrderStatusUnverifiable`.
+13. A local order is removed without a fill only after a confirmed cancel or a
+    recorded cancel in the vault's own ledger, or when it is absent from the pair
+    with no parked refund (fully executed).
 
 ## Migration From Pooled Custody
 
@@ -312,12 +311,11 @@ Upgrade order is mandatory:
    and depositing the withdrawn balances; there is no in-place custody migration.
 3. Rehearse with funded historical-state fixtures before economic deployment.
 
-Once a vault has captured a snapshot, do not roll the pair back, change its owner
-index generation, or repin a different implementation. Restore the exact verified
-pair implementation and generation and resume. A failed deployment is rolled
-forward; rollback is permitted only before any affected vault captures a snapshot.
-If code is nevertheless rolled back and migrated forward again, no saved phase,
-including `Complete`, can replace a new scan and empty canonical pair proof.
+Once a vault is live, do not roll the pair back or repin a different
+implementation while orders are outstanding. Restore the exact verified pair
+implementation and resume. There is no snapshot, protocol generation, or scan
+phase to keep in sync; the vault reconciles directly against current pair state,
+so no rollback-ordering constraint applies beyond the ordinary pinned-code check.
 
 ## Failure And Recovery
 
@@ -336,25 +334,24 @@ including `Complete`, can replace a new scan and empty canonical pair proof.
 
 ## Production Status
 
-### Limit-Order Vault (reference only, not deployable)
+### Limit-Order Vault (deployable)
 
-`contracts/grid-vault` is retained for reference. It is **not deployable** and
-must not be funded. Its legacy inventory-reconciliation flow depends on pair
-queries that do not exist in the shipped CL8Y pair: typed order status
-(`typed_order_status`), owner inventory (`owner_inventory`), and owner-index
-backfill (`owner_index_backfill`). No pair modification, fork, or upstream PR is
-permitted for the grid system, so those queries will never be available. Any
-deployment of this vault against the shipped pair stays permanently locked behind
-`inventory_reconciliation_required` and cannot prove custody completeness. The
-design remains documented only as an analysis artifact.
+`contracts/grid-vault` is the limit-order grid vault. It reconciles directly
+against the shipped CL8Y pair using exactly the shipped query interface
+(`LimitOrder`, `ExpiredLimitRefund`). Order cancellations are initiated only by
+the vault, which records them locally; an order that is absent from the pair, has
+no parked refund, and was never cancelled is classified as fully executed and its
+proceeds are assumed already credited to the vault balance. This requires no pair
+modification, no fork, and no upstream PR, and it has no reconciliation gate or
+locked state.
 
-### Swap-Only Vault (deployable design)
+### Swap-Only Vault (alternative design)
 
-`contracts/grid-vault-swap` is the deployable grid design. It holds its CW20
+`contracts/grid-vault-swap` is an alternative grid design. It holds its CW20
 balances directly in the vault address, reads the pool price, and executes
 classic pair `Swap` calls through the CW20 receive hook when the price crosses a
 grid level. It uses exactly the shipped pair API (`Pool`, `Observe`, `Swap`) and
-requires no upstream merge, no fork, and no reconciliation state.
+requires no upstream merge and no fork.
 
 Production readiness still requires adversarial validation against the production
 CL8Y runtime, an independent external audit, and staged testnet/limited-value
