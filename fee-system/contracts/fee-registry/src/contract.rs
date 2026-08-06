@@ -203,7 +203,9 @@ fn execute_add_tier(
 ) -> Result<Response, ContractError> {
     assert_governance(&deps.as_ref(), &info)?;
     if discount_bps > MAX_BPS {
-        return Err(ContractError::InvalidDiscountBps { value: discount_bps });
+        return Err(ContractError::InvalidDiscountBps {
+            value: discount_bps,
+        });
     }
     assert_not_reserved(tier_id, governance_only)?;
     if TIERS.has(deps.storage, tier_id) {
@@ -321,7 +323,9 @@ fn bump_ladder_version(deps: DepsMut) -> StdResult<()> {
 pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
     match msg {
         QueryMsg::Config {} => to_json_binary(&query_config(deps)?),
-        QueryMsg::EffectiveFee { trader } => to_json_binary(&query_effective_fee(deps, env, trader)?),
+        QueryMsg::EffectiveFee { trader } => {
+            to_json_binary(&query_effective_fee(deps, env, trader)?)
+        }
         QueryMsg::Holding { trader } => to_json_binary(&query_holding(deps, trader)?),
         QueryMsg::Tiers {} => to_json_binary(&query_tiers(deps)?),
         QueryMsg::Tier { tier_id } => to_json_binary(&query_tier(deps, tier_id)?),
@@ -378,10 +382,7 @@ fn query_tier(deps: Deps, tier_id: u8) -> StdResult<TierEntry> {
 
 /// Highest discount among non-governance tiers whose minimum is met. A holder
 /// with no eligible tier gets `discount_bps = 0` (full base fee).
-fn resolve_discount(
-    deps: Deps,
-    amount: Uint128,
-) -> StdResult<(u16, Option<u8>)> {
+fn resolve_discount(deps: Deps, amount: Uint128) -> StdResult<(u16, Option<u8>)> {
     let mut best: (u16, Option<u8>) = (0, None);
     for item in TIERS.range(deps.storage, None, None, cosmwasm_std::Order::Ascending) {
         let (tier_id, tier) = item?;

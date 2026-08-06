@@ -16,7 +16,9 @@ pub enum ExecuteMsg {
     /// holding. Permissionless (only ever reads an on-chain balance), but the
     /// vaults/keeper should call it so `EffectiveFee` always has a value to
     /// read back. On a CL8Y read failure the previous holding is kept.
-    RefreshHolding { trader: String },
+    RefreshHolding {
+        trader: String,
+    },
     AddTier {
         tier_id: u8,
         min_cl8y_balance: Uint128,

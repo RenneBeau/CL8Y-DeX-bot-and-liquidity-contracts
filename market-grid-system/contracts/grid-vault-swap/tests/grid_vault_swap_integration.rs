@@ -870,7 +870,11 @@ fn rebalance_mints_fee_lp_to_collector_and_can_redistribute_to_treasury() {
         depositor_before - fee_shares_u,
         "holder loses exactly the fee from their own LP"
     );
-    assert_eq!(shares_of(&h, &collector), fee_shares_u, "collector owns the fee");
+    assert_eq!(
+        shares_of(&h, &collector),
+        fee_shares_u,
+        "collector owns the fee"
+    );
 
     // Weighted-average rate for the event: a single full-base holder reports ~180.
     let fee_bps_val: u128 = response
@@ -1011,8 +1015,14 @@ fn each_lp_is_taxed_at_their_own_tier() {
     let heavy_after = shares_of(&h, &heavy);
     let light_loss = light_before - light_after;
     let heavy_loss = heavy_before - heavy_after;
-    assert!(light_loss > Uint128::zero(), "low-tier holder must be charged");
-    assert!(heavy_loss > Uint128::zero(), "high-tier holder must be charged");
+    assert!(
+        light_loss > Uint128::zero(),
+        "low-tier holder must be charged"
+    );
+    assert!(
+        heavy_loss > Uint128::zero(),
+        "high-tier holder must be charged"
+    );
 
     // The higher-tier (lower-fee) holder loses strictly less LP.
     assert!(light_loss < heavy_loss, "higher tier must lose less LP");
@@ -1087,5 +1097,8 @@ fn rebalance_is_non_blocking_when_fee_registry_is_unreachable() {
         .flat_map(|e| &e.attributes)
         .filter(|a| a.key == "fee_shares")
         .count();
-    assert_eq!(fee_shares, 0, "no fee may be minted against an unreachable registry");
+    assert_eq!(
+        fee_shares, 0,
+        "no fee may be minted against an unreachable registry"
+    );
 }

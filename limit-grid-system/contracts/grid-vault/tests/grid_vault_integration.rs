@@ -99,22 +99,26 @@ fn mock_fee_registry_code() -> Box<dyn Contract<Empty, Empty>> {
         |_deps, _env, _info, _msg: Empty| -> StdResult<cosmwasm_std::Response> {
             Err(StdError::generic_err("registry has no execute"))
         },
-        |deps, _env, _info, msg: MockFeeRegistryInstantiateMsg| -> StdResult<cosmwasm_std::Response> {
+        |deps,
+         _env,
+         _info,
+         msg: MockFeeRegistryInstantiateMsg|
+         -> StdResult<cosmwasm_std::Response> {
             MOCK_FEE_BPS.save(deps.storage, &msg.fee_bps)?;
             Ok(cosmwasm_std::Response::new())
         },
         |deps, _env, msg: MockFeeRegistryQueryMsg| -> StdResult<Binary> {
             let fee_bps = MOCK_FEE_BPS.load(deps.storage)?;
             match msg {
-                MockFeeRegistryQueryMsg::EffectiveFee { .. } => to_json_binary(
-                    &MockFeeRegistryResponse {
+                MockFeeRegistryQueryMsg::EffectiveFee { .. } => {
+                    to_json_binary(&MockFeeRegistryResponse {
                         fee_bps,
                         discount_bps: 0,
                         tier_id: None,
                         holding: Some(Uint128::new(1)),
                         source: "live".to_string(),
-                    },
-                ),
+                    })
+                }
             }
         },
     );
@@ -641,7 +645,12 @@ impl Harness {
     }
 
     fn new_with_fee_on(app: App, fee_registry: &str, fee_collector: &str) -> Self {
-        Self::build(app, None, Some(fee_registry.to_string()), Some(fee_collector.to_string()))
+        Self::build(
+            app,
+            None,
+            Some(fee_registry.to_string()),
+            Some(fee_collector.to_string()),
+        )
     }
 
     fn new_with_tokens(
@@ -652,7 +661,11 @@ impl Harness {
         let app = App::new(|router, _api, storage| {
             router
                 .bank
-                .init_balance(storage, &Addr::unchecked("alice"), vec![coin(1_000_000_000, GAS_DENOM)])
+                .init_balance(
+                    storage,
+                    &Addr::unchecked("alice"),
+                    vec![coin(1_000_000_000, GAS_DENOM)],
+                )
                 .unwrap();
         });
         Self::build(app, malicious_lie, fee_registry, fee_collector)
@@ -1978,10 +1991,9 @@ fn protocol_fee_mints_collector_lp_and_redeems() {
     let credited_0 = Uint128::new(500);
     let credited_1 = Uint128::new(100);
     let value_in_token_0 = credited_0
-        .checked_add(credited_1.multiply_ratio(
-            Decimal::one().atomics(),
-            bot.reference_price.atomics(),
-        ))
+        .checked_add(
+            credited_1.multiply_ratio(Decimal::one().atomics(), bot.reference_price.atomics()),
+        )
         .unwrap();
     let expected_fee_shares = value_in_token_0.multiply_ratio(200u16, 10_000u16);
     assert!(expected_fee_shares > Uint128::zero());
@@ -2117,7 +2129,10 @@ fn zero_rate_or_zero_value_charges_no_fee() {
             .wrap()
             .query_wasm_smart(
                 &h.vault,
-                &VaultQueryMsg::Shares { bot_id: 1, address: collector.to_string() },
+                &VaultQueryMsg::Shares {
+                    bot_id: 1,
+                    address: collector.to_string(),
+                },
             )
             .unwrap();
         assert_eq!(collector_shares.shares, Uint128::zero());
@@ -2203,7 +2218,11 @@ fn reconcile_is_non_blocking_when_fee_registry_is_unreachable() {
         .flat_map(|e| e.attributes.iter())
         .filter(|a| a.key == "fee_skipped")
         .collect();
-    assert_eq!(attrs.len(), 1, "reconcile must skip the unreachable fee, not revert");
+    assert_eq!(
+        attrs.len(),
+        1,
+        "reconcile must skip the unreachable fee, not revert"
+    );
 
     // No fee was minted and holders were not diluted.
     assert_eq!(h.bot(1).total_shares, initial_shares);

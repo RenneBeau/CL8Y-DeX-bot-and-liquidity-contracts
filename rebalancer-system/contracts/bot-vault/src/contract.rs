@@ -1,7 +1,8 @@
 use bot_types::{
     AuthorizedTransfer, LiquidityAuthorizationResponse, RebalancePlanResponse,
     RebalanceStatusResponse, SwapParams, SwapProxyHookMsg, VaultBalancesResponse,
-    VaultConfigResponse, VaultExecuteMsg, VaultFeeSharesResponse, VaultPriceResponse, VaultQueryMsg,
+    VaultConfigResponse, VaultExecuteMsg, VaultFeeSharesResponse, VaultPriceResponse,
+    VaultQueryMsg,
 };
 use cl8y_dex::{
     Asset, AssetInfo, HybridSimulationResponse, HybridSwapParams, ObserveResponse, PairInfo,
@@ -494,7 +495,11 @@ pub fn reply(deps: DepsMut, env: Env, reply: Reply) -> Result<Response, Contract
     let value_in_token0 = if ask == 0 {
         proceeds
     } else {
-        checked_ratio(proceeds, Decimal::one().atomics(), pending.captured_twap.atomics())?
+        checked_ratio(
+            proceeds,
+            Decimal::one().atomics(),
+            pending.captured_twap.atomics(),
+        )?
     };
     let mut response = Response::new()
         .add_attribute("action", "complete_rebalance")
@@ -506,7 +511,10 @@ pub fn reply(deps: DepsMut, env: Env, reply: Reply) -> Result<Response, Contract
             response = response
                 .add_attribute("fee_bps", fee.fee_bps.to_string())
                 .add_attribute("fee_holders", fee.holders.to_string())
-                .add_attribute("fee_tier", fee.tier.map(|t| t.to_string()).unwrap_or_default())
+                .add_attribute(
+                    "fee_tier",
+                    fee.tier.map(|t| t.to_string()).unwrap_or_default(),
+                )
                 .add_attribute("fee_source", fee.source)
                 .add_attribute("fee_shares", fee.shares.to_string());
         }
@@ -1191,8 +1199,9 @@ fn charge_fee(
         return Ok(ChargeFee::None);
     };
 
-    let info: TokenInfoResponse =
-        deps.querier.query_wasm_smart(liquidity, &Cw20QueryMsg::TokenInfo {})?;
+    let info: TokenInfoResponse = deps
+        .querier
+        .query_wasm_smart(liquidity, &Cw20QueryMsg::TokenInfo {})?;
     if info.total_supply.is_zero() {
         return Ok(ChargeFee::None);
     }
@@ -1211,11 +1220,12 @@ fn charge_fee(
             },
         )?;
         for account in &resp.accounts {
-            let bal: BalanceResponse = deps
-                .querier
-                .query_wasm_smart(liquidity, &Cw20QueryMsg::Balance {
+            let bal: BalanceResponse = deps.querier.query_wasm_smart(
+                liquidity,
+                &Cw20QueryMsg::Balance {
                     address: account.clone(),
-                })?;
+                },
+            )?;
             if !bal.balance.is_zero() {
                 holders.push((account.clone(), bal.balance));
             }
@@ -1279,7 +1289,9 @@ fn charge_fee(
             .map_err(StdError::overflow)?,
     )?;
     TOTAL_FEE_SHARES.update(deps.storage, |total| -> StdResult<Uint128> {
-        total.checked_add(total_fee_value).map_err(StdError::overflow)
+        total
+            .checked_add(total_fee_value)
+            .map_err(StdError::overflow)
     })?;
 
     // Weighted-average rate across the holders that were charged, for events.
@@ -1294,7 +1306,11 @@ fn charge_fee(
         fee_bps: weighted_bps,
         shares: total_fee_value,
         holders: charged_count,
-        tier: if charged_count == 1 { single_tier } else { None },
+        tier: if charged_count == 1 {
+            single_tier
+        } else {
+            None
+        },
         source: if charged_count == 1 {
             single_source.unwrap_or_default()
         } else {
@@ -1393,10 +1409,12 @@ fn execute_update_fee_config(
     Ok(Response::new().add_attribute("action", "update_fee_config"))
 }
 
-
-
 #[cfg(test)]
-fn vault_config(liquidity: Option<&str>, registry: Option<&str>, collector: Option<&str>) -> Config {
+fn vault_config(
+    liquidity: Option<&str>,
+    registry: Option<&str>,
+    collector: Option<&str>,
+) -> Config {
     Config {
         admin: Addr::unchecked("admin"),
         keeper: Addr::unchecked("keeper"),
@@ -1434,10 +1452,7 @@ fn install_pool_mock(
     registry_rates: &[(&str, u16)],
 ) {
     use cosmwasm_std::{from_json, ContractResult, SystemResult, WasmQuery};
-    let holders: Vec<(String, u128)> = holders
-        .iter()
-        .map(|(a, b)| (a.to_string(), *b))
-        .collect();
+    let holders: Vec<(String, u128)> = holders.iter().map(|(a, b)| (a.to_string(), *b)).collect();
     let registry_rates: Vec<(String, u16)> = registry_rates
         .iter()
         .map(|(a, b)| (a.to_string(), *b))
@@ -1515,7 +1530,6 @@ fn pool_smart_response(
         _ => panic!("unexpected liquidity query"),
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -2207,7 +2221,9 @@ mod tests {
     #[test]
     fn charge_fee_taxes_each_lp_holder_at_their_own_tier() {
         let mut deps = mock_dependencies();
-        TOTAL_FEE_SHARES.save(&mut deps.storage, &Uint128::zero()).unwrap();
+        TOTAL_FEE_SHARES
+            .save(&mut deps.storage, &Uint128::zero())
+            .unwrap();
         // Pool of two LPs, equal shares (1 000 / 2 000 each), taxed at their own
         // tier: alice 1 000 bps, bob 500 bps. Fill value = 1 000 token0.
         // alice slice 500 -> 50; bob slice 500 -> 25; total collector claim 75.
@@ -2242,7 +2258,9 @@ mod tests {
     #[test]
     fn charge_fee_single_holder_reports_their_exact_tier() {
         let mut deps = mock_dependencies();
-        TOTAL_FEE_SHARES.save(&mut deps.storage, &Uint128::zero()).unwrap();
+        TOTAL_FEE_SHARES
+            .save(&mut deps.storage, &Uint128::zero())
+            .unwrap();
         // One holder (the whole pool): the weighted rate is exactly their tier.
         install_pool_mock(&mut deps, &[("alice", 2_000)], &[("alice", 1_000)]);
         let config = vault_config(Some("liquidity"), Some("registry"), Some("collector"));

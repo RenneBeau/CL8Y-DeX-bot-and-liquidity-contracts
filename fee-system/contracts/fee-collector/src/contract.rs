@@ -104,10 +104,7 @@ fn execute_collect(
         },
     )?;
     if shares.shares.is_zero() {
-        return Err(ContractError::NoEntitlement {
-            vault,
-            shares: 0,
-        });
+        return Err(ContractError::NoEntitlement { vault, shares: 0 });
     }
 
     VAULT_SHARES.update(

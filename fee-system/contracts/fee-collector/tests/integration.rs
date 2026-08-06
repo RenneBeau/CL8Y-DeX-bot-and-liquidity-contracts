@@ -24,8 +24,15 @@ struct VaultConfig {
 
 #[cw_serde]
 enum VaultExecuteMsg {
-    GiveShares { bot_id: u64, holder: String, amount: Uint128 },
-    RedeemShares { bot_id: u64, recipient: String },
+    GiveShares {
+        bot_id: u64,
+        holder: String,
+        amount: Uint128,
+    },
+    RedeemShares {
+        bot_id: u64,
+        recipient: String,
+    },
 }
 
 #[cw_serde]
@@ -107,15 +114,17 @@ fn vault_query(deps: Deps, _env: Env, msg: VaultQueryMsg) -> StdResult<Binary> {
             let shares = V_SHARES
                 .may_load(deps.storage, (address.as_str(), bot_id))?
                 .unwrap_or_default();
-            to_json_binary(&VaultSharesRaw {
-                shares,
-            })
+            to_json_binary(&VaultSharesRaw { shares })
         }
     }
 }
 
 fn vault_contract() -> Box<dyn cw_multi_test::Contract<cosmwasm_std::Empty>> {
-    Box::new(ContractWrapper::new(vault_execute, vault_instantiate, vault_query))
+    Box::new(ContractWrapper::new(
+        vault_execute,
+        vault_instantiate,
+        vault_query,
+    ))
 }
 
 fn collector_contract() -> Box<dyn cw_multi_test::Contract<cosmwasm_std::Empty>> {
@@ -263,12 +272,15 @@ fn collect_redeems_into_treasury_and_books_ledger() {
     )
     .unwrap();
 
-    let balance: cw20::BalanceResponse =
-        app.wrap()
-            .query_wasm_smart(&te, &cw20::Cw20QueryMsg::Balance {
+    let balance: cw20::BalanceResponse = app
+        .wrap()
+        .query_wasm_smart(
+            &te,
+            &cw20::Cw20QueryMsg::Balance {
                 address: treasury.to_string(),
-            })
-            .unwrap();
+            },
+        )
+        .unwrap();
     assert_eq!(balance.balance, Uint128::new(250_000));
 
     let ledger: VaultSharesResponse = app

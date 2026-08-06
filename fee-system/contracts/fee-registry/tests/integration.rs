@@ -93,9 +93,7 @@ fn mint_cl8y(app: &mut App, cl8y: &Addr, to: &Addr, amount: u128) {
 }
 
 fn query_smart<T: DeserializeOwned>(app: &App, contract: &Addr, msg: &QueryMsg) -> T {
-    app.wrap()
-        .query_wasm_smart(contract.clone(), msg)
-        .unwrap()
+    app.wrap().query_wasm_smart(contract.clone(), msg).unwrap()
 }
 
 #[test]
@@ -362,10 +360,7 @@ fn invalid_discount_rejected() {
         .unwrap_err()
         .downcast()
         .unwrap();
-    assert_matches!(
-        err,
-        ContractError::InvalidDiscountBps { value: 10_001 }
-    );
+    assert_matches!(err, ContractError::InvalidDiscountBps { value: 10_001 });
 }
 
 #[test]
@@ -424,10 +419,13 @@ fn holding_query_returns_persisted_value() {
     )
     .unwrap();
 
-    let holding: cl8y_fee_registry::msg::HoldingResponse =
-        query_smart(&app, &registry, &QueryMsg::Holding {
+    let holding: cl8y_fee_registry::msg::HoldingResponse = query_smart(
+        &app,
+        &registry,
+        &QueryMsg::Holding {
             trader: trader.to_string(),
-        });
+        },
+    );
     assert_eq!(holding.holding, Some(Uint128::new(7_500 * ONE_CL8Y)));
     assert!(holding.at_height.is_some());
 }

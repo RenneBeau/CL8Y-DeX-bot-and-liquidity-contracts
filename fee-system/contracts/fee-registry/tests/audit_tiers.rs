@@ -18,21 +18,25 @@ const ONE_CLY: u128 = 1_000_000_000_000_000_000;
 const MAX_BPS: u16 = 10_000;
 
 fn registry_contract() -> Box<dyn cw_multi_test::Contract<cosmwasm_std::Empty>> {
-    Box::new(ContractWrapper::new(
-        cl8y_fee_registry::contract::execute,
-        cl8y_fee_registry::contract::instantiate,
-        cl8y_fee_registry::contract::query,
+    Box::new(
+        ContractWrapper::new(
+            cl8y_fee_registry::contract::execute,
+            cl8y_fee_registry::contract::instantiate,
+            cl8y_fee_registry::contract::query,
+        )
+        .with_migrate(cl8y_fee_registry::contract::migrate),
     )
-    .with_migrate(cl8y_fee_registry::contract::migrate))
 }
 
 fn cl8y_token_contract() -> Box<dyn cw_multi_test::Contract<cosmwasm_std::Empty>> {
-    Box::new(ContractWrapper::new(
-        cw20_base::contract::execute,
-        cw20_base::contract::instantiate,
-        cw20_base::contract::query,
+    Box::new(
+        ContractWrapper::new(
+            cw20_base::contract::execute,
+            cw20_base::contract::instantiate,
+            cw20_base::contract::query,
+        )
+        .with_migrate(cw20_base::contract::migrate),
     )
-    .with_migrate(cw20_base::contract::migrate))
 }
 
 fn setup_with(base_fee_bps: u16) -> (App, Addr, Addr) {
@@ -96,13 +100,17 @@ fn mint_cly(app: &mut App, cl8y: &Addr, to: &Addr, amount: u128) {
 }
 
 fn query_smart<T: DeserializeOwned>(app: &App, contract: &Addr, msg: &QueryMsg) -> T {
-    app.wrap()
-        .query_wasm_smart(contract.clone(), msg)
-        .unwrap()
+    app.wrap().query_wasm_smart(contract.clone(), msg).unwrap()
 }
 
 fn live_fee(app: &App, registry: &Addr, trader: &Addr) -> EffectiveFeeResponse {
-    query_smart(app, registry, &QueryMsg::EffectiveFee { trader: trader.to_string() })
+    query_smart(
+        app,
+        registry,
+        &QueryMsg::EffectiveFee {
+            trader: trader.to_string(),
+        },
+    )
 }
 
 fn all_tiers(app: &App, registry: &Addr) -> Vec<TierEntry> {
@@ -178,7 +186,14 @@ fn full_matrix_agrees_with_reference_resolution() {
     let (mut app, registry, cl8y) = setup_with(1_800);
     let pool: Vec<(u8, u128, u16, bool)> = all_tiers(&app, &registry)
         .into_iter()
-        .map(|t| (t.tier_id, t.min_cl8y_balance.u128(), t.discount_bps, t.governance_only))
+        .map(|t| {
+            (
+                t.tier_id,
+                t.min_cl8y_balance.u128(),
+                t.discount_bps,
+                t.governance_only,
+            )
+        })
         .collect();
 
     // Sample balances that straddle every boundary plus midpoints.
@@ -214,7 +229,11 @@ fn full_matrix_agrees_with_reference_resolution() {
         let (exp_disc, exp_tier) = reference_discount(&pool, *balance);
         assert_eq!(fee.discount_bps, exp_disc, "discount at balance {balance}");
         assert_eq!(fee.tier_id, exp_tier, "tier at balance {balance}");
-        assert_eq!(fee.fee_bps, reference_fee(1_800, exp_disc), "fee at balance {balance}");
+        assert_eq!(
+            fee.fee_bps,
+            reference_fee(1_800, exp_disc),
+            "fee at balance {balance}"
+        );
 
         // A holder can never be charged more than their live discount implies.
         assert!(
@@ -371,7 +390,9 @@ fn holding_never_cleared_on_transient_live_failure() {
     app.execute_contract(
         Addr::unchecked("anyone"),
         registry.clone(),
-        &ExecuteMsg::RefreshHolding { trader: trader.to_string() },
+        &ExecuteMsg::RefreshHolding {
+            trader: trader.to_string(),
+        },
         &[],
     )
     .unwrap();

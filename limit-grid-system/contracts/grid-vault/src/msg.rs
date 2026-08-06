@@ -138,12 +138,8 @@ pub enum PairExecuteMsg {
 pub enum PairQueryMsg {
     Pair {},
     Pool {},
-    LimitOrder {
-        order_id: u64,
-    },
-    ExpiredLimitRefund {
-        order_id: u64,
-    },
+    LimitOrder { order_id: u64 },
+    ExpiredLimitRefund { order_id: u64 },
     LimitOrderConfig {},
 }
 

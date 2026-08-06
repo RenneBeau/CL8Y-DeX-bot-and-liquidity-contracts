@@ -23,10 +23,9 @@ use crate::msg::{
     SolvencyResponse, TokenPolicyResponse, VaultModeResponse,
 };
 use crate::state::{
-    Bot, CancelledOrder, Config, GridOrder, PageKind, PendingPage, PendingPageEntry,
-    PlacementPlan, Rung, VaultMode, ALLOWED_TOKENS, BOTS, CANCELLED_ORDERS, CONFIG, NEXT_BOT_ID,
-    NEXT_REPLY_ID, ORDERS, PENDING_PAGES, PLACEMENTS, QUARANTINE, RUNGS, SHARES,
-    TOKEN_POLICY_ENABLED, VAULT_MODE,
+    Bot, CancelledOrder, Config, GridOrder, PageKind, PendingPage, PendingPageEntry, PlacementPlan,
+    Rung, VaultMode, ALLOWED_TOKENS, BOTS, CANCELLED_ORDERS, CONFIG, NEXT_BOT_ID, NEXT_REPLY_ID,
+    ORDERS, PENDING_PAGES, PLACEMENTS, QUARANTINE, RUNGS, SHARES, TOKEN_POLICY_ENABLED, VAULT_MODE,
 };
 
 const CONTRACT_NAME: &str = "crates.io:cl8y-grid-vault";
@@ -96,7 +95,10 @@ pub fn instantiate(
             max_grid_count: msg.max_grid_count,
             max_orders_per_reconcile: msg.max_orders_per_reconcile,
             max_active_orders_per_bot: msg.max_active_orders_per_bot,
-            fee_registry: msg.fee_registry.map(|s| deps.api.addr_validate(&s)).transpose()?,
+            fee_registry: msg
+                .fee_registry
+                .map(|s| deps.api.addr_validate(&s))
+                .transpose()?,
             fee_collector: msg
                 .fee_collector
                 .map(|s| deps.api.addr_validate(&s))
@@ -687,7 +689,10 @@ fn execute_reconcile(
             response = response
                 .add_attribute("fee_bps", fee.fee_bps.to_string())
                 .add_attribute("fee_shares", fee.shares.to_string())
-                .add_attribute("fee_tier", fee.tier.map(|t| t.to_string()).unwrap_or_default())
+                .add_attribute(
+                    "fee_tier",
+                    fee.tier.map(|t| t.to_string()).unwrap_or_default(),
+                )
                 .add_attribute("fee_source", fee.source);
         }
         // Non-blocking: the reconcile completes even if the fee-registry is
@@ -955,9 +960,7 @@ fn execute_redeem_shares(
         return Err(ContractError::InvalidMode);
     }
     let config = CONFIG.load(deps.storage)?;
-    let collector = config
-        .fee_collector
-        .ok_or(ContractError::Unauthorized)?;
+    let collector = config.fee_collector.ok_or(ContractError::Unauthorized)?;
     if info.sender != collector {
         return Err(ContractError::Unauthorized);
     }
@@ -1936,7 +1939,8 @@ fn handle_pending_page(
                 bot.free_balances[entry.token_index as usize] =
                     bot.free_balances[entry.token_index as usize].checked_add(entry.refund)?;
                 if page.kind == PageKind::Cancel {
-                    if let Some(order) = ORDERS.may_load(deps.storage, (page.bot_id, entry.order_id))?
+                    if let Some(order) =
+                        ORDERS.may_load(deps.storage, (page.bot_id, entry.order_id))?
                     {
                         CANCELLED_ORDERS.save(
                             deps.storage,

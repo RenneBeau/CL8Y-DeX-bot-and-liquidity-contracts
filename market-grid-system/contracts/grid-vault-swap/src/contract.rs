@@ -410,7 +410,11 @@ pub fn reply(deps: DepsMut, env: Env, reply: Reply) -> Result<Response, Contract
     let value_in_token0 = if ask == 0 {
         proceeds
     } else {
-        checked_ratio(proceeds, Decimal::one().atomics(), pending.captured_twap.atomics())?
+        checked_ratio(
+            proceeds,
+            Decimal::one().atomics(),
+            pending.captured_twap.atomics(),
+        )?
     };
     let mut response = Response::new()
         .add_attribute("action", "complete_rebalance")
@@ -422,7 +426,10 @@ pub fn reply(deps: DepsMut, env: Env, reply: Reply) -> Result<Response, Contract
             response = response
                 .add_attribute("fee_bps", fee.fee_bps.to_string())
                 .add_attribute("fee_holders", fee.holders.to_string())
-                .add_attribute("fee_tier", fee.tier.map(|t| t.to_string()).unwrap_or_default())
+                .add_attribute(
+                    "fee_tier",
+                    fee.tier.map(|t| t.to_string()).unwrap_or_default(),
+                )
                 .add_attribute("fee_source", fee.source)
                 .add_attribute("fee_shares", fee.shares.to_string());
         }
@@ -671,7 +678,9 @@ fn charge_fee(
         SHARES.save(
             deps.storage,
             &address,
-            &shares.checked_sub(fee_for_holder).map_err(StdError::overflow)?,
+            &shares
+                .checked_sub(fee_for_holder)
+                .map_err(StdError::overflow)?,
         )?;
         total_fee_value = total_fee_value
             .checked_add(fee_for_holder)
@@ -706,7 +715,11 @@ fn charge_fee(
         fee_bps: weighted_bps,
         shares: total_fee_value,
         holders: charged_count,
-        tier: if charged_count == 1 { single_tier } else { None },
+        tier: if charged_count == 1 {
+            single_tier
+        } else {
+            None
+        },
         source: if charged_count == 1 {
             single_source.unwrap_or_default()
         } else {
