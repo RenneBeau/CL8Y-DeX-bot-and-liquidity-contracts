@@ -125,6 +125,28 @@ tier is resolved **per holding address**:
 - **Poly (pools):** each LP's *share* of the fill output has the fee applied at
   that LP's tier; the fee is booked as LP for the collector on behalf of each LP.
 
+### Design rationale: mono grids vs pooled rebalancer
+
+The two execution venues have deliberately different objectives, which drive the
+fee-and-gas trade-off:
+
+- **Grids (limit-grid, market-grid) are mono and per-user.** Each grid belongs to
+  a single owner and is designed to be **fine-tuned by its user** (price range,
+  budget, cadence). Every execution serves exactly one trader, so that user
+  absorbs the full per-execution gas of their own grid — grids are inherently
+  **gas-heavier per user**.
+- **The rebalancer is a pooled, gas-minimal venue.** Its purpose is to amortise
+  infrastructure cost: several traders' orders are grouped inside one vault (the
+  pooled `bot-liquidity` LP token), and a single rebalance execution serves many
+  traders at once. Grouping is exactly what minimises gas *per trader* compared
+  to running N individual grids.
+
+Consequences for the protocol fee (§5 poly): resolving each LP's own tier costs N
+`EffectiveFee` resolutions per fill on the rebalancer. The enumeration is
+deliberately **uncapped** — every LP in the pool is always taxed at their exact
+tier. The venue's gas-minimisation comes from *grouping* (one rebalance
+execution serves many traders), not from limiting the fee enumeration.
+
 Mechanics (v1, value-based mint-on-fill): on a fill landing `out` tokens in the
 vault, `fee = out × effective_fee_bps / 10000`. The vault issues ∆shares to the
 fee-collector such that it owns `fee` of the pool's post-fill depth in the traded
@@ -237,8 +259,11 @@ Vaults (grid / market-grid / rebalancer)
 2. Integrate the **limit-grid** first (mono-user, lowest risk, existing
    `SHARES` map).
 3. Integrate **market-grid**.
-4. Integrate **rebalancer** (poly-user per-LP tier; the heaviest case; can be a
-   follow-up).
+4. Integrate **rebalancer** (poly-user per-LP tier; grouping is what minimises
+   gas per trader — a rebalance execution serves many traders at once. The fee
+enumeration is **uncapped**: every LP is resolved at their exact tier, so the
+    fill costs N `EffectiveFee` queries that scale with the pool's LP count; can
+    be a follow-up).
 
 ## 11. Open items (confirm before implementation)
 
