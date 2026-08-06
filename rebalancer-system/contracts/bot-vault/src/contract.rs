@@ -505,6 +505,7 @@ pub fn reply(deps: DepsMut, env: Env, reply: Reply) -> Result<Response, Contract
         ChargeFee::Applied(fee) => {
             response = response
                 .add_attribute("fee_bps", fee.fee_bps.to_string())
+                .add_attribute("fee_holders", fee.holders.to_string())
                 .add_attribute("fee_tier", fee.tier.map(|t| t.to_string()).unwrap_or_default())
                 .add_attribute("fee_source", fee.source)
                 .add_attribute("fee_shares", fee.shares.to_string());
@@ -1148,8 +1149,11 @@ struct FeeRegistryEffectiveFeeResponse {
 }
 
 struct FeeApplied {
+    /// Weighted-average effective fee across all charged LP holders, in bps.
     fee_bps: u16,
     shares: Uint128,
+    /// The number of LP holders whose share was charged at their own tier.
+    holders: usize,
     tier: Option<u8>,
     source: String,
 }
@@ -1162,13 +1166,15 @@ enum ChargeFee {
     Unavailable(String),
 }
 
-/// Protocol fee per executed rebalance swap (token-0 value based): the fee is
-/// resolved against the vault's sole LP holder (`config.admin`) so the charge
-/// reflects the holder's own CL18Y tier — never the vault contract address,
-/// which holds no CL8Y and would otherwise always resolve to the full base fee.
-/// The resulting value accrues to the configured fee-collector as a value
-/// claim. No fee is charged when the vault has no fee configured or the rate is
-/// zero. A transient fee-registry failure is non-blocking.
+/// Protocol fee per executed rebalance swap (token-0 value based), resolved
+/// **per LP holder** (poly, `FEE_TIER_PROTOCOL.md` §5): the pool mutualises
+/// several traders, so each LP's share of the fill value is attributed at that
+/// holder's OWN CL8Y tier and the sum is accrued to the configured fee-collector
+/// as a value claim. Holder shares come from the pooled bot-liquidity token
+/// (`AllAccounts` + `Balance`, paginated). No fee is charged when the vault has
+/// no fee configured, no liquidity contract / holders, or the rate is zero. A
+/// transient fee-registry failure is non-blocking (the whole charge is skipped,
+/// never a revert).
 fn charge_fee(
     deps: &mut DepsMut,
     config: &Config,
@@ -1180,40 +1186,120 @@ fn charge_fee(
     if value_in_token0.is_zero() {
         return Ok(ChargeFee::None);
     }
-    let fee: FeeRegistryEffectiveFeeResponse = match deps.querier.query_wasm_smart(
-        registry,
-        &FeeRegistryQueryMsg::EffectiveFee {
-            trader: config.admin.to_string(),
-        },
-    ) {
-        Ok(fee) => fee,
-        Err(err) => return Ok(ChargeFee::Unavailable(err.to_string())),
+    let Some(liquidity) = &config.liquidity_contract else {
+        // No pooled LP token to enumerate: nothing to attribute.
+        return Ok(ChargeFee::None);
     };
-    // Defensive bound: cap the effective fee at 100% (10_000 bps).
-    let fee_bps = fee.fee_bps.min(10_000);
-    if fee_bps == 0 {
+
+    let info: TokenInfoResponse =
+        deps.querier.query_wasm_smart(liquidity, &Cw20QueryMsg::TokenInfo {})?;
+    if info.total_supply.is_zero() {
         return Ok(ChargeFee::None);
     }
-    let shares = value_in_token0.multiply_ratio(fee_bps, 10_000u16);
-    if shares.is_zero() {
+    let total_supply = info.total_supply;
+
+    // Enumerate every LP holder (paginated) and their share of the pool.
+    let mut holders: Vec<(String, Uint128)> = Vec::new();
+    let page_size: u32 = 100;
+    let mut start_after: Option<String> = None;
+    loop {
+        let resp: cw20::AllAccountsResponse = deps.querier.query_wasm_smart(
+            liquidity,
+            &Cw20QueryMsg::AllAccounts {
+                start_after,
+                limit: Some(page_size),
+            },
+        )?;
+        for account in &resp.accounts {
+            let bal: BalanceResponse = deps
+                .querier
+                .query_wasm_smart(liquidity, &Cw20QueryMsg::Balance {
+                    address: account.clone(),
+                })?;
+            if !bal.balance.is_zero() {
+                holders.push((account.clone(), bal.balance));
+            }
+        }
+        if (resp.accounts.len() as u32) < page_size {
+            break;
+        }
+        start_after = resp.accounts.last().cloned();
+    }
+
+    // Attribute each holder's slice of the fill at THEIR OWN tier.
+    let mut total_fee_value = Uint128::zero();
+    let mut charged_count = 0usize;
+    let mut single_tier: Option<u8> = None;
+    let mut single_source: Option<String> = None;
+    for (address, shares) in holders {
+        if address == collector.as_str() {
+            // The collector's accrued claim is never charged against itself.
+            continue;
+        }
+        let holder_value = value_in_token0.multiply_ratio(shares, total_supply);
+        if holder_value.is_zero() {
+            continue;
+        }
+        let fee: FeeRegistryEffectiveFeeResponse = match deps.querier.query_wasm_smart(
+            registry,
+            &FeeRegistryQueryMsg::EffectiveFee { trader: address },
+        ) {
+            Ok(fee) => fee,
+            Err(err) => return Ok(ChargeFee::Unavailable(err.to_string())),
+        };
+        // Defensive bound: cap the effective fee at 100% (10_000 bps).
+        let fee_bps = fee.fee_bps.min(10_000);
+        if fee_bps == 0 {
+            continue;
+        }
+        let fee_for_holder = holder_value.multiply_ratio(fee_bps, 10_000u16);
+        if fee_for_holder.is_zero() {
+            continue;
+        }
+        total_fee_value = total_fee_value
+            .checked_add(fee_for_holder)
+            .map_err(StdError::overflow)?;
+        charged_count += 1;
+        single_tier = fee.tier_id;
+        single_source = Some(fee.source);
+    }
+
+    if total_fee_value.is_zero() {
         return Ok(ChargeFee::None);
     }
+
     let previous = FEE_SHARES
         .may_load(deps.storage, collector)?
         .unwrap_or_default();
     FEE_SHARES.save(
         deps.storage,
         collector,
-        &previous.checked_add(shares).map_err(StdError::overflow)?,
+        &previous
+            .checked_add(total_fee_value)
+            .map_err(StdError::overflow)?,
     )?;
     TOTAL_FEE_SHARES.update(deps.storage, |total| -> StdResult<Uint128> {
-        total.checked_add(shares).map_err(StdError::overflow)
+        total.checked_add(total_fee_value).map_err(StdError::overflow)
     })?;
+
+    // Weighted-average rate across the holders that were charged, for events.
+    let weighted_bps = match total_fee_value.checked_mul(Uint128::new(10_000)) {
+        Ok(product) => match product.checked_div(value_in_token0) {
+            Ok(v) => v.u128().min(u128::from(u16::MAX)) as u16,
+            Err(_) => 0,
+        },
+        Err(_) => 0,
+    };
     Ok(ChargeFee::Applied(FeeApplied {
-        fee_bps,
-        shares,
-        tier: fee.tier_id,
-        source: fee.source,
+        fee_bps: weighted_bps,
+        shares: total_fee_value,
+        holders: charged_count,
+        tier: if charged_count == 1 { single_tier } else { None },
+        source: if charged_count == 1 {
+            single_source.unwrap_or_default()
+        } else {
+            "pooled_tiers".to_string()
+        },
     }))
 }
 
@@ -1306,6 +1392,130 @@ fn execute_update_fee_config(
     CONFIG.save(deps.storage, &config)?;
     Ok(Response::new().add_attribute("action", "update_fee_config"))
 }
+
+
+
+#[cfg(test)]
+fn vault_config(liquidity: Option<&str>, registry: Option<&str>, collector: Option<&str>) -> Config {
+    Config {
+        admin: Addr::unchecked("admin"),
+        keeper: Addr::unchecked("keeper"),
+        liquidity_contract: liquidity.map(Addr::unchecked),
+        proxy: Addr::unchecked("proxy"),
+        pair: Addr::unchecked("pair"),
+        asset_tokens: [Addr::unchecked("t0"), Addr::unchecked("t1")],
+        decimals: 6,
+        twap_window_seconds: 300,
+        rebalance_threshold_bps: 500,
+        allocation_tolerance_bps: 100,
+        max_trade_bps: 2_500,
+        max_execution_deviation_bps: 500,
+        quote_slippage_bps: 200,
+        max_spot_twap_deviation_bps: 500,
+        max_trade_pool_bps: 1_000,
+        max_spread: Decimal::percent(5),
+        reference_price: Decimal::one(),
+        fee_registry: registry.map(Addr::unchecked),
+        fee_collector: collector.map(Addr::unchecked),
+    }
+}
+
+/// A mock bot-liquidity pool (cw20) plus fee-registry: `holders` is
+/// `(address, lp_balance)`; `registry_rates` is `(address, fee_bps)`.
+#[cfg(test)]
+fn install_pool_mock(
+    deps: &mut cosmwasm_std::OwnedDeps<
+        cosmwasm_std::testing::MockStorage,
+        cosmwasm_std::testing::MockApi,
+        cosmwasm_std::testing::MockQuerier,
+        cosmwasm_std::Empty,
+    >,
+    holders: &[(&str, u128)],
+    registry_rates: &[(&str, u16)],
+) {
+    use cosmwasm_std::{from_json, ContractResult, SystemResult, WasmQuery};
+    let holders: Vec<(String, u128)> = holders
+        .iter()
+        .map(|(a, b)| (a.to_string(), *b))
+        .collect();
+    let registry_rates: Vec<(String, u16)> = registry_rates
+        .iter()
+        .map(|(a, b)| (a.to_string(), *b))
+        .collect();
+    deps.querier.update_wasm(move |query| match query {
+        WasmQuery::Smart { contract_addr, msg } => {
+            if contract_addr == "liquidity" {
+                pool_smart_response(contract_addr, msg, &holders)
+            } else if contract_addr == "registry" {
+                let query: FeeRegistryQueryMsg = from_json(msg).unwrap();
+                match query {
+                    FeeRegistryQueryMsg::EffectiveFee { trader } => {
+                        let fee_bps = registry_rates
+                            .iter()
+                            .find(|(a, _)| *a == trader)
+                            .map(|(_, b)| *b)
+                            .unwrap_or(0);
+                        SystemResult::Ok(ContractResult::Ok(
+                            to_json_binary(&FeeRegistryEffectiveFeeResponse {
+                                fee_bps,
+                                discount_bps: 0,
+                                tier_id: None,
+                                holding: None,
+                                source: "live".to_string(),
+                            })
+                            .unwrap(),
+                        ))
+                    }
+                }
+            } else {
+                panic!("unexpected contract {}", contract_addr)
+            }
+        }
+        _ => panic!("unexpected query"),
+    });
+}
+
+#[cfg(test)]
+fn pool_smart_response(
+    _contract_addr: &str,
+    msg: &Binary,
+    holders: &[(String, u128)],
+) -> cosmwasm_std::SystemResult<cosmwasm_std::ContractResult<Binary>> {
+    use cosmwasm_std::{from_json, ContractResult, SystemResult};
+    let query: Cw20QueryMsg = from_json(msg).unwrap();
+    match query {
+        Cw20QueryMsg::TokenInfo {} => {
+            let total_supply = holders.iter().fold(0u128, |acc, (_, b)| acc + b);
+            SystemResult::Ok(ContractResult::Ok(
+                to_json_binary(&TokenInfoResponse {
+                    name: "Pool LP".to_string(),
+                    symbol: "PLP".to_string(),
+                    decimals: 6,
+                    total_supply: Uint128::new(total_supply),
+                })
+                .unwrap(),
+            ))
+        }
+        Cw20QueryMsg::AllAccounts { .. } => {
+            let accounts: Vec<String> = holders.iter().map(|(a, _)| a.clone()).collect();
+            SystemResult::Ok(ContractResult::Ok(
+                to_json_binary(&cw20::AllAccountsResponse { accounts }).unwrap(),
+            ))
+        }
+        Cw20QueryMsg::Balance { address } => {
+            let balance = holders
+                .iter()
+                .find(|(a, _)| *a == address)
+                .map(|(_, b)| Uint128::new(*b))
+                .unwrap_or_else(Uint128::zero);
+            SystemResult::Ok(ContractResult::Ok(
+                to_json_binary(&BalanceResponse { balance }).unwrap(),
+            ))
+        }
+        _ => panic!("unexpected liquidity query"),
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -1974,152 +2184,108 @@ mod tests {
     #[test]
     fn charge_fee_skips_when_not_configured_or_zero_value() {
         let mut deps = mock_dependencies();
-        let config = Config {
-            admin: Addr::unchecked("admin"),
-            keeper: Addr::unchecked("keeper"),
-            liquidity_contract: None,
-            proxy: Addr::unchecked("proxy"),
-            pair: Addr::unchecked("pair"),
-            asset_tokens: [Addr::unchecked("t0"), Addr::unchecked("t1")],
-            decimals: 6,
-            twap_window_seconds: 300,
-            rebalance_threshold_bps: 500,
-            allocation_tolerance_bps: 100,
-            max_trade_bps: 2_500,
-            max_execution_deviation_bps: 500,
-            quote_slippage_bps: 200,
-            max_spot_twap_deviation_bps: 500,
-            max_trade_pool_bps: 1_000,
-            max_spread: Decimal::percent(5),
-            reference_price: Decimal::one(),
-            fee_registry: None,
-            fee_collector: None,
-        };
+        let config = vault_config(None, None, None);
         assert!(matches!(
             charge_fee(&mut deps.as_mut(), &config, Uint128::new(1_000)).unwrap(),
+            ChargeFee::None
+        ));
+
+        // A configured pool but zero fill value => nothing to tax.
+        let mut deps = mock_dependencies();
+        install_pool_mock(
+            &mut deps,
+            &[("alice", 1_000), ("bob", 1_000)],
+            &[("alice", 1_000), ("bob", 500)],
+        );
+        let config = vault_config(Some("liquidity"), Some("registry"), Some("collector"));
+        assert!(matches!(
+            charge_fee(&mut deps.as_mut(), &config, Uint128::zero()).unwrap(),
             ChargeFee::None
         ));
     }
 
     #[test]
-    fn charge_fee_applies_math_and_accrues_to_collector() {
+    fn charge_fee_taxes_each_lp_holder_at_their_own_tier() {
         let mut deps = mock_dependencies();
         TOTAL_FEE_SHARES.save(&mut deps.storage, &Uint128::zero()).unwrap();
-        // The EffectiveFee query returns 1_800 bps from the mock registry.
-        deps.querier.update_wasm(|query| match query {
-            WasmQuery::Smart { msg, .. } => {
-                let query: FeeRegistryQueryMsg = from_json(msg).unwrap();
-                match query {
-                    FeeRegistryQueryMsg::EffectiveFee { trader } => {
-                        // The fee must be resolved against the vault's sole LP
-                        // holder (admin), never the vault contract address.
-                        assert_eq!(trader, "admin", "fee resolved against the LP holder");
-                        SystemResult::Ok(
-                            ContractResult::Ok(
-                                to_json_binary(&FeeRegistryEffectiveFeeResponse {
-                                    fee_bps: 1_000,
-                                    discount_bps: 0,
-                                    tier_id: None,
-                                    holding: None,
-                                    source: "live".to_string(),
-                                })
-                                .unwrap(),
-                            ),
-                        )
-                    }
-                }
-            }
-            _ => panic!("unexpected query"),
-        });
-        let config = Config {
-            admin: Addr::unchecked("admin"),
-            keeper: Addr::unchecked("keeper"),
-            liquidity_contract: None,
-            proxy: Addr::unchecked("proxy"),
-            pair: Addr::unchecked("pair"),
-            asset_tokens: [Addr::unchecked("t0"), Addr::unchecked("t1")],
-            decimals: 6,
-            twap_window_seconds: 300,
-            rebalance_threshold_bps: 500,
-            allocation_tolerance_bps: 100,
-            max_trade_bps: 2_500,
-            max_execution_deviation_bps: 500,
-            quote_slippage_bps: 200,
-            max_spot_twap_deviation_bps: 500,
-            max_trade_pool_bps: 1_000,
-            max_spread: Decimal::percent(5),
-            reference_price: Decimal::one(),
-            fee_registry: Some(Addr::unchecked("registry")),
-            fee_collector: Some(Addr::unchecked("collector")),
-        };
-        // 1_000 bps of 1_000 value = 100 shares.
-        let charge = charge_fee(&mut deps.as_mut(), &config, Uint128::new(1_000))
-            .unwrap();
+        // Pool of two LPs, equal shares (1 000 / 2 000 each), taxed at their own
+        // tier: alice 1 000 bps, bob 500 bps. Fill value = 1 000 token0.
+        // alice slice 500 -> 50; bob slice 500 -> 25; total collector claim 75.
+        install_pool_mock(
+            &mut deps,
+            &[("alice", 1_000), ("bob", 1_000)],
+            &[("alice", 1_000), ("bob", 500)],
+        );
+        let config = vault_config(Some("liquidity"), Some("registry"), Some("collector"));
+        let charge = charge_fee(&mut deps.as_mut(), &config, Uint128::new(1_000)).unwrap();
         match charge {
             ChargeFee::Applied(fee) => {
-                assert_eq!(fee.fee_bps, 1_000);
+                assert_eq!(fee.fee_bps, 750, "weighted avg across both tiers");
+                assert_eq!(fee.shares, Uint128::new(75), "sum of per-holder fees");
+                assert_eq!(fee.holders, 2);
+                assert_eq!(fee.source, "pooled_tiers");
+                assert_eq!(fee.tier, None, "mixed tiers report no single tier");
+            }
+            _other => panic!("expected Applied fee, got a different ChargeFee variant"),
+        }
+        let collector = Addr::unchecked("collector");
+        assert_eq!(
+            FEE_SHARES.load(&deps.storage, &collector).unwrap(),
+            Uint128::new(75)
+        );
+        assert_eq!(
+            TOTAL_FEE_SHARES.load(&deps.storage).unwrap(),
+            Uint128::new(75)
+        );
+    }
+
+    #[test]
+    fn charge_fee_single_holder_reports_their_exact_tier() {
+        let mut deps = mock_dependencies();
+        TOTAL_FEE_SHARES.save(&mut deps.storage, &Uint128::zero()).unwrap();
+        // One holder (the whole pool): the weighted rate is exactly their tier.
+        install_pool_mock(&mut deps, &[("alice", 2_000)], &[("alice", 1_000)]);
+        let config = vault_config(Some("liquidity"), Some("registry"), Some("collector"));
+        let charge = charge_fee(&mut deps.as_mut(), &config, Uint128::new(1_000)).unwrap();
+        match charge {
+            ChargeFee::Applied(fee) => {
+                assert_eq!(fee.fee_bps, 1_000, "single holder at their exact rate");
                 assert_eq!(fee.shares, Uint128::new(100));
-                assert_eq!(fee.tier, None);
+                assert_eq!(fee.holders, 1);
                 assert_eq!(fee.source, "live");
             }
-            _other => panic!("expected Applied fee, got a different ChargeFee variant"),        }
-        let collector = Addr::unchecked("collector");
-        assert_eq!(FEE_SHARES.load(&deps.storage, &collector).unwrap(), Uint128::new(100));
-        assert_eq!(TOTAL_FEE_SHARES.load(&deps.storage).unwrap(), Uint128::new(100));
+            _other => panic!("expected Applied fee, got a different ChargeFee variant"),
+        }
     }
 
     #[test]
     fn charge_fee_skips_when_registry_unreachable_or_zero_rate() {
-        // Registry query error => non-blocking skip (no fee, no revert).
+        // Pool enumeration succeeds but the fee-registry query fails => the
+        // whole charge is skipped non-blockingly (no fee, no revert).
         let mut deps = mock_dependencies();
         deps.querier.update_wasm(|query| match query {
-            WasmQuery::Smart { .. } => SystemResult::Err(cosmwasm_std::SystemError::InvalidRequest {
-                request: Default::default(),
-                error: "boom".to_string(),
-            }),
+            WasmQuery::Smart { contract_addr, msg } => {
+                if contract_addr == "liquidity" {
+                    pool_smart_response(contract_addr, msg, &[("alice".to_string(), 1_000)])
+                } else {
+                    SystemResult::Err(cosmwasm_std::SystemError::InvalidRequest {
+                        request: Default::default(),
+                        error: "boom".to_string(),
+                    })
+                }
+            }
             _ => panic!("unexpected query"),
         });
-        let config = Config {
-            admin: Addr::unchecked("admin"),
-            keeper: Addr::unchecked("keeper"),
-            liquidity_contract: None,
-            proxy: Addr::unchecked("proxy"),
-            pair: Addr::unchecked("pair"),
-            asset_tokens: [Addr::unchecked("t0"), Addr::unchecked("t1")],
-            decimals: 6,
-            twap_window_seconds: 300,
-            rebalance_threshold_bps: 500,
-            allocation_tolerance_bps: 100,
-            max_trade_bps: 2_500,
-            max_execution_deviation_bps: 500,
-            quote_slippage_bps: 200,
-            max_spot_twap_deviation_bps: 500,
-            max_trade_pool_bps: 1_000,
-            max_spread: Decimal::percent(5),
-            reference_price: Decimal::one(),
-            fee_registry: Some(Addr::unchecked("registry")),
-            fee_collector: Some(Addr::unchecked("collector")),
-        };
+        let config = vault_config(Some("liquidity"), Some("registry"), Some("collector"));
         assert!(matches!(
             charge_fee(&mut deps.as_mut(), &config, Uint128::new(1_000)).unwrap(),
             ChargeFee::Unavailable(_)
         ));
 
-        // Zero rate returned by the registry => skip without accruing.
+        // Zero rate returned by the registry for every holder => skip.
         let mut deps = mock_dependencies();
-        deps.querier.update_wasm(|query| match query {
-            WasmQuery::Smart { .. } => SystemResult::Ok(ContractResult::Ok(
-                to_json_binary(&FeeRegistryEffectiveFeeResponse {
-                    fee_bps: 0,
-                    discount_bps: 0,
-                    tier_id: None,
-                    holding: None,
-                    source: "lowest".to_string(),
-                })
-                .unwrap(),
-            )),
-            _ => panic!("unexpected query"),
-        });
+        install_pool_mock(&mut deps, &[("alice", 1_000)], &[("alice", 0)]);
+        let config = vault_config(Some("liquidity"), Some("registry"), Some("collector"));
         assert!(matches!(
             charge_fee(&mut deps.as_mut(), &config, Uint128::new(5_000)).unwrap(),
             ChargeFee::None

@@ -189,13 +189,16 @@ holders lose strictly less LP.
   higher-tier holder loses strictly less LP; collector = sum of losses; total
   shares conserved. (Also fixed the tiered mock's discriminator — the address's
   first byte is always `c`, so last-byte parity is used.)
-- `rebalancer` `bot-vault` `charge_fee` now resolves the fee against the vault's
-  sole LP holder (`config.admin`) instead of the vault contract address; the
-  `charge_fee_applies_math_and_accrues_to_collector` unit test asserts the query
-  is made against `admin`.
+- `rebalancer` `bot-vault` `charge_fee` is **poly (pool)**: it enumerates every
+  LP holder of the pooled `bot-liquidity` token (`TokenInfo` + paginated
+  `AllAccounts` + `Balance`), attributes each holder's slice of the fill value
+  at their OWN CL8Y tier, and accrues the sum to the collector's value claim
+  (`FEE_SHARES`). New unit tests cover two holders at different rates (weighted
+  fee + conservation), a single holder (exact tier, `source = "live"`), and
+  non-blocking registry-failure / zero-rate skips.
 - Gates: `cargo test --workspace --all-targets` + `cargo clippy --workspace
   --all-targets -- -D warnings` clean on `market-grid-system` (21 tests) and
-  `rebalancer-system` (35 tests).
+  `rebalancer-system` (36 tests).
 - Deployment: `docs/DEPLOY_FEE_SYSTEM.md` records the production mainnet CL8Y
   and CMM-treasury addresses (both validated 32-byte bech32) with exact
   fee-registry / fee-collector instantiation JSON; `test-area/deploy-system.sh`
