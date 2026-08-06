@@ -7,7 +7,8 @@ separate Cargo workspaces at the repository root:
 - [`market-grid-system`](../market-grid-system/README.md) — the **deployable**
   standard swap grid.
 - [`limit-grid-system`](../limit-grid-system/README.md) — the limit-order grid,
-  which reconciles against the shipped pair via its own cancel ledger and the
+  which reconciles against the shipped CL8Y DEX pair via its own cancel ledger
+  and the
   "unknown means fully executed" classification.
 
 Contents:

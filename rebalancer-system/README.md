@@ -2,8 +2,9 @@
 
 This Cargo workspace contains the portfolio rebalancing system. Each
 bot keeps one CW20 token pair in an isolated vault and gives depositors
-transferable CW20 LP shares. A shared swap proxy holds CL8Y so approved vaults
-can use the proxy's governance-assigned fee tier.
+transferable CW20 LP shares. A shared swap proxy routes approved vaults' swaps
+through their CL8Y pairs; the proxy and vault contracts are whitelisted on the
+CL8Y DEX, so the DEX charges them no fees.
 
 ## Components
 
@@ -29,8 +30,11 @@ spot reserves never drive keeper safety. A short-term strategy can start by
 testing a 30-300 second window. The final value must be chosen from pair
 liquidity, block time, volatility, and manipulation-cost measurements.
 
-CL8Y fee-registry governance registers the deployed proxy, and the proxy holds
-the selected tier's minimum CL8Y balance.
+The deployed proxy and vault contracts are whitelisted on the CL8Y DEX, so the
+DEX charges them no fees. The protocol fee (fee-registry + fee-collector) is
+separate and resolves each LP holder's CL8Y tier at fill time (see
+`docs/FEE_TIER_PROTOCOL.md` §2); the proxy does not need to hold CL8Y for a fee
+tier.
 
 The contracts are unaudited. Do not deploy them with economic assets before an
 independent contract and oracle review.

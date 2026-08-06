@@ -10,7 +10,8 @@
    manager owner index for the dedicated address.
 4. The designated owner calls `create_bot` on that vault and attaches at least
    `minimum_gas_reserve + keeper_reward` in the configured gas denom.
-5. Register each vault address independently for its CL8Y fee tier.
+5. The deployed contracts are whitelisted on the CL8Y DEX, so they pay zero DEX
+   fees; no CL8Y fee-tier registration is required.
 
 Manager example:
 

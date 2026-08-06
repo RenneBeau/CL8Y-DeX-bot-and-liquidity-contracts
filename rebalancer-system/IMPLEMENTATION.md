@@ -12,7 +12,8 @@ addresses, keeper authority, and token denominations explicit.
 Implement `contracts/swap-proxy` as the only trading entry point. The admin
 registers each vault with its CL8Y pair. On a swap, verify the caller and pair,
 forward the offer token to the pair, and direct output back to that same vault.
-This isolates user inventory while sharing the proxy's CL8Y fee tier.
+This isolates user inventory while routing swaps through the whitelisted proxy
+(zero DEX fee).
 
 ## 3. Implement The Vault
 
@@ -35,7 +36,8 @@ single-token withdrawal, route the unwanted side through the vault and proxy.
 2. Register the vault and its CL8Y pair in the proxy.
 3. Connect the vault and liquidity contract authorities.
 4. Assign a dedicated keeper to the vault.
-5. Have CL8Y governance register the proxy for the intended fee tier.
+5. Whitelist the deployed proxy and vault contracts on the CL8Y DEX so they pay
+   zero DEX fees.
 6. Fund the proxy with the tier's required CL8Y balance.
 7. Benchmark a short nonzero TWAP window, such as 30-300 seconds, and
    independently validate the pool's liquidity and oracle safety.

@@ -26,7 +26,8 @@ Bot Vault
 ## Asset Boundaries
 
 - The vault stores and accounts for user token A and token B.
-- The proxy holds CL8Y for its fee tier and routes vault swaps.
+- The proxy is whitelisted on the CL8Y DEX (zero DEX fees) and routes vault
+  swaps; it does not need to hold CL8Y for a fee tier.
 - The liquidity contract manages deposits, withdrawals, and bot LP shares.
 - Every pair has a distinct vault and a distinct fungible bot LP token.
 - CL8Y pools provide swap execution and market pricing for each bot.
@@ -96,19 +97,10 @@ react faster but cost less to manipulate; longer windows are safer but can miss
 profitable movement. Economically significant pools still require liquidity
 checks and independent oracle validation.
 
-## CL8Y Discount
+## CL8Y DEX Fees
 
-The shared proxy holds CL8Y and is the effective trader seen by CL8Y pairs.
-Fee-registry governance registers the proxy by executing:
-
-```json
-{
-  "register_wallet": {
-    "wallet": "<SWAP_PROXY>",
-    "tier_id": 5
-  }
-}
-```
-
-Standard tiers continue checking the proxy's CL8Y balance during discount
-queries. Pair-side discount values may remain cached for up to 300 seconds.
+The proxy and vault contracts are whitelisted on the CL8Y DEX, so the DEX
+charges them no fees — the proxy does not need to hold CL8Y and no fee tier is
+registered. The separate protocol fee (fee-registry + fee-collector) resolves
+each LP holder's CL8Y tier at fill time instead; see
+`docs/FEE_TIER_PROTOCOL.md` §2.

@@ -35,8 +35,8 @@ confirmation behavior is covered by keeper/operator unit tests.
 
 Use `SOAK_ROUNDS=100 make local-soak` for an extended run.
 
-The E2E suite covers proxy and vault authorization, the governance-assigned
-CL8Y discount, absence of DEX LP custody, first and subsequent share mints,
+The E2E suite covers proxy and vault authorization, the whitelisted-proxy zero
+DEX fee, absence of DEX LP custody, first and subsequent share mints,
 donation-safe pricing, pro-rata withdrawals at the vault ratio, single-token
 deposit and withdrawal settlement, the 5% trigger, wrong-direction rollback,
 unchanged share supply during rebalances, and zero protocol-fee accounting.

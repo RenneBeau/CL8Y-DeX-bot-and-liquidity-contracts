@@ -145,7 +145,8 @@ If the active query fails, the vault queries `expired_limit_refund`:
 Because pair cancellations can only be initiated by this vault, its local cancel
 ledger is authoritative: an order that is absent from the pair, unclaimed, and
 never cancelled was necessarily fully executed. This lets the vault reconcile
-against the shipped pair without any owner-inventory or typed-status pair
+against the shipped CL8Y DEX pair without any owner-inventory or typed-status
+pair
 extension.
 
 An owner can submit `recover_order` with a known pair order ID and rung. The vault
@@ -300,12 +301,14 @@ Migration must:
    reviewed accounting and a verified custody snapshot.
 4. Deploy the new manager and vault code, create one vault per owner/bot, and
    deposit directly into those addresses.
-5. Register each vault independently for any CL8Y fee tier.
+5. Ensure the deployed contracts are whitelisted on the CL8Y DEX so they pay
+   zero DEX fees; no CL8Y fee-tier registration is required.
 6. Keep the old contract recoverable until every old pair-owned order is resolved.
 
 Upgrade order is mandatory:
 
-1. Deploy the swap-only `grid-vault-swap` design against the shipped pair; no
+1. Deploy the swap-only `grid-vault-swap` design against the shipped CL8Y DEX
+   pair; no
    pair upgrade is needed.
 2. Migrate any funded vault to the swap-only vault by deploying a fresh contract
    and depositing the withdrawn balances; there is no in-place custody migration.
@@ -337,7 +340,7 @@ so no rollback-ordering constraint applies beyond the ordinary pinned-code check
 ### Limit-Order Vault (deployable)
 
 `contracts/grid-vault` is the limit-order grid vault. It reconciles directly
-against the shipped CL8Y pair using exactly the shipped query interface
+against the shipped CL8Y DEX pair using exactly the shipped query interface
 (`LimitOrder`, `ExpiredLimitRefund`). Order cancellations are initiated only by
 the vault, which records them locally; an order that is absent from the pair, has
 no parked refund, and was never cancelled is classified as fully executed and its
@@ -350,7 +353,8 @@ locked state.
 `contracts/grid-vault-swap` is an alternative grid design. It holds its CW20
 balances directly in the vault address, reads the pool price, and executes
 classic pair `Swap` calls through the CW20 receive hook when the price crosses a
-grid level. It uses exactly the shipped pair API (`Pool`, `Observe`, `Swap`) and
+grid level. It uses exactly the shipped CL8Y DEX pair API (`Pool`, `Observe`,
+`Swap`) and
 requires no upstream merge and no fork.
 
 Production readiness still requires adversarial validation against the production

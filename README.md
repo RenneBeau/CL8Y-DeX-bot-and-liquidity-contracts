@@ -10,8 +10,9 @@ guide, and operating instructions.
 
 [`rebalancer-system`](rebalancer-system/README.md) is the portfolio rebalancing
 system. It provides isolated two-token vaults, transferable bot LP tokens, and a
-shared swap proxy through which approved vaults can use one governance-assigned
-CL8Y fee tier.
+shared swap proxy through which approved vaults route their swaps. The proxy and
+vault contracts are whitelisted on the CL8Y DEX, so the DEX charges them no
+fees.
 
 ### Grid
 
@@ -23,7 +24,8 @@ operator/docs harness (`rebalancer-system` is the third, non-grid, system):
   the pool price, and executes classic `Swap` calls as the price crosses a grid
   level. Uses the exact CL8Y pair API as shipped; no fork or upstream merge.
 - [`limit-grid-system`](limit-grid-system/README.md) — the limit-order grid
-  (`grid-vault` + `grid-manager`). The vault reconciles against the shipped pair
+  (`grid-vault` + `grid-manager`). The vault reconciles against the shipped CL8Y
+  DEX pair
   by tracking its own cancels and treating an order that vanished without a
   cancel as fully executed, so it needs no pair extension and no fork.
 - [`grid-operator-system`](grid-operator-system/README.md) — the shared

@@ -6,7 +6,7 @@ limit-order custody).
 
 ## Autonomy from the pair
 
-`grid-vault` reconciles against the shipped CL8Y pair using only the shipped
+`grid-vault` reconciles against the shipped CL8Y DEX pair using only the shipped
 query interface (`LimitOrder`, `ExpiredLimitRefund`). It requires no typed order
 status, no owner-inventory API, no pair fork, and no upstream PR.
 
