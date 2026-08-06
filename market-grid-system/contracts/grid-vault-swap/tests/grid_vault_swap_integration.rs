@@ -281,6 +281,49 @@ fn mock_fee_registry_code() -> Box<dyn Contract<Empty, Empty>> {
     Box::new(contract)
 }
 
+/// A tiered fee-registry whose `EffectiveFee` depends deterministically on the
+/// trader: a trader whose first address byte is even gets a LOW fee (200 bps,
+/// "high tier"), otherwise the full base fee (1 800 bps, "low tier"). This lets
+/// a test prove per-LP tiering (higher tier loses less LP) without a real CL8Y
+/// fixture -- the test derives each holder's tier from the same first-byte rule.
+fn mock_fee_registry_code_tiered() -> Box<dyn Contract<Empty, Empty>> {
+    let contract = ContractWrapper::new(
+        |_deps, _env, _info, _msg: Empty| -> StdResult<cosmwasm_std::Response> {
+            Ok(cosmwasm_std::Response::new())
+        },
+        |_deps, _env, _info, _msg: Empty| -> StdResult<cosmwasm_std::Response> {
+            Ok(cosmwasm_std::Response::new())
+        },
+        |_deps, _env, _msg: MockFeeRegistryQueryMsg| -> StdResult<Binary> {
+            let trader = match &_msg {
+                MockFeeRegistryQueryMsg::EffectiveFee { trader } => trader.clone(),
+            };
+            let even_byte = trader
+                .as_bytes()
+                .last()
+                .map(|b| *b % 2 == 0)
+                .unwrap_or(false);
+            let fee_bps = if even_byte { 200 } else { 1_800 };
+            let response = MockFeeRegistryEffectiveFeeResponse {
+                fee_bps,
+                discount_bps: 0,
+                tier_id: None,
+                holding: Some(Uint128::new(1)),
+                source: "live".to_string(),
+            };
+            to_json_binary(&response)
+        },
+    );
+    Box::new(contract)
+}
+
+/// Tier keys used to distinguish a high-tier (low-fee) holder from a low-tier one.
+#[derive(Clone, Copy)]
+enum TieredRegistry {
+    Flat,
+    Tiered,
+}
+
 // ---------------------------------------------------------------------------
 // Harness
 // ---------------------------------------------------------------------------
@@ -302,6 +345,10 @@ struct Harness {
 }
 
 fn setup_with_fee(enable_fees: bool) -> Harness {
+    setup_with_registry(enable_fees, TieredRegistry::Flat)
+}
+
+fn setup_with_registry(enable_fees: bool, registry_kind: TieredRegistry) -> Harness {
     let mut app = App::default();
     let admin = app.api().addr_make(ADMIN);
     let depositor = app.api().addr_make(DEPOSITOR);
@@ -311,7 +358,10 @@ fn setup_with_fee(enable_fees: bool) -> Harness {
     let vault_code = app.store_code(mock_vault_code());
 
     let registry = if enable_fees {
-        let registry_code = app.store_code(mock_fee_registry_code());
+        let registry_code = app.store_code(match registry_kind {
+            TieredRegistry::Flat => mock_fee_registry_code(),
+            TieredRegistry::Tiered => mock_fee_registry_code_tiered(),
+        });
         let registry = app
             .instantiate_contract(
                 registry_code,
@@ -461,9 +511,13 @@ fn setup() -> Harness {
 }
 
 fn deposit(h: &mut Harness, token: &Addr, amount: Uint128) {
+    deposit_as(h, &h.depositor.clone(), token, amount);
+}
+
+fn deposit_as(h: &mut Harness, user: &Addr, token: &Addr, amount: Uint128) {
     h.app
         .execute_contract(
-            h.depositor.clone(),
+            user.clone(),
             token.clone(),
             &cw20::Cw20ExecuteMsg::Send {
                 contract: h.vault.to_string(),
@@ -782,6 +836,7 @@ fn rebalance_mints_fee_lp_to_collector_and_can_redistribute_to_treasury() {
     deposit(&mut h, &token0, Uint128::new(60_000_000_000));
     deposit(&mut h, &token1, Uint128::new(60_000_000_000));
     set_twap(&mut h, "1.75");
+    let depositor_before = shares_of(&h, &h.depositor);
 
     let response = h
         .app
@@ -804,10 +859,33 @@ fn rebalance_mints_fee_lp_to_collector_and_can_redistribute_to_treasury() {
         fee_shares.parse::<u128>().unwrap() > 0,
         "fee must be > 0 per executed swap"
     );
-    assert!(response.events.iter().any(|e| e
-        .attributes
+
+    // Per-LP charging: the (single) holder is burned at their own tier, the
+    // collector credits the same value, and the pool's total is conserved
+    // (no dilution). For a zero-CL8Y holder the rate is the full base fee, so
+    // the reported rate is at (or within a rounding-bit of) the base 180 bps.
+    let fee_shares_u = Uint128::new(fee_shares.parse::<u128>().unwrap());
+    assert_eq!(
+        shares_of(&h, &h.depositor),
+        depositor_before - fee_shares_u,
+        "holder loses exactly the fee from their own LP"
+    );
+    assert_eq!(shares_of(&h, &collector), fee_shares_u, "collector owns the fee");
+
+    // Weighted-average rate for the event: a single full-base holder reports ~180.
+    let fee_bps_val: u128 = response
+        .events
         .iter()
-        .any(|a| a.key == "fee_bps" && a.value == "1800")));
+        .flat_map(|e| &e.attributes)
+        .find(|a| a.key == "fee_bps")
+        .expect("fee_bps event")
+        .value
+        .parse()
+        .unwrap();
+    assert!(
+        (1700..=1800).contains(&fee_bps_val),
+        "single holder at base fee reports ~1800 bps, got {fee_bps_val}"
+    );
 
     // The collector now holds the accrued fee as vault LP.
     let collector_shares = shares_of(&h, &collector);
@@ -852,6 +930,106 @@ fn rebalance_mints_fee_lp_to_collector_and_can_redistribute_to_treasury() {
     assert!(balance_of(&h.app, &token0, &treasury) > t0_before);
     assert!(balance_of(&h.app, &token1, &treasury) > t1_before);
     assert_eq!(shares_of(&h, &collector), Uint128::zero());
+}
+
+#[test]
+fn each_lp_is_taxed_at_their_own_tier() {
+    // Two holders with different fee tiers: the tiered mock returns 200 bps to a
+    // holder whose first address byte is even, 1 800 bps otherwise. The per-LP
+    // charge must burn each holder's own LP at THEIR rate, so the higher-tier
+    // (lower-fee) holder loses strictly less LP than the lower-tier one, and the
+    // total pool shares never change (no dilution).
+    let mut h = setup_with_registry(true, TieredRegistry::Tiered);
+    let (token0, token1) = (h.token0.clone(), h.token1.clone());
+
+    // Pick one holder from each fee tier by the registry's deterministic
+    // first-byte rule: even first byte -> 200 bps (high tier), odd -> 1800 bps.
+    let fee_bps = |addr: &Addr| {
+        if addr.as_bytes().last().map(|b| b % 2 == 0).unwrap_or(false) {
+            200u16
+        } else {
+            1_800u16
+        }
+    };
+    let mut light = None;
+    let mut heavy = None;
+    for name in [
+        "tiered_holder_0",
+        "tiered_holder_1",
+        "tiered_holder_2",
+        "tiered_holder_3",
+        "tiered_holder_4",
+        "tiered_holder_5",
+        "tiered_holder_6",
+        "tiered_holder_7",
+    ] {
+        let addr = h.app.api().addr_make(name);
+        if fee_bps(&addr) == 200 {
+            if light.is_none() {
+                light = Some(addr.clone());
+            }
+        } else if heavy.is_none() {
+            heavy = Some(addr.clone());
+        }
+    }
+    let light = light.expect("a 200bps holder among candidates");
+    let heavy = heavy.expect("an 1800bps holder among candidates");
+    assert_ne!(fee_bps(&light), fee_bps(&heavy), "distinct tiers required");
+
+    // Fund both holders and deposit equal value into the shared pool.
+    for user in [&light, &heavy] {
+        for token in [&token0, &token1] {
+            h.app
+                .execute_contract(
+                    h.admin.clone(),
+                    token.clone(),
+                    &cw20::Cw20ExecuteMsg::Mint {
+                        recipient: user.to_string(),
+                        amount: Uint128::new(60_000_000_000),
+                    },
+                    &[],
+                )
+                .unwrap();
+        }
+        deposit_as(&mut h, user, &token0, Uint128::new(60_000_000_000));
+        deposit_as(&mut h, user, &token1, Uint128::new(60_000_000_000));
+    }
+    let light_before = shares_of(&h, &light);
+    let heavy_before = shares_of(&h, &heavy);
+    set_twap(&mut h, "1.75");
+
+    h.app
+        .execute_contract(
+            h.depositor.clone(),
+            h.vault.clone(),
+            &VaultExecuteMsg::Rebalance { deadline: u64::MAX },
+            &[],
+        )
+        .unwrap();
+
+    let light_after = shares_of(&h, &light);
+    let heavy_after = shares_of(&h, &heavy);
+    let light_loss = light_before - light_after;
+    let heavy_loss = heavy_before - heavy_after;
+    assert!(light_loss > Uint128::zero(), "low-tier holder must be charged");
+    assert!(heavy_loss > Uint128::zero(), "high-tier holder must be charged");
+
+    // The higher-tier (lower-fee) holder loses strictly less LP.
+    assert!(light_loss < heavy_loss, "higher tier must lose less LP");
+
+    // Total shares are conserved: the collector now holds exactly the two losses.
+    let collector_shares = shares_of(&h, &h.collector);
+    assert_eq!(
+        collector_shares,
+        light_loss + heavy_loss,
+        "collected LP equals sum of per-holder losses"
+    );
+    let total = shares_of(&h, &light) + shares_of(&h, &heavy) + collector_shares;
+    assert_eq!(
+        total,
+        light_before + heavy_before,
+        "per-LP fee burns holders and credits the collector, total constant"
+    );
 }
 
 #[test]

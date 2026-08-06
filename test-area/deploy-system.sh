@@ -18,6 +18,32 @@ set -a
 source "$DEX_FRONTEND_ENV"
 set +a
 
+# ---------------------------------------------------------------------------
+# Protocol fee wiring. Local test-a-net runs default to the chain's own mock
+# registry / test key, since the mainnet CL8Y token and CMM treasury do not
+# exist on a local chain. Override these to point the vaults at a deployed
+# (mainnet) fee system; see docs/DEPLOY_FEE_SYSTEM.md for the addresses.
+# ---------------------------------------------------------------------------
+CL8Y_FEE_REGISTRY=${CL8Y_FEE_REGISTRY:-"$VITE_FEE_DISCOUNT_ADDRESS"}
+CL8Y_FEE_COLLECTOR=${CL8Y_FEE_COLLECTOR:-""}
+CL8Y_FEE_TREASURY=${CL8Y_FEE_TREASURY:-"$TEST_ADDRESS"}
+
+configure_vault_fee_config() {
+    # Wire fee_registry + fee_collector onto a vault. Only runs when an
+    # explicit collector is provided; otherwise the local dummy stays as-is.
+    local vault_address="$1"
+    if [ -z "$CL8Y_FEE_COLLECTOR" ]; then
+        echo "INFO: CL8Y_FEE_COLLECTOR unset - keeping dummy fee wiring for $vault_address"
+        return 0
+    fi
+    local message tx_hash
+    message=$(jq -nc --arg registry "$CL8Y_FEE_REGISTRY" --arg collector "$CL8Y_FEE_COLLECTOR" \
+        '{update_fee_config:{fee_registry:$registry,fee_collector:$collector}}')
+    tx_hash=$(terrad_tx wasm execute "$vault_address" "$message" | jq -r '.txhash')
+    wait_tx "$tx_hash" >/dev/null
+    echo "INFO: wired fee registry=$CL8Y_FEE_REGISTRY collector=$CL8Y_FEE_COLLECTOR onto $vault_address"
+}
+
 EMBER_ADDRESS="$VITE_TOKEN_EMBER_ADDRESS"
 CORAL_ADDRESS="$VITE_TOKEN_CORAL_ADDRESS"
 CL8Y_ADDRESS="$VITE_CL8Y_TOKEN_ADDRESS"
@@ -161,6 +187,7 @@ VAULT_INIT=$(jq -nc --arg admin "$TEST_ADDRESS" --arg keeper "$TEST_ADDRESS" \
       max_execution_deviation_bps:500,quote_slippage_bps:200,
       max_spot_twap_deviation_bps:500,max_trade_pool_bps:1000,max_spread:"0.05"}')
 VAULT_ADDRESS=$(instantiate_contract "$VAULT_CODE_ID" "$VAULT_INIT" ember-coral-bot-vault)
+configure_vault_fee_config "$VAULT_ADDRESS"
 
 LIQUIDITY_INIT=$(jq -nc --arg admin "$TEST_ADDRESS" --arg vault "$VAULT_ADDRESS" \
     '{admin:$admin,vault:$vault,name:"EMBER CORAL Bot Liquidity",

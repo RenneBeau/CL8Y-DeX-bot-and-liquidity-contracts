@@ -170,6 +170,39 @@ Audit conclusions (all gates green: `cargo test --workspace --all-targets` +
 5. Redeem is strictly collector-only, refuses zero/insufficient shares, and burns
    the claim after paying a pro-rata slice of the vault balances.
 
+## Per-LP Fee-Tier Rework (2026-08-06)
+
+Following the audit, the fee charge was reworked from "vault contract address"
+to **per-LP**: every holder is taxed at their **own** CL8Y tier, so higher-tier
+holders lose strictly less LP.
+
+- `market-grid` `grid-vault-swap` `charge_fee` now iterates all holders
+  (`SHARES.range`), computes each holder's slice of the fill value
+  (`value × shares / total`), resolves that holder's `EffectiveFee`, burns the
+  resulting LP from that holder's own shares, and credits the sum to the
+  collector — total shares constant (no dilution). The event carries
+  `fee_holders`, a weighted-average `fee_bps`, and single-holder `fee_source`/
+  `tier`. The previous behaviour resolved the fee against the vault contract
+  address, which holds no CL8Y and therefore charged everyone the full base fee.
+- New test `each_lp_is_taxed_at_their_own_tier` (`grid_vault_swap_integration.rs`):
+  two holders at different mock tiers (200 vs 1800 bps) are both charged; the
+  higher-tier holder loses strictly less LP; collector = sum of losses; total
+  shares conserved. (Also fixed the tiered mock's discriminator — the address's
+  first byte is always `c`, so last-byte parity is used.)
+- `rebalancer` `bot-vault` `charge_fee` now resolves the fee against the vault's
+  sole LP holder (`config.admin`) instead of the vault contract address; the
+  `charge_fee_applies_math_and_accrues_to_collector` unit test asserts the query
+  is made against `admin`.
+- Gates: `cargo test --workspace --all-targets` + `cargo clippy --workspace
+  --all-targets -- -D warnings` clean on `market-grid-system` (21 tests) and
+  `rebalancer-system` (35 tests).
+- Deployment: `docs/DEPLOY_FEE_SYSTEM.md` records the production mainnet CL8Y
+  and CMM-treasury addresses (both validated 32-byte bech32) with exact
+  fee-registry / fee-collector instantiation JSON; `test-area/deploy-system.sh`
+  gains `CL8Y_FEE_REGISTRY` / `CL8Y_FEE_TREASURY` / `CL8Y_FEE_COLLECTOR` env
+  overrides (dummy fallback on a local chain) and wires `update_fee_config`
+  onto the bot-vault.
+
 ## Existing CI Evidence
 
 The baseline commit had retained source-quality, dependency-security, and

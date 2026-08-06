@@ -421,6 +421,7 @@ pub fn reply(deps: DepsMut, env: Env, reply: Reply) -> Result<Response, Contract
         ChargeFee::Applied(fee) => {
             response = response
                 .add_attribute("fee_bps", fee.fee_bps.to_string())
+                .add_attribute("fee_holders", fee.holders.to_string())
                 .add_attribute("fee_tier", fee.tier.map(|t| t.to_string()).unwrap_or_default())
                 .add_attribute("fee_source", fee.source)
                 .add_attribute("fee_shares", fee.shares.to_string());
@@ -581,8 +582,11 @@ struct FeeRegistryEffectiveFeeResponse {
 }
 
 struct FeeApplied {
+    /// Weighted-average effective fee across all charged LP holders, in bps.
     fee_bps: u16,
     shares: Uint128,
+    /// The number of LP holders whose share was charged at their own tier.
+    holders: usize,
     tier: Option<u8>,
     source: String,
 }
@@ -595,16 +599,19 @@ enum ChargeFee {
     Unavailable(String),
 }
 
-/// Protocol fee per executed rebalance swap (token-0 value based): resolve the
-/// vault's effective fee bps from its CL18Y holding, mint that fraction of the
-/// executed proceeds as LP to the configured fee-collector (diluting existing
-/// holders), and mint the same fraction of whatever the swap actually executed.
-/// No fee is charged when the vault has no fee configured or the rate is zero.
-/// A transient fee-registry failure is non-blocking.
+/// Protocol fee per executed rebalance swap (token-0 value based), resolved
+/// **per LP holder**: each holder is taxed at their OWN CL8Y tier
+/// (`FEE_TIER_PROTOCOL.md` §5, poly). The executed proceeds are attributed to a
+/// holder in proportion to their share of the pool; their fee is burned from
+/// their own LP and the same value is credited to the fee-collector, so total
+/// shares never change and a higher-tier (lower-fee) holder loses less LP than
+/// a lower-tier holder. No fee is charged when the vault has no fee configured,
+/// the rate is zero, or there are no holders. A transient fee-registry failure
+/// is non-blocking (the whole charge is skipped, never a revert).
 fn charge_fee(
     deps: &mut DepsMut,
     config: &Config,
-    env: &Env,
+    _env: &Env,
     value_in_token0: Uint128,
 ) -> Result<ChargeFee, ContractError> {
     let (Some(registry), Some(collector)) = (&config.fee_registry, &config.fee_collector) else {
@@ -613,22 +620,68 @@ fn charge_fee(
     if value_in_token0.is_zero() {
         return Ok(ChargeFee::None);
     }
-    let fee: FeeRegistryEffectiveFeeResponse = match deps.querier.query_wasm_smart(
-        registry,
-        &FeeRegistryQueryMsg::EffectiveFee {
-            trader: env.contract.address.to_string(),
-        },
-    ) {
-        Ok(fee) => fee,
-        Err(err) => return Ok(ChargeFee::Unavailable(err.to_string())),
-    };
-    // Defensive bound: cap the effective fee at 100% (10_000 bps).
-    let fee_bps = fee.fee_bps.min(10_000);
-    if fee_bps == 0 {
+    let total_shares = TOTAL_SHARES.load(deps.storage)?;
+    if total_shares.is_zero() {
         return Ok(ChargeFee::None);
     }
-    let shares = value_in_token0.multiply_ratio(fee_bps, 10_000u16);
-    if shares.is_zero() {
+
+    let holders: Vec<(String, Uint128)> = SHARES
+        .range(deps.storage, None, None, cosmwasm_std::Order::Ascending)
+        .map(|item| {
+            let (key, shares) = item?;
+            Ok((key, shares))
+        })
+        .collect::<StdResult<_>>()?;
+
+    // Fee attributable to each holder, in share units (shares are token-0 value
+    // normalized, so `value × shares / total` is that holder's slice of the fill).
+    let mut total_fee_value = Uint128::zero();
+    let mut charged_count = 0usize;
+    let mut single_tier: Option<u8> = None;
+    let mut single_source: Option<String> = None;
+    for (address, shares) in holders {
+        if shares.is_zero() || address == collector.as_str() {
+            // The collector's own accrued LP is never charged against itself.
+            continue;
+        }
+        let holder_value = value_in_token0.multiply_ratio(shares, total_shares);
+        if holder_value.is_zero() {
+            continue;
+        }
+        let fee: FeeRegistryEffectiveFeeResponse = match deps.querier.query_wasm_smart(
+            registry,
+            &FeeRegistryQueryMsg::EffectiveFee {
+                trader: address.clone(),
+            },
+        ) {
+            Ok(fee) => fee,
+            Err(err) => return Ok(ChargeFee::Unavailable(err.to_string())),
+        };
+        // Defensive bound: cap the effective fee at 100% (10_000 bps).
+        let fee_bps = fee.fee_bps.min(10_000);
+        if fee_bps == 0 {
+            continue;
+        }
+        let fee_for_holder = holder_value.multiply_ratio(fee_bps, 10_000u16);
+        if fee_for_holder.is_zero() {
+            continue;
+        }
+        // Burn the holder's own LP at their tier and credit the collector the
+        // same value (total shares stay constant).
+        SHARES.save(
+            deps.storage,
+            &address,
+            &shares.checked_sub(fee_for_holder).map_err(StdError::overflow)?,
+        )?;
+        total_fee_value = total_fee_value
+            .checked_add(fee_for_holder)
+            .map_err(StdError::overflow)?;
+        charged_count += 1;
+        single_tier = fee.tier_id;
+        single_source = Some(fee.source);
+    }
+
+    if total_fee_value.is_zero() {
         return Ok(ChargeFee::None);
     }
     let previous = SHARES
@@ -638,17 +691,27 @@ fn charge_fee(
         deps.storage,
         collector.as_str(),
         &previous
-            .checked_add(shares)
+            .checked_add(total_fee_value)
             .map_err(StdError::overflow)?,
     )?;
-    TOTAL_SHARES.update(deps.storage, |total| -> StdResult<Uint128> {
-        total.checked_add(shares).map_err(StdError::overflow)
-    })?;
+    // Weighted-average rate across the holders that were charged, for events.
+    let weighted_bps = match total_fee_value.checked_mul(Uint128::new(10_000)) {
+        Ok(product) => match product.checked_div(value_in_token0) {
+            Ok(v) => v.u128().min(u128::from(u16::MAX)) as u16,
+            Err(_) => 0,
+        },
+        Err(_) => 0,
+    };
     Ok(ChargeFee::Applied(FeeApplied {
-        fee_bps,
-        shares,
-        tier: fee.tier_id,
-        source: fee.source,
+        fee_bps: weighted_bps,
+        shares: total_fee_value,
+        holders: charged_count,
+        tier: if charged_count == 1 { single_tier } else { None },
+        source: if charged_count == 1 {
+            single_source.unwrap_or_default()
+        } else {
+            "pooled_tiers".to_string()
+        },
     }))
 }
 

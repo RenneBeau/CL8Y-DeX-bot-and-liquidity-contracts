@@ -500,7 +500,7 @@ pub fn reply(deps: DepsMut, env: Env, reply: Reply) -> Result<Response, Contract
         .add_attribute("action", "complete_rebalance")
         .add_attribute("allocation_deviation_bps", current.to_string())
         .add_attribute("reference_updated", within_tolerance.to_string());
-    match charge_fee(&mut deps, &config, &env, value_in_token0)? {
+    match charge_fee(&mut deps, &config, value_in_token0)? {
         ChargeFee::None => {}
         ChargeFee::Applied(fee) => {
             response = response
@@ -1162,15 +1162,16 @@ enum ChargeFee {
     Unavailable(String),
 }
 
-/// Protocol fee per executed rebalance swap (token-0 value based): resolve the
-/// vault's effective fee bps from its CL18Y holding, and accrue that fraction of
-/// the executed swap's token-0 value to the configured fee-collector as a value
+/// Protocol fee per executed rebalance swap (token-0 value based): the fee is
+/// resolved against the vault's sole LP holder (`config.admin`) so the charge
+/// reflects the holder's own CL18Y tier — never the vault contract address,
+/// which holds no CL8Y and would otherwise always resolve to the full base fee.
+/// The resulting value accrues to the configured fee-collector as a value
 /// claim. No fee is charged when the vault has no fee configured or the rate is
 /// zero. A transient fee-registry failure is non-blocking.
 fn charge_fee(
     deps: &mut DepsMut,
     config: &Config,
-    env: &Env,
     value_in_token0: Uint128,
 ) -> Result<ChargeFee, ContractError> {
     let (Some(registry), Some(collector)) = (&config.fee_registry, &config.fee_collector) else {
@@ -1182,7 +1183,7 @@ fn charge_fee(
     let fee: FeeRegistryEffectiveFeeResponse = match deps.querier.query_wasm_smart(
         registry,
         &FeeRegistryQueryMsg::EffectiveFee {
-            trader: env.contract.address.to_string(),
+            trader: config.admin.to_string(),
         },
     ) {
         Ok(fee) => fee,
@@ -1995,7 +1996,7 @@ mod tests {
             fee_collector: None,
         };
         assert!(matches!(
-            charge_fee(&mut deps.as_mut(), &config, &mock_env(), Uint128::new(1_000)).unwrap(),
+            charge_fee(&mut deps.as_mut(), &config, Uint128::new(1_000)).unwrap(),
             ChargeFee::None
         ));
     }
@@ -2009,16 +2010,23 @@ mod tests {
             WasmQuery::Smart { msg, .. } => {
                 let query: FeeRegistryQueryMsg = from_json(msg).unwrap();
                 match query {
-                    FeeRegistryQueryMsg::EffectiveFee { .. } => SystemResult::Ok(
-                        ContractResult::Ok(to_json_binary(&FeeRegistryEffectiveFeeResponse {
-                            fee_bps: 1_000,
-                            discount_bps: 0,
-                            tier_id: None,
-                            holding: None,
-                            source: "live".to_string(),
-                        })
-                        .unwrap()),
-                    ),
+                    FeeRegistryQueryMsg::EffectiveFee { trader } => {
+                        // The fee must be resolved against the vault's sole LP
+                        // holder (admin), never the vault contract address.
+                        assert_eq!(trader, "admin", "fee resolved against the LP holder");
+                        SystemResult::Ok(
+                            ContractResult::Ok(
+                                to_json_binary(&FeeRegistryEffectiveFeeResponse {
+                                    fee_bps: 1_000,
+                                    discount_bps: 0,
+                                    tier_id: None,
+                                    holding: None,
+                                    source: "live".to_string(),
+                                })
+                                .unwrap(),
+                            ),
+                        )
+                    }
                 }
             }
             _ => panic!("unexpected query"),
@@ -2045,7 +2053,7 @@ mod tests {
             fee_collector: Some(Addr::unchecked("collector")),
         };
         // 1_000 bps of 1_000 value = 100 shares.
-        let charge = charge_fee(&mut deps.as_mut(), &config, &mock_env(), Uint128::new(1_000))
+        let charge = charge_fee(&mut deps.as_mut(), &config, Uint128::new(1_000))
             .unwrap();
         match charge {
             ChargeFee::Applied(fee) => {
@@ -2093,7 +2101,7 @@ mod tests {
             fee_collector: Some(Addr::unchecked("collector")),
         };
         assert!(matches!(
-            charge_fee(&mut deps.as_mut(), &config, &mock_env(), Uint128::new(1_000)).unwrap(),
+            charge_fee(&mut deps.as_mut(), &config, Uint128::new(1_000)).unwrap(),
             ChargeFee::Unavailable(_)
         ));
 
@@ -2113,7 +2121,7 @@ mod tests {
             _ => panic!("unexpected query"),
         });
         assert!(matches!(
-            charge_fee(&mut deps.as_mut(), &config, &mock_env(), Uint128::new(5_000)).unwrap(),
+            charge_fee(&mut deps.as_mut(), &config, Uint128::new(5_000)).unwrap(),
             ChargeFee::None
         ));
     }
