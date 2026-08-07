@@ -1796,12 +1796,13 @@ enum ChargeFee {
 }
 
 /// Protocol fee per fill (v1, value-based): on a reconcile that credited fill
-/// proceeds, the fee-registry resolves the bot owner's effective fee bps from
-/// their CL18Y holding, and the vault mints that fraction of the credited value
-/// as LP to the configured fee-collector, diluting existing holders. No fee is
-/// charged when the vault has no configured or the resolved fee is zero.
-/// A transient fee-registry failure is non-blocking: the reconcile proceeds and
-/// the fee is skipped rather than reverting the trader's fill.
+/// proceeds, the fee-registry resolves the **single user's** effective fee bps
+/// (`FEE_TIER_PROTOCOL.md` §5, model A): the user (bot owner) keeps `value − fee`
+/// as a fresh share mint and `fee` is minted to the configured fee-collector, so
+/// total shares grow by the credited value (correct dilution, no burn). No fee is
+/// charged when the vault has no fee configured or the resolved fee is zero. A
+/// transient fee-registry failure is non-blocking: the reconcile proceeds and the
+/// fee is skipped rather than reverting the trader's fill.
 fn charge_fee(
     deps: &mut DepsMut,
     config: &Config,
@@ -1830,9 +1831,6 @@ fn charge_fee(
     if fee_bps == 0 {
         return Ok(ChargeFee::None);
     }
-    if fee_bps == 0 {
-        return Ok(ChargeFee::None);
-    }
     // Value the credited proceeds in token-0 terms using the bot's reference
     // price (shares are token-0 normalized, same as `deposit_shares`).
     let mut value_in_token0 = credited[0];
@@ -1847,22 +1845,44 @@ fn charge_fee(
         )?;
         value_in_token0 = value_in_token0.checked_add(token1_as_token0)?;
     }
-    let shares = value_in_token0.multiply_ratio(fee_bps, 10_000u16);
-    if shares.is_zero() {
+    let fee_lp = value_in_token0.multiply_ratio(fee_bps, 10_000u16);
+    if fee_lp.is_zero() {
         return Ok(ChargeFee::None);
     }
-    let previous = SHARES
-        .may_load(deps.storage, (bot_id, collector))?
-        .unwrap_or_default();
-    SHARES.save(
+    let user_value = value_in_token0
+        .checked_sub(fee_lp)
+        .map_err(StdError::overflow)?;
+
+    // Model A (single user, correct dilution): the user keeps `value − fee` as a
+    // fresh LP mint and the fee LP goes to the collector. Total shares grow by the
+    // full fill value.
+    if !user_value.is_zero() {
+        SHARES.update(
+            deps.storage,
+            (bot_id, &bot.owner),
+            |current: Option<Uint128>| -> StdResult<Uint128> {
+                current
+                    .unwrap_or_default()
+                    .checked_add(user_value)
+                    .map_err(StdError::overflow)
+            },
+        )?;
+        bot.total_shares = bot.total_shares.checked_add(user_value)?;
+    }
+    SHARES.update(
         deps.storage,
         (bot_id, collector),
-        &previous.checked_add(shares)?,
+        |current: Option<Uint128>| -> StdResult<Uint128> {
+            current
+                .unwrap_or_default()
+                .checked_add(fee_lp)
+                .map_err(StdError::overflow)
+        },
     )?;
-    bot.total_shares = bot.total_shares.checked_add(shares)?;
+    bot.total_shares = bot.total_shares.checked_add(fee_lp)?;
     Ok(ChargeFee::Applied(FeeApplied {
         fee_bps,
-        shares,
+        shares: fee_lp,
         tier: fee.tier_id,
         source: format!("{:?}", fee.source),
     }))

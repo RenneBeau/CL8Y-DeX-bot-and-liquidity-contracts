@@ -837,6 +837,7 @@ fn rebalance_mints_fee_lp_to_collector_and_can_redistribute_to_treasury() {
     deposit(&mut h, &token1, Uint128::new(60_000_000_000));
     set_twap(&mut h, "1.75");
     let depositor_before = shares_of(&h, &h.depositor);
+    let admin_before = shares_of(&h, &h.admin);
 
     let response = h
         .app
@@ -860,23 +861,27 @@ fn rebalance_mints_fee_lp_to_collector_and_can_redistribute_to_treasury() {
         "fee must be > 0 per executed swap"
     );
 
-    // Per-LP charging: the (single) holder is burned at their own tier, the
-    // collector credits the same value, and the pool's total is conserved
-    // (no dilution). For a zero-CL8Y holder the rate is the full base fee, so
-    // the reported rate is at (or within a rounding-bit of) the base 180 bps.
+    // Single-user mint (correct dilution): the operating user (vault `admin`) is
+    // billed at their OWN tier and keeps `value − fee` as a fresh share mint, the
+    // collector receives exactly the fee. No other holder is minted or burned.
     let fee_shares_u = Uint128::new(fee_shares.parse::<u128>().unwrap());
     assert_eq!(
         shares_of(&h, &h.depositor),
-        depositor_before - fee_shares_u,
-        "holder loses exactly the fee from their own LP"
+        depositor_before,
+        "other holders are untouched in the single-user model"
     );
     assert_eq!(
-        shares_of(&h, &collector),
+        shares_of(&h, &h.collector),
         fee_shares_u,
-        "collector owns the fee"
+        "collector owns exactly the fee LP"
+    );
+    let admin_gain = shares_of(&h, &h.admin) - admin_before;
+    assert!(
+        admin_gain > Uint128::zero(),
+        "the user keeps `value − fee` as LP growth"
     );
 
-    // Weighted-average rate for the event: a single full-base holder reports ~180.
+    // The reported rate is the single user's exact tier (flat base 1 800 bps).
     let fee_bps_val: u128 = response
         .events
         .iter()
@@ -886,9 +891,9 @@ fn rebalance_mints_fee_lp_to_collector_and_can_redistribute_to_treasury() {
         .value
         .parse()
         .unwrap();
-    assert!(
-        (1700..=1800).contains(&fee_bps_val),
-        "single holder at base fee reports ~1800 bps, got {fee_bps_val}"
+    assert_eq!(
+        fee_bps_val, 1_800,
+        "single user reports their exact tier, got {fee_bps_val}"
     );
 
     // The collector now holds the accrued fee as vault LP.
@@ -937,69 +942,32 @@ fn rebalance_mints_fee_lp_to_collector_and_can_redistribute_to_treasury() {
 }
 
 #[test]
-fn each_lp_is_taxed_at_their_own_tier() {
-    // Two holders with different fee tiers: the tiered mock returns 200 bps to a
-    // holder whose first address byte is even, 1 800 bps otherwise. The per-LP
-    // charge must burn each holder's own LP at THEIR rate, so the higher-tier
-    // (lower-fee) holder loses strictly less LP than the lower-tier one, and the
-    // total pool shares never change (no dilution).
+fn single_user_is_billed_at_the_admin_tier() {
+    // Single-user model (`FEE_TIER_PROTOCOL.md` §5): only the operating user (the
+    // vault `admin`) is ever billed, at THEIR OWN tier. The tiered mock returns
+    // 200 bps to an even-last-byte trader and 1 800 bps otherwise; the measured
+    // rate must match the ADMIN's parity (never an unrelated depositor), and the
+    // total pool grows by the fill value (correct dilution).
     let mut h = setup_with_registry(true, TieredRegistry::Tiered);
     let (token0, token1) = (h.token0.clone(), h.token1.clone());
-
-    // Pick one holder from each fee tier by the registry's deterministic
-    // first-byte rule: even first byte -> 200 bps (high tier), odd -> 1800 bps.
-    let fee_bps = |addr: &Addr| {
-        if addr.as_bytes().last().map(|b| b % 2 == 0).unwrap_or(false) {
-            200u16
-        } else {
-            1_800u16
-        }
+    let admin_fee = if h
+        .admin
+        .as_bytes()
+        .last()
+        .map(|b| *b % 2 == 0)
+        .unwrap_or(false)
+    {
+        200u16
+    } else {
+        1_800u16
     };
-    let mut light = None;
-    let mut heavy = None;
-    for name in [
-        "tiered_holder_0",
-        "tiered_holder_1",
-        "tiered_holder_2",
-        "tiered_holder_3",
-        "tiered_holder_4",
-        "tiered_holder_5",
-        "tiered_holder_6",
-        "tiered_holder_7",
-    ] {
-        let addr = h.app.api().addr_make(name);
-        if fee_bps(&addr) == 200 {
-            if light.is_none() {
-                light = Some(addr.clone());
-            }
-        } else if heavy.is_none() {
-            heavy = Some(addr.clone());
-        }
-    }
-    let light = light.expect("a 200bps holder among candidates");
-    let heavy = heavy.expect("an 1800bps holder among candidates");
-    assert_ne!(fee_bps(&light), fee_bps(&heavy), "distinct tiers required");
 
-    // Fund both holders and deposit equal value into the shared pool.
-    for user in [&light, &heavy] {
-        for token in [&token0, &token1] {
-            h.app
-                .execute_contract(
-                    h.admin.clone(),
-                    token.clone(),
-                    &cw20::Cw20ExecuteMsg::Mint {
-                        recipient: user.to_string(),
-                        amount: Uint128::new(60_000_000_000),
-                    },
-                    &[],
-                )
-                .unwrap();
-        }
-        deposit_as(&mut h, user, &token0, Uint128::new(60_000_000_000));
-        deposit_as(&mut h, user, &token1, Uint128::new(60_000_000_000));
-    }
-    let light_before = shares_of(&h, &light);
-    let heavy_before = shares_of(&h, &heavy);
+    // A depositor (different identity, possibly different tier) funds the pool
+    // but is NOT the fee subject in single-user mode.
+    deposit(&mut h, &token0, Uint128::new(60_000_000_000));
+    deposit(&mut h, &token1, Uint128::new(60_000_000_000));
+    let depositor_before = shares_of(&h, &h.depositor);
+    let admin_before = shares_of(&h, &h.admin);
     set_twap(&mut h, "1.75");
 
     h.app
@@ -1011,34 +979,38 @@ fn each_lp_is_taxed_at_their_own_tier() {
         )
         .unwrap();
 
-    let light_after = shares_of(&h, &light);
-    let heavy_after = shares_of(&h, &heavy);
-    let light_loss = light_before - light_after;
-    let heavy_loss = heavy_before - heavy_after;
-    assert!(
-        light_loss > Uint128::zero(),
-        "low-tier holder must be charged"
+    let depositor_after = shares_of(&h, &h.depositor);
+    let admin_gain = shares_of(&h, &h.admin) - admin_before;
+    let collector_fee = shares_of(&h, &h.collector);
+
+    assert_eq!(
+        depositor_after, depositor_before,
+        "the depositor is not the fee subject in single-user mode"
     );
     assert!(
-        heavy_loss > Uint128::zero(),
-        "high-tier holder must be charged"
+        admin_gain > Uint128::zero(),
+        "the operating admin keeps `value − fee` as growth"
+    );
+    assert!(
+        collector_fee > Uint128::zero(),
+        "the collector receives the fee LP"
     );
 
-    // The higher-tier (lower-fee) holder loses strictly less LP.
-    assert!(light_loss < heavy_loss, "higher tier must lose less LP");
-
-    // Total shares are conserved: the collector now holds exactly the two losses.
-    let collector_shares = shares_of(&h, &h.collector);
-    assert_eq!(
-        collector_shares,
-        light_loss + heavy_loss,
-        "collected LP equals sum of per-holder losses"
+    // Correct dilution: the pool grows by the full fill value.
+    let total_before = depositor_before + admin_before;
+    let total_after = depositor_after + shares_of(&h, &h.admin) + collector_fee;
+    assert!(
+        total_after > total_before,
+        "pool must grow by the fill value (correct dilution)"
     );
-    let total = shares_of(&h, &light) + shares_of(&h, &heavy) + collector_shares;
+
+    // The applied tier is exactly the admin's: value = fee + admin_gain, and the
+    // vault minted fee = floor(value × admin_fee / 10_000).
+    let value = admin_gain + collector_fee;
     assert_eq!(
-        total,
-        light_before + heavy_before,
-        "per-LP fee burns holders and credits the collector, total constant"
+        collector_fee.u128(),
+        value.u128() * u128::from(admin_fee) / 10_000,
+        "applied fee equals the admin's tier, not the depositor's"
     );
 }
 

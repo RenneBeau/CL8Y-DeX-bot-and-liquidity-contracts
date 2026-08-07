@@ -113,58 +113,49 @@ A small shared, per-network deployable core referenced by every vault:
 - **Vaults** — on each fill, determine the fee, mint LP to the fee-collector
   (see §5), and book the change.
 
-## 5. Charging the fee (per fill, per-holder tier)
+## 5. Charging the fee (per fill, single user, mint)
 
-The grid is one-owner (`one bot`, `SHARES (bot_id, addr) → shares`), the
-market-grid and rebalancer are pools. In every case the tier is resolved
-**per holding address**, but the accounting denomination differs per venue:
+The three venues share **one** mechanic (model A, single user per bot/vault). On a
+fill that credits `V` of token-0-normalized value, the vault:
 
-- **Limit-grid (mono, mint-on-fill):** all fills are attributed to the single
-  owner. The fee is computed at the owner's tier and the fee-collector is
-  credited LP in `bot_id 1`, **diluting the owner**.
-- **Market-grid (pool, LP burn):** each LP's *share* of the fill output has the
-  fee applied at that LP's tier; the holder's own LP is **burned** for the fee
-  and the same amount is credited to the fee-collector. Total shares are
-  conserved — the fee is a transfer of LP from the holder to the collector, no
-  dilution.
-- **Rebalancer (pool, value claim):** each LP's *share* of the fill output has
-  the fee applied at that LP's tier, and the sum is booked as a
-  token-0-normalized **value claim** (`FEE_SHARES` / `TOTAL_FEE_SHARES`), not as
-  LP. The collector redeems its claim as a fraction of the vault's current token
-  balances (§9).
+1. resolves the **single operating user's** effective fee via the fee-registry;
+2. `fee = V × effective_fee_bps / 10 000`;
+3. **mints** `V − fee` of LP to the user and `fee` of LP to the fee-collector.
 
-### Design rationale: mono grids vs pooled rebalancer
+LP therefore **grows by `V`** with each fill — the user keeps their value net of
+the fee and the collector receives the fee, both as fresh LP (correct dilution,
+no burn). No other holder is minted or burned.
 
-The two execution venues have deliberately different objectives, which drive the
-fee-and-gas trade-off:
+- **Limit-grid:** the single user is the bot owner (`bot.owner`); LP is the grid's
+  internal `SHARES (bot_id, addr)` ledger.
+- **Market-grid:** the single user is the vault operator (`config.admin`); LP is
+  the vault's internal `SHARES` ledger (token-0 normalized).
+- **Rebalancer:** the single user is the vault operator (`config.admin`); LP is the
+  pooled external `bot-liquidity` CW20 token, minted through bot-liquidity
+  `MintTo` (vault-gated).
 
-- **Grids (limit-grid, market-grid) are mono and per-user.** Each grid belongs to
-  a single owner and is designed to be **fine-tuned by its user** (price range,
-  budget, cadence). Every execution serves exactly one trader, so that user
-  absorbs the full per-execution gas of their own grid — grids are inherently
-  **gas-heavier per user**.
-- **The rebalancer is a pooled, gas-minimal venue.** Its purpose is to amortise
-  infrastructure cost: several traders' orders are grouped inside one vault (the
-  pooled `bot-liquidity` LP token), and a single rebalance execution serves many
-  traders at once. Grouping is exactly what minimises gas *per trader* compared
-  to running N individual grids.
+### Design rationale: single user everywhere
 
-Consequences for the protocol fee (§5 poly): resolving each LP's own tier costs N
-`EffectiveFee` resolutions per fill on the rebalancer. The enumeration is
-deliberately **uncapped** — every LP in the pool is always taxed at their exact
-tier. The venue's gas-minimisation comes from *grouping* (one rebalance
-execution serves many traders), not from limiting the fee enumeration.
-
-Mechanics (v1, limit-grid mono): on a fill landing `out` tokens in the vault,
-`fee = out × effective_fee_bps / 10000`. The vault issues ∆shares to the
-fee-collector such that it owns `fee` of the pool's post-fill depth in the traded
-token, diluting the owner. The pool venues instead use per-holder LP burn
-(market-grid) or a value claim (rebalancer) as listed above. The fee case is
-per-token (`actual[token]`, free + escrow) — see the valuation caveat in §9.
-
-The fee is never a negative incentive: `fee` reduces the realized proceeds an LP
-would otherwise receive, and the collector's claim is capped at what it was
+Every CL8Y venue is modelled as **one operator per bot/vault** (limit-grid: bot
+`owner`; market-grid and rebalancer: `admin`). The protocol tax is therefore a
+single tier resolution per fill — cheap, uniform, and identical across all three
+systems. Fees are never a negative incentive: the effective fee is capped at
+`10 000` bps (100%) so `fee ≤ V`, and the collector only ever receives the LP it was
 credited.
+
+Mechanics (v1): on a fill landing value `V` in the vault, `fee = V ×
+effective_fee_bps / 10 000`. The vault mints `V − fee` to the user and `fee` to the
+fee-collector, growing supply by `V` (correct dilution). A transient fee-registry
+failure is non-blocking: the fill completes and the fee is skipped, never a revert.
+
+### Rebalancer optionality (pooled → single-user)
+
+An earlier design treated the rebalancer as a **pooled, gas-minimal** venue that
+taxed every LP holder of the shared `bot-liquidity` token at their own tier
+(uncapped enumeration). This is **superseded**: the rebalancer now uses the same
+single-user model as the grids (`config.admin`), so there is no enumeration and no
+pooled-tier breakout. A rebalance execution serves one operator; the venue's
+gas-profile is uniform with the grids.
 
 ## 6. Tier resolution — live-first, saved holding as fallback
 
@@ -202,12 +193,18 @@ holding also removes any dependence on periodic registration state.
 
 ## 7. Fee-collector (keeper-only realization)
 
-`fee-collector` is venue-agnostic: for a target vault/bot it reads the
-collector's entitlement via `VaultQueryMsg::Shares`, records it, and sends
-`VaultExecuteMsg::RedeemShares` to the vault (keeper-only trigger). What that
-redeem yields depends on the venue — on grids it burns the collector's LP in the
-vault and receives the underlying assets; on the rebalancer it redeems the
-collector's value claim (`FEE_SHARES`) against the current vault balances.
+`fee-collector` is venue-agnostic but liquidity-aware: for a target vault/bot it
+reads the collector's entitlement via `VaultQueryMsg::Shares`, books it, and
+realizes it (keeper-only trigger). What realization yields depends on the vault's
+`Config.liquidity_contract`:
+
+- **Grids (limit-grid, market-grid)** — no `liquidity_contract`: sends
+  `VaultExecuteMsg::RedeemShares` to the vault, which burns the collector's LP in
+  its internal `SHARES` ledger and pays the underlying assets.
+- **Rebalancer** — `liquidity_contract` set: the collector owns the fee as
+  external `bot-liquidity` LP (minted via `MintTo`), so the collector calls
+  `bot-liquidity` `Withdraw` (pro-rata) to route the underlying assets through.
+
 `collect` (keeper only) then routes the proceeds to the CMM treasury.
 
 - **Trigger:** keeper-only (per decision).
@@ -237,28 +234,28 @@ collector's value claim (`FEE_SHARES`) against the current vault balances.
 - `QueryMsg`: `Shares { vault, bot_id }`, `Config`.
 
 Vaults (grid / market-grid / rebalancer)
-- Add to `InstantiateMsg`/config: `fee_registry`, `base_fee_bps`, `fee_collector`.
-- On fill, per §5: mono limit-grid mints LP to the collector; market-grid burns
-  each holder's LP and credits the collector; rebalancer books a value claim.
-  Event attrs: `fee_tier`, `fee_bps`, `fee_amount` (+ `fee_holders` on pool
-  venues).
+- Add to `InstantiateMsg`/config: `fee_registry`, `fee_collector`.
+- On fill, per §5: resolve the **single user's** tier; mint `V − fee` LP to the
+  user and `fee` LP to the fee-collector. Grids mint their internal `SHARES`
+  ledger; the rebalancer mints through the pooled `bot-liquidity` `MintTo`.
+- Event attrs: `fee_tier`, `fee_bps`, `fee_shares`.
 
 ## 9. Security invariants
 
-1. Fees never inflate the supply: on grids the collector's LP is exactly `fee`
-   of the pool's post-fill depth (limit-grid mints it, market-grid transfers it
-   from the holders, so no dilution); the rebalancer's value claim is capped at
-   what was booked. Priced on the traded token.
+1. The user keeps exactly `V − fee` and the collector receives exactly `fee`
+   (both as fresh LP), so the pool grows by `V` per fill — the supply is never
+   diluted by more than the credited value and never burned. Priced on the traded
+   token.
 2. A user's fee tier is resolved from their own balance, never from keeper input.
-3. The collector withdraws only the LP it accumulated; it cannot touch user free
+3. The collector withdraws only the LP it was credited; it cannot touch user free
    balances or escrow beyond its share.
 4. `collect` is keeper-only; the treasury is a fixed governance address.
 5. Cross-token valuation: v1 prices the collector's LP against the traded token
-   only (the token that grew on the fill). Review required for pools where a
-   fill's escrow and free balances are large relative to the other token; a
-   future version may use a CL8Y/USTC-based valuation.
+   only (the token that grew on the fill). Review required where a fill's escrow
+   and free balances are large relative to the other token; a future version may
+   use a CL8Y/USTC-based valuation.
 6. Fee computation must be monotonic-safe and never underflow the fill output
-   (reject the fill if `fee ≥ out` or dust).
+   (skip the fee if `fee = 0` or dust; cap `fee_bps ≤ 10 000`).
 7. Only the fee-registry reads the CL8Y balance. A saved `Holdings` value is
    written only from a *successful* registry query — never from keeper/sender
    input — and is used only as a fallback when a live query fails.
@@ -271,14 +268,10 @@ Vaults (grid / market-grid / rebalancer)
 ## 10. Rollout
 
 1. Deploy the shared core (`fee-registry` + `fee-collector`).
-2. Integrate the **limit-grid** first (mono-user, lowest risk, existing
-   `SHARES` map).
-3. Integrate **market-grid**.
-4. Integrate **rebalancer** (poly-user per-LP tier; grouping is what minimises
-   gas per trader — a rebalance execution serves many traders at once. The fee
-enumeration is **uncapped**: every LP is resolved at their exact tier, so the
-    fill costs N `EffectiveFee` queries that scale with the pool's LP count; can
-    be a follow-up).
+2. Integrate the three venues on the **uniform single-user mint** model: limit-grid
+   (bot `owner`), market-grid (vault `admin` internal `SHARES`), rebalancer
+   (vault `admin` + external `bot-liquidity` LP via `MintTo`). One mechanic, one
+   tier resolution per fill across all systems.
 
 ## 11. Open items (confirm before implementation)
 

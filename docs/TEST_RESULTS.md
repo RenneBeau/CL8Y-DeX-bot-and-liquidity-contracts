@@ -206,6 +206,52 @@ holders lose strictly less LP.
   overrides (dummy fallback on a local chain) and wires `update_fee_config`
   onto the bot-vault.
 
+## Uniform Single-User Mint Rework (2026-08-07)
+
+Following the CMM decision, the fee mechanic is **unified across all four workspaces
+into one model (A, single user)**: whichever venue, a fill crediting `V` token-0
+value resolves the **single operating user's** effective fee
+(`fee = V × fee_bps / 10 000`), **mints `V − fee` LP to the user and `fee` LP to the
+fee-collector**, growing supply by `V` (correct dilution, no burn, no pooled
+enumeration).
+
+Changes per contract (see `FEE_TIER_PROTOCOL.md` §5/7/8/9):
+
+- `bot-liquidity` adds `ExecuteMsg::MintTo { recipient, amount }` (vault-gated,
+  routes through the existing internal CW20 `Mint`).
+- `bot-vault` (rebalancer) `charge_fee` switches from the pooled value claim
+  (`FEE_SHARES` / `TOTAL_FEE_SHARES` + `RedeemShares`) to the single-user mint
+  (`config.admin`). `FEE_SHARES`/`TOTAL_FEE_SHARES`, `execute_redeem_fee_shares`.
+  and the `RedeemShares` variant are removed; `Shares` now returns the collector's
+  real external `bot-liquidity` LP balance.
+- `fee-collector` becomes liquidity-aware: it branches on the vault's
+  `Config.liquidity_contract` — set (rebalancer) → the collector withdraws its
+  external LP via `bot-liquidity` `Withdraw` (pro-rata); unset (grids) → sends
+  `RedeemShares` to the vault as before.
+- `market-grid` (`grid-vault-swap`) `charge_fee`: per-LP burn → single-user mint
+  (`config.admin`) on its internal `SHARES` ledger.
+- `limit-grid` (`grid-vault`) `charge_fee`: collector-only dilution mint →
+  model A (`bot.owner`), minting `V − fee` to the owner and `fee` to the collector.
+
+Tests updated/added to cover the single-user mint (`charge_fee_mints_user_minus_fee_and_fee_to_collector`,
+`rebalance_mints_fee_lp_to_collector_and_can_redistribute_to_treasury`,
+`single_user_is_billed_at_the_admin_tier`, `protocol_fee_mints_collector_lp_and_redeems`).
+
+Gates (all green, `cargo fmt --check` + `cargo clippy --all-targets -- -D warnings` +
+`cargo test --all-targets --locked`):
+
+| Workspace | Unit | Integration | Total |
+|---|---|---|---|
+| `rebalancer-system` | 30 | 4 | 34 |
+| `fee-system` | 18 | 4 | 22 |
+| `market-grid-system` | 10 | 11 | 21 |
+| `limit-grid-system` | 29 | 21 | 50 |
+
+127 tests passed across the four workspaces; Clippy was strict (`-D warnings`) with
+zero findings everywhere. The on-chain `LocalTerra` and CI evidence from the earlier
+sections predates this rework and describes the superseded per-LP / value-claim
+behaviour; it must be re-run against this revision before an economic claim.
+
 ## Existing CI Evidence
 
 The baseline commit had retained source-quality, dependency-security, and

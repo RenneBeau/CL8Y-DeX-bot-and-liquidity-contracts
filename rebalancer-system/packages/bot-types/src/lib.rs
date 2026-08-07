@@ -70,10 +70,6 @@ pub enum VaultExecuteMsg {
         fee_registry: Option<String>,
         fee_collector: Option<String>,
     },
-    RedeemShares {
-        bot_id: u64,
-        recipient: String,
-    },
     TransferAdmin {
         admin: String,
     },

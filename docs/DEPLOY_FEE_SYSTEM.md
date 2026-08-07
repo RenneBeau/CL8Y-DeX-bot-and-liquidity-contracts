@@ -2,7 +2,7 @@
 
 Records the **production (Terra Classic mainnet)** addresses and the exact
 instantiation / configuration flow for the protocol fee system: `fee-registry`
-(differentiated per-LP fee tiers) and `fee-collector` (fee realization to treasury).
+(user-differentiated fee tiers) and `fee-collector` (fee realization to treasury).
 
 This file is the **source of truth for mainnet**. Local test-a-net runs must use
 the dummy addresses in `test-area/`, because the mainnet CL8Y token and CMM
@@ -70,9 +70,11 @@ POST {"update_fee_config":{
 }}
 ```
 
-Fees are then charged **per LP holder** at each holder's CL8Y tier (see
-`docs/FEE_TIER_PROTOCOL.md` §5); the `fee-collector` realizes the accrued claims to
-the CMM `treasury`.
+Fees are then charged to the **single operating user** at their CL8Y tier (mint
+`V − fee` LP to the user, `fee` LP to the fee-collector; see
+`docs/FEE_TIER_PROTOCOL.md` §5); the `fee-collector` realizes the accrued LP to
+the CMM `treasury` (via `RedeemShares` on the grids, or an external
+`bot-liquidity` `Withdraw` on the rebalancer).
 
 ## 5. Environments
 

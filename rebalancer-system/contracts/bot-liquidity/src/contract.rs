@@ -117,8 +117,33 @@ pub fn execute(
         ExecuteMsg::TransferAdmin { admin } => execute_transfer_admin(deps, info, admin),
         ExecuteMsg::AcceptAdmin {} => execute_accept_admin(deps, info),
         ExecuteMsg::CancelAdminTransfer {} => execute_cancel_admin_transfer(deps, info),
+        ExecuteMsg::MintTo { recipient, amount } => {
+            execute_mint_to(deps, env, info, recipient, amount)
+        }
         other => execute_cw20(deps, env, info, other),
     }
+}
+
+fn execute_mint_to(
+    deps: DepsMut,
+    env: Env,
+    info: MessageInfo,
+    recipient: String,
+    amount: Uint128,
+) -> Result<Response, ContractError> {
+    let config = CONFIG.load(deps.storage)?;
+    if info.sender != config.vault {
+        return Err(ContractError::Unauthorized);
+    }
+    if amount.is_zero() {
+        return Err(ContractError::ZeroAmount);
+    }
+    deps.api.addr_validate(&recipient)?;
+    mint_shares(deps, &env, recipient.clone(), amount)?;
+    Ok(Response::new()
+        .add_attribute("action", "liquidity_mint_to")
+        .add_attribute("recipient", recipient)
+        .add_attribute("amount", amount))
 }
 
 fn execute_deposit(
@@ -630,6 +655,7 @@ fn execute_cw20(
         | ExecuteMsg::TransferAdmin { .. }
         | ExecuteMsg::AcceptAdmin {}
         | ExecuteMsg::CancelAdminTransfer {}
+        | ExecuteMsg::MintTo { .. }
         | ExecuteMsg::Deposit { .. }
         | ExecuteMsg::Withdraw { .. } => {
             return Err(ContractError::UnsupportedMessage);

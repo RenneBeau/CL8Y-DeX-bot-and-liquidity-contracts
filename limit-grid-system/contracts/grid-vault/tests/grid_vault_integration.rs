@@ -1998,9 +1998,33 @@ fn protocol_fee_mints_collector_lp_and_redeems() {
     let expected_fee_shares = value_in_token_0.multiply_ratio(200u16, 10_000u16);
     assert!(expected_fee_shares > Uint128::zero());
 
+    // Model A (single user, correct dilution): total shares grow by the FULL
+    // credited value — the user keeps `value − fee`, the collector gets `fee`.
     assert_eq!(
         bot.total_shares,
-        initial_shares.checked_add(expected_fee_shares).unwrap()
+        initial_shares.checked_add(value_in_token_0).unwrap(),
+        "pool grows by the full fill value (correct dilution)"
+    );
+
+    let owner_shares: cl8y_grid_vault::msg::ShareResponse = h
+        .app
+        .wrap()
+        .query_wasm_smart(
+            &vault,
+            &VaultQueryMsg::Shares {
+                bot_id: 1,
+                address: h.alice.to_string(),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        owner_shares.shares,
+        initial_shares
+            .checked_add(value_in_token_0)
+            .unwrap()
+            .checked_sub(expected_fee_shares)
+            .unwrap(),
+        "the user keeps `value − fee` as their LP growth"
     );
 
     let collector_shares: cl8y_grid_vault::msg::ShareResponse = h

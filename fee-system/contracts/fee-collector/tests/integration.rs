@@ -38,11 +38,17 @@ enum VaultExecuteMsg {
 #[cw_serde]
 enum VaultQueryMsg {
     Shares { bot_id: u64, address: String },
+    Config {},
 }
 
 #[cw_serde]
 struct VaultSharesRaw {
     shares: Uint128,
+}
+
+#[cw_serde]
+struct VaultConfigRaw {
+    liquidity_contract: Option<String>,
 }
 
 const V_CONFIG: Item<VaultConfig> = Item::new("vault_config");
@@ -116,6 +122,9 @@ fn vault_query(deps: Deps, _env: Env, msg: VaultQueryMsg) -> StdResult<Binary> {
                 .unwrap_or_default();
             to_json_binary(&VaultSharesRaw { shares })
         }
+        VaultQueryMsg::Config {} => to_json_binary(&VaultConfigRaw {
+            liquidity_contract: None,
+        }),
     }
 }
 

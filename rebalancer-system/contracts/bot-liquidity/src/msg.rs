@@ -40,6 +40,10 @@ pub enum ExecuteMsg {
         deadline: u64,
         output: WithdrawalType,
     },
+    MintTo {
+        recipient: String,
+        amount: Uint128,
+    },
     Transfer {
         recipient: String,
         amount: Uint128,

@@ -20,6 +20,7 @@ const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 #[cw_serde]
 enum VaultQueryMsg {
     Shares { bot_id: u64, address: String },
+    Config {},
 }
 
 #[cw_serde]
@@ -28,8 +29,30 @@ struct VaultSharesResponseRaw {
 }
 
 #[cw_serde]
+struct VaultConfigResponseRaw {
+    liquidity_contract: Option<String>,
+}
+
+#[cw_serde]
 enum VaultExecuteMsg {
     RedeemShares { bot_id: u64, recipient: String },
+}
+
+/// External LP pool realization (rebalancer): the collector owns real
+/// bot-liquidity LP; `Withdraw` burns it and returns the underlying tokens.
+#[cw_serde]
+enum LiquidityExecuteMsg {
+    Withdraw {
+        shares: Uint128,
+        recipient: Option<String>,
+        deadline: u64,
+        output: WithdrawalTypeRaw,
+    },
+}
+
+#[cw_serde]
+enum WithdrawalTypeRaw {
+    ProRata { min_assets: [Uint128; 2] },
 }
 
 #[entry_point]
@@ -116,19 +139,40 @@ fn execute_collect(
     )?;
 
     let vault_addr_str = vault_addr.to_string();
-    Ok(Response::new()
+    let config_resp: VaultConfigResponseRaw = deps
+        .querier
+        .query_wasm_smart(&vault_addr, &VaultQueryMsg::Config {})?;
+    let mut response = Response::new()
         .add_attribute("action", "collect")
         .add_attribute("vault", vault)
         .add_attribute("bot_id", bot_id.to_string())
-        .add_attribute("shares", shares.shares.to_string())
-        .add_message(WasmMsg::Execute {
+        .add_attribute("shares", shares.shares.to_string());
+    if let Some(liquidity) = config_resp.liquidity_contract {
+        // Rebalancer: the collector holds external bot-liquidity LP; withdraw it
+        // pro-rata to the treasury (the collector is the LP owner).
+        response = response.add_message(WasmMsg::Execute {
+            contract_addr: liquidity,
+            msg: to_json_binary(&LiquidityExecuteMsg::Withdraw {
+                shares: shares.shares,
+                recipient: Some(config.treasury.to_string()),
+                deadline: env.block.time.seconds(),
+                output: WithdrawalTypeRaw::ProRata {
+                    min_assets: [Uint128::zero(), Uint128::zero()],
+                },
+            })?,
+            funds: vec![],
+        });
+    } else {
+        response = response.add_message(WasmMsg::Execute {
             contract_addr: vault_addr_str,
             msg: to_json_binary(&VaultExecuteMsg::RedeemShares {
                 bot_id,
                 recipient: config.treasury.to_string(),
             })?,
             funds: vec![],
-        }))
+        });
+    }
+    Ok(response)
 }
 
 fn execute_update_config(
