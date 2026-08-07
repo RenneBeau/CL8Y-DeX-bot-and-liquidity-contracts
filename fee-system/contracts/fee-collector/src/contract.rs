@@ -28,7 +28,13 @@ struct VaultSharesResponseRaw {
     shares: Uint128,
 }
 
-#[cw_serde]
+/// Vault `Config` is vault-specific (grid vs rebalancer) and carries many
+/// fields we do not care about. `cw_serde` would `deny_unknown_fields`, so a
+/// strict raw type cannot parse a real vault's config. We deserialize only the
+/// field we need (`liquidity_contract`) and ignore everything else, matching
+/// both the grid-vaults (no liquidity_contract -> internal Shares redemption)
+/// and the rebalancer (liquidity_contract set -> external LP withdrawal).
+#[derive(serde::Serialize, serde::Deserialize)]
 struct VaultConfigResponseRaw {
     liquidity_contract: Option<String>,
 }

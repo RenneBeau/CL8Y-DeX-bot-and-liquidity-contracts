@@ -1,4 +1,4 @@
-use bot_types::{SwapProxyHookMsg, VaultConfigResponse, VaultQueryMsg};
+use bot_types::{SwapProxyHookMsg, VaultQueryMsg};
 use cl8y_dex::{AssetInfo, HybridSwapParams, PairCw20HookMsg, PairInfo, PairQueryMsg};
 use cosmwasm_std::{
     entry_point, from_json, to_json_binary, Addr, Binary, Decimal, Deps, DepsMut, Env, MessageInfo,
@@ -71,6 +71,18 @@ pub fn execute(
     }
 }
 
+/// Vault config is vault-specific: the rebalancer (`bot-vault`) returns a
+/// `VaultConfigResponse`, but a market-grid (`grid-vault-swap`) returns its own
+/// config with extra fields. `cw_serde` deny_unknown_fields is too strict for a
+/// shared provider, so we deserialize only what `register_vault` needs and
+/// ignore everything else.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct VaultConfigRaw {
+    pair: String,
+    proxy: Option<String>,
+    asset_tokens: [String; 2],
+}
+
 fn execute_register_vault(
     deps: DepsMut,
     env: Env,
@@ -99,12 +111,13 @@ fn execute_register_vault(
     if asset_tokens[0] == asset_tokens[1] {
         return Err(ContractError::InvalidRoute);
     }
-    let vault_config: VaultConfigResponse = deps
+    let vault_config_raw: VaultConfigRaw = deps
         .querier
         .query_wasm_smart(&vault, &VaultQueryMsg::Config {})?;
-    if vault_config.pair != pair
-        || vault_config.proxy != env.contract.address
-        || vault_config.asset_tokens != asset_tokens.clone().map(|addr| addr.to_string())
+    if vault_config_raw.pair != pair
+        || vault_config_raw.proxy.as_deref() != Some(env.contract.address.as_str())
+        || vault_config_raw.asset_tokens
+            != asset_tokens.clone().map(|addr| addr.to_string())
     {
         return Err(ContractError::InvalidRoute);
     }

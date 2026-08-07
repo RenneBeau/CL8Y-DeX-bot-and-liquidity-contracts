@@ -17,9 +17,9 @@ use cw_storage_plus::Item;
 
 use cl8y_grid_vault_swap::contract;
 use cl8y_grid_vault_swap::msg::{
-    Asset, AssetInfo, ExecuteMsg as VaultExecuteMsg, HybridSimulationResponse, InstantiateMsg,
-    ObserveResponse, PairCw20HookMsg, PairInfo, PairQueryMsg, PoolResponse, QueryMsg, ReceiveMsg,
-    SharesResponse,
+    Asset, AssetInfo, ExecuteMsg as VaultExecuteMsg, HybridSimulationResponse, HybridSwapParams,
+    InstantiateMsg, ObserveResponse, PairCw20HookMsg, PairInfo, PairQueryMsg, PoolResponse,
+    QueryMsg, ReceiveMsg, SharesResponse, SwapProxyHookMsg,
 };
 
 // ---------------------------------------------------------------------------
@@ -219,6 +219,77 @@ fn mock_pair_code() -> Box<dyn Contract<Empty, Empty>> {
 }
 
 // ---------------------------------------------------------------------------
+// Mock swap proxy: mirrors the shared `swap-proxy` hook. When the vault routes
+// its rebalance swap here (SwapProxyHookMsg::Swap), the proxy re-emits the offer
+// token to the pair with the proceeds sent back to the vault. Offer-token
+// detection in the mock pair is sender-based, so routing through the proxy does
+// not change the swap outcome.
+// ---------------------------------------------------------------------------
+
+#[cw_serde]
+pub enum MockProxyExecuteMsg {
+    Receive(Cw20ReceiveMsg),
+}
+
+fn mock_proxy_execute(
+    _deps: DepsMut,
+    env: Env,
+    info: cosmwasm_std::MessageInfo,
+    msg: MockProxyExecuteMsg,
+) -> StdResult<cosmwasm_std::Response> {
+    match msg {
+        MockProxyExecuteMsg::Receive(receive) => {
+            if receive.amount.is_zero() {
+                return Err(StdError::generic_err("zero amount"));
+            }
+            let hook: SwapProxyHookMsg = from_json(&receive.msg)?;
+            let SwapProxyHookMsg::Swap {
+                pair,
+                min_return,
+                max_spread,
+                deadline,
+            } = hook;
+            if deadline < env.block.time.seconds() {
+                return Err(StdError::generic_err("deadline passed"));
+            }
+            let vault = receive.sender;
+            let pair_hook = PairCw20HookMsg::Swap {
+                belief_price: None,
+                max_spread: Some(max_spread),
+                min_return: Some(min_return),
+                to: Some(vault.to_string()),
+                deadline: Some(deadline),
+                trader: None,
+                hybrid: Some(HybridSwapParams::pool_only(receive.amount)),
+            };
+            Ok(cosmwasm_std::Response::new()
+                .add_message(WasmMsg::Execute {
+                    contract_addr: info.sender.to_string(),
+                    msg: to_json_binary(&cw20::Cw20ExecuteMsg::Send {
+                        contract: pair,
+                        amount: receive.amount,
+                        msg: to_json_binary(&pair_hook)?,
+                    })?,
+                    funds: vec![],
+                })
+                .add_attribute("action", "proxy_swap")
+                .add_attribute("vault", vault))
+        }
+    }
+}
+
+fn mock_proxy_code() -> Box<dyn Contract<Empty, Empty>> {
+    let contract = ContractWrapper::new(
+        |deps, env, info, msg: MockProxyExecuteMsg| mock_proxy_execute(deps, env, info, msg),
+        |_deps, _env, _info, _msg: Empty| -> StdResult<cosmwasm_std::Response> {
+            Ok(cosmwasm_std::Response::new().add_attribute("action", "instantiate"))
+        },
+        |_deps, _env, _msg: Empty| -> StdResult<Binary> { Ok(Binary::default()) },
+    );
+    Box::new(contract)
+}
+
+// ---------------------------------------------------------------------------
 // Contract wrappers
 // ---------------------------------------------------------------------------
 
@@ -322,6 +393,33 @@ fn mock_fee_registry_code_tiered() -> Box<dyn Contract<Empty, Empty>> {
 enum TieredRegistry {
     Flat,
     Tiered,
+    /// Tier-9 holder (>=7500 CL8Y) -> 9500 bps discount -> fee = 180 * 500/10000 = 9 bps.
+    Nine,
+}
+
+/// A tier-9 fee-registry: `EffectiveFee` always resolves the caller to tier 9
+/// (9_500/10_000 discount, 9 bps). Models a 7500+ CL8Y holder without needing a
+/// real CL8Y fixture.
+fn mock_fee_registry_code_tier9() -> Box<dyn Contract<Empty, Empty>> {
+    let contract = ContractWrapper::new(
+        |_deps, _env, _info, _msg: Empty| -> StdResult<cosmwasm_std::Response> {
+            Ok(cosmwasm_std::Response::new())
+        },
+        |_deps, _env, _info, _msg: Empty| -> StdResult<cosmwasm_std::Response> {
+            Ok(cosmwasm_std::Response::new())
+        },
+        |_deps, _env, _msg: MockFeeRegistryQueryMsg| -> StdResult<Binary> {
+            let response = MockFeeRegistryEffectiveFeeResponse {
+                fee_bps: 9,
+                discount_bps: 9_500,
+                tier_id: Some(9),
+                holding: Some(Uint128::new(750_000)),
+                source: "live".to_string(),
+            };
+            to_json_binary(&response)
+        },
+    );
+    Box::new(contract)
 }
 
 // ---------------------------------------------------------------------------
@@ -342,13 +440,29 @@ struct Harness {
     pair: Addr,
     collector: Addr,
     treasury: Addr,
+    proxy: Option<Addr>,
 }
 
 fn setup_with_fee(enable_fees: bool) -> Harness {
     setup_with_registry(enable_fees, TieredRegistry::Flat)
 }
 
+fn setup_proxy() -> Harness {
+    setup_core(false, TieredRegistry::Flat, true)
+}
+
+/// A tier-9 holder operating a market-grid through the whitelisted shared
+/// swap-proxy (DEX commission = 0). This is the exact on-chain demo requested:
+/// "proxy has 0 fees, tier-9 user, pool rebalances CORAL -> EMBER".
+fn setup_proxy_tier9() -> Harness {
+    setup_core(true, TieredRegistry::Nine, true)
+}
+
 fn setup_with_registry(enable_fees: bool, registry_kind: TieredRegistry) -> Harness {
+    setup_core(enable_fees, registry_kind, false)
+}
+
+fn setup_core(enable_fees: bool, registry_kind: TieredRegistry, use_proxy: bool) -> Harness {
     let mut app = App::default();
     let admin = app.api().addr_make(ADMIN);
     let depositor = app.api().addr_make(DEPOSITOR);
@@ -357,10 +471,21 @@ fn setup_with_registry(enable_fees: bool, registry_kind: TieredRegistry) -> Harn
     let pair_code = app.store_code(mock_pair_code());
     let vault_code = app.store_code(mock_vault_code());
 
+    let proxy = if use_proxy {
+        let proxy_code = app.store_code(mock_proxy_code());
+        Some(
+            app.instantiate_contract(proxy_code, admin.clone(), &Empty {}, &[], "proxy", None)
+                .unwrap(),
+        )
+    } else {
+        None
+    };
+
     let registry = if enable_fees {
         let registry_code = app.store_code(match registry_kind {
             TieredRegistry::Flat => mock_fee_registry_code(),
             TieredRegistry::Tiered => mock_fee_registry_code_tiered(),
+            TieredRegistry::Nine => mock_fee_registry_code_tier9(),
         });
         let registry = app
             .instantiate_contract(
@@ -486,6 +611,7 @@ fn setup_with_registry(enable_fees: bool, registry_kind: TieredRegistry) -> Harn
                 } else {
                     None
                 },
+                proxy: proxy.as_ref().map(ToString::to_string),
             },
             &[],
             "vault",
@@ -503,6 +629,7 @@ fn setup_with_registry(enable_fees: bool, registry_kind: TieredRegistry) -> Harn
         pair,
         collector,
         treasury,
+        proxy,
     }
 }
 
@@ -656,6 +783,46 @@ fn rebalance_swaps_toward_target_cell() {
 }
 
 #[test]
+fn rebalance_routes_through_shared_proxy() {
+    // When the vault is configured with `proxy`, the rebalance swap must leave
+    // the vault and land on the swap-proxy first (proving the vault sends the
+    // offer token to the proxy, which forwards it to the pair and routes the
+    // proceeds back to the vault).
+    let mut h = setup_proxy();
+    let (token0, token1) = (h.token0.clone(), h.token1.clone());
+    deposit(&mut h, &token0, Uint128::new(60_000_000_000));
+    deposit(&mut h, &token1, Uint128::new(60_000_000_000));
+    set_twap(&mut h, "1.75");
+    // The vault must advertise the proxy it routes through (the shared
+    // swap-proxy checks this on register_vault).
+    let config: cl8y_grid_vault_swap::msg::ConfigResponse = h
+        .app
+        .wrap()
+        .query_wasm_smart(&h.vault, &QueryMsg::Config {})
+        .unwrap();
+    assert_eq!(config.proxy, h.proxy.as_ref().map(ToString::to_string));
+    let response = h
+        .app
+        .execute_contract(
+            h.depositor.clone(),
+            h.vault.clone(),
+            &VaultExecuteMsg::Rebalance { deadline: u64::MAX },
+            &[],
+        )
+        .unwrap();
+    assert!(
+        response.events.iter().any(|e| e
+            .attributes
+            .iter()
+            .any(|a| a.key == "action" && a.value == "proxy_swap")),
+        "expected rebalance swap routed through the shared proxy"
+    );
+    // The proceeds still land in the vault (that is where the rebalance reply
+    // books the fill and charges the fee).
+    assert!(balance_of(&h.app, &token1, &h.vault) > Uint128::new(60_000_000_000));
+}
+
+#[test]
 fn withdraw_burns_shares_pro_rata() {
     let mut h = setup();
     let (token0, token1) = (h.token0.clone(), h.token1.clone());
@@ -783,6 +950,7 @@ fn non_admin_cannot_update_config() {
                 max_spread: None,
                 fee_registry: None,
                 fee_collector: None,
+                proxy: None,
             },
             &[],
         )
@@ -814,6 +982,7 @@ fn update_config_can_clear_fee_settings() {
                 max_spread: None,
                 fee_registry: Some(String::new()),
                 fee_collector: Some(String::new()),
+                proxy: None,
             },
             &[],
         )
@@ -861,9 +1030,9 @@ fn rebalance_mints_fee_lp_to_collector_and_can_redistribute_to_treasury() {
         "fee must be > 0 per executed swap"
     );
 
-    // Single-user mint (correct dilution): the operating user (vault `admin`) is
-    // billed at their OWN tier and keeps `value − fee` as a fresh share mint, the
-    // collector receives exactly the fee. No other holder is minted or burned.
+    // Single-user model (no user mint): the operating user (vault `admin`) keeps
+    // their share count — the fill value accrues to the pool via NAV. Only the
+    // collector receives fresh fee LP. No other holder is minted or burned.
     let fee_shares_u = Uint128::new(fee_shares.parse::<u128>().unwrap());
     assert_eq!(
         shares_of(&h, &h.depositor),
@@ -875,10 +1044,10 @@ fn rebalance_mints_fee_lp_to_collector_and_can_redistribute_to_treasury() {
         fee_shares_u,
         "collector owns exactly the fee LP"
     );
-    let admin_gain = shares_of(&h, &h.admin) - admin_before;
-    assert!(
-        admin_gain > Uint128::zero(),
-        "the user keeps `value − fee` as LP growth"
+    assert_eq!(
+        shares_of(&h, &h.admin),
+        admin_before,
+        "no user LP is minted on a fill (single-user NAV growth)"
     );
 
     // The reported rate is the single user's exact tier (flat base 1 800 bps).
@@ -944,23 +1113,11 @@ fn rebalance_mints_fee_lp_to_collector_and_can_redistribute_to_treasury() {
 #[test]
 fn single_user_is_billed_at_the_admin_tier() {
     // Single-user model (`FEE_TIER_PROTOCOL.md` §5): only the operating user (the
-    // vault `admin`) is ever billed, at THEIR OWN tier. The tiered mock returns
-    // 200 bps to an even-last-byte trader and 1 800 bps otherwise; the measured
-    // rate must match the ADMIN's parity (never an unrelated depositor), and the
-    // total pool grows by the fill value (correct dilution).
+    // vault `admin`) is ever billed, at THEIR OWN tier. No user LP is minted on
+    // the fill; the fill value accrues to the pool (amot NAV) and only the fee is
+    // realized as fresh LP for the fee-collector.
     let mut h = setup_with_registry(true, TieredRegistry::Tiered);
     let (token0, token1) = (h.token0.clone(), h.token1.clone());
-    let admin_fee = if h
-        .admin
-        .as_bytes()
-        .last()
-        .map(|b| *b % 2 == 0)
-        .unwrap_or(false)
-    {
-        200u16
-    } else {
-        1_800u16
-    };
 
     // A depositor (different identity, possibly different tier) funds the pool
     // but is NOT the fee subject in single-user mode.
@@ -968,6 +1125,7 @@ fn single_user_is_billed_at_the_admin_tier() {
     deposit(&mut h, &token1, Uint128::new(60_000_000_000));
     let depositor_before = shares_of(&h, &h.depositor);
     let admin_before = shares_of(&h, &h.admin);
+    let pool_before = balance_of(&h.app, &token0, &h.vault) + balance_of(&h.app, &token1, &h.vault);
     set_twap(&mut h, "1.75");
 
     h.app
@@ -980,37 +1138,102 @@ fn single_user_is_billed_at_the_admin_tier() {
         .unwrap();
 
     let depositor_after = shares_of(&h, &h.depositor);
-    let admin_gain = shares_of(&h, &h.admin) - admin_before;
+    let admin_after = shares_of(&h, &h.admin);
     let collector_fee = shares_of(&h, &h.collector);
+    let pool_after = balance_of(&h.app, &token0, &h.vault) + balance_of(&h.app, &token1, &h.vault);
 
     assert_eq!(
         depositor_after, depositor_before,
         "the depositor is not the fee subject in single-user mode"
     );
-    assert!(
-        admin_gain > Uint128::zero(),
-        "the operating admin keeps `value − fee` as growth"
+    assert_eq!(
+        admin_after, admin_before,
+        "no user LP is minted on a fill (single-user NAV growth)"
     );
     assert!(
         collector_fee > Uint128::zero(),
         "the collector receives the fee LP"
     );
-
-    // Correct dilution: the pool grows by the full fill value.
-    let total_before = depositor_before + admin_before;
-    let total_after = depositor_after + shares_of(&h, &h.admin) + collector_fee;
     assert!(
-        total_after > total_before,
-        "pool must grow by the fill value (correct dilution)"
+        pool_after > pool_before,
+        "the fill value accrues to the pool holdings (no user mint)"
+    );
+}
+
+#[test]
+fn tier9_rebalance_through_zero_fee_proxy_collector_gets_exact_9bps() {
+    // DEMO: a tier-9 user (9_500/10_000 discount -> 9 bps) operates a market-grid
+    // through the whitelisted shared swap-proxy. The proxy adds NO DEX fee, so the
+    // only deduction from the fill value is the protocol tier-9 fee. The collector
+    // must end up with exactly floor(value × 9 / 10_000).
+    //
+    // Pool: 10000 CORAL (t0) + 10000 EMBER (t1). Price in-cell -> rebalance swap.
+    let mut h = setup_proxy_tier9();
+    let (token0, token1) = (h.token0.clone(), h.token1.clone());
+
+    deposit(&mut h, &token0, Uint128::new(10_000_000_000));
+    deposit(&mut h, &token1, Uint128::new(10_000_000_000));
+    set_twap(&mut h, "1.75");
+
+    let response = h
+        .app
+        .execute_contract(
+            h.depositor.clone(),
+            h.vault.clone(),
+            &VaultExecuteMsg::Rebalance { deadline: u64::MAX },
+            &[],
+        )
+        .unwrap();
+
+    // The swap must be routed through the shared proxy (proving 0 DEX fee).
+    assert!(
+        response
+            .events
+            .iter()
+            .any(|e| e.attributes.iter().any(|a| a.key == "action" && a.value == "proxy_swap")),
+        "rebalance swap routed through the zero-fee proxy"
     );
 
-    // The applied tier is exactly the admin's: value = fee + admin_gain, and the
-    // vault minted fee = floor(value × admin_fee / 10_000).
-    let value = admin_gain + collector_fee;
+    let mut fee_shares = 0u128;
+    let mut fee_bps = 0u16;
+    let mut fee_tier = 0u16;
+    let mut fee_source = String::new();
+    for e in &response.events {
+        if e.attributes.iter().any(|a| a.key == "action" && a.value == "complete_rebalance") {
+            for a in &e.attributes {
+                if a.key == "fee_shares" {
+                    fee_shares = a.value.parse().unwrap();
+                } else if a.key == "fee_bps" {
+                    fee_bps = a.value.parse().unwrap();
+                } else if a.key == "fee_tier" {
+                    fee_tier = a.value.parse().unwrap();
+                } else if a.key == "fee_source" {
+                    fee_source = a.value.clone();
+                }
+            }
+        }
+    }
+
+    // Tier-9 applies live: 9 bps exact, tier 9, source live.
+    assert_eq!(fee_bps, 9, "tier-9 user must be billed 9 bps");
+    assert_eq!(fee_tier, 9, "fee tier must be 9");
+    assert_eq!(fee_source, "live", "tier-9 resolution must come from the live registry");
+
+    // `fee_shares` is the LP minted straight to the collector, equal to
+    // floor(value_in_token0 × 9 / 10_000). The collector owns exactly it.
+    let collector_shares = shares_of(&h, &h.collector);
     assert_eq!(
-        collector_fee.u128(),
-        value.u128() * u128::from(admin_fee) / 10_000,
-        "applied fee equals the admin's tier, not the depositor's"
+        collector_shares.u128(),
+        fee_shares,
+        "collector shares == accrued fee"
+    );
+    assert!(
+        collector_shares > Uint128::zero(),
+        "collector must receive a non-zero tier-9 fee"
+    );
+    println!(
+        "rebalance value_in_token0 => collector fee_shares {} (tier {} @ {} bps, source {})",
+        collector_shares, fee_tier, fee_bps, fee_source
     );
 }
 
@@ -1041,6 +1264,7 @@ fn rebalance_is_non_blocking_when_fee_registry_is_unreachable() {
                 max_spread: None,
                 fee_registry: Some(dead_registry.to_string()),
                 fee_collector: None,
+                proxy: None,
             },
             &[],
         )

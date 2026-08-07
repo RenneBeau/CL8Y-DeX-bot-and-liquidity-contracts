@@ -1190,13 +1190,13 @@ enum ChargeFee {
 /// Protocol fee per executed rebalance swap (token-0 value based), resolved as
 /// a **single user** (`FEE_TIER_PROTOCOL.md` §5): the operating user — the
 /// address that instantiated / deposited into the vault (`config.admin`) — is
-/// billed at THEIR OWN tier for the full fill value. The user keeps `value − fee`
-/// as a fresh LP mint (real growth, correct dilution) and the fee is minted to
-/// the configured fee-collector as LP. No fee is charged when the vault has no
-/// fee configured, no liquidity contract, or the resolved rate is zero. A
-/// transient fee-registry failure is non-blocking (the whole charge is skipped,
-/// never a revert). Returns the mint messages to append to the rebalance
-/// response.
+/// billed at THEIR OWN tier for the full fill value. Only the fee is minted as
+/// LP to the configured fee-collector — no user LP is minted on a fill (the user's
+/// deposited bot-liquidity position simply appreciates via NAV). No fee is charged
+/// when the vault has no fee configured, no liquidity contract, or the resolved
+/// rate is zero. A transient fee-registry failure is non-blocking (the whole charge
+/// is skipped, never a revert). Returns the mint messages to append to the
+/// rebalance response.
 fn charge_fee(
     deps: &mut DepsMut,
     config: &Config,
@@ -1231,16 +1231,14 @@ fn charge_fee(
     if fee_bps == 0 {
         return Ok((ChargeFee::None, vec![]));
     }
-    let fee_lp = value_in_token0.multiply_ratio(fee_bps, 10_000u16);
+let fee_lp = value_in_token0.multiply_ratio(fee_bps, 10_000u16);
     if fee_lp.is_zero() {
         return Ok((ChargeFee::None, vec![]));
     }
-    let user_lp = value_in_token0
-        .checked_sub(fee_lp)
-        .map_err(StdError::overflow)?;
 
-    // Mint LP as true growth (correct dilution): the user keeps `value − fee`,
-    // the fee LP goes to the fee-collector.
+    // Single-user (`FEE_TIER_PROTOCOL.md` §5, model B): a fill mints NO extra LP
+    // to the user — their deposited bot-liquidity position appreciates via NAV.
+    // Only the protocol fee is minted, straight to the fee-collector.
     let mint_msg = |recipient: &str, amount: Uint128| -> StdResult<WasmMsg> {
         Ok(WasmMsg::Execute {
             contract_addr: liquidity.to_string(),
@@ -1251,11 +1249,7 @@ fn charge_fee(
             funds: vec![],
         })
     };
-    let mut messages: Vec<WasmMsg> = Vec::new();
-    if !user_lp.is_zero() {
-        messages.push(mint_msg(&user, user_lp)?);
-    }
-    messages.push(mint_msg(collector.as_str(), fee_lp)?);
+    let messages = vec![mint_msg(collector.as_str(), fee_lp)?];
 
     Ok((
         ChargeFee::Applied(FeeApplied {
@@ -2046,10 +2040,10 @@ mod tests {
     }
 
     #[test]
-    fn charge_fee_mints_user_minus_fee_and_fee_to_collector() {
+    fn charge_fee_mints_only_fee_lp_to_collector() {
         let mut deps = mock_dependencies();
         // Single user = the operating vault `admin`, taxed at 1_000 bps (10%).
-        // Fill value 1 000 => fee 100 LP to collector, user keeps 900 LP.
+        // Fill value 1 000 => fee 100 LP to collector, NO user LP minted (model B).
         install_pool_mock(&mut deps, &[], &[("admin", 1_000)]);
         let config = vault_config(Some("liquidity"), Some("registry"), Some("collector"));
         let (charge, messages) =
@@ -2063,7 +2057,7 @@ mod tests {
             }
             _other => panic!("expected Applied fee, got a different ChargeFee variant"),
         }
-        assert_eq!(messages.len(), 2, "user LP + collector fee LP");
+        assert_eq!(messages.len(), 1, "only the collector fee LP is minted");
         let minted: Vec<(String, Uint128)> = messages
             .iter()
             .map(|m| match m {
@@ -2078,8 +2072,11 @@ mod tests {
                 m => panic!("unexpected message {m:?}"),
             })
             .collect();
-        assert!(minted.contains(&("admin".to_string(), Uint128::new(900))));
         assert!(minted.contains(&("collector".to_string(), Uint128::new(100))));
+        assert!(
+            !minted.iter().any(|(r, _)| r == "admin"),
+            "no user LP is minted on a fill"
+        );
     }
 
     #[test]

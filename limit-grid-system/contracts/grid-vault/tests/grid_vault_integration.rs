@@ -1998,12 +1998,13 @@ fn protocol_fee_mints_collector_lp_and_redeems() {
     let expected_fee_shares = value_in_token_0.multiply_ratio(200u16, 10_000u16);
     assert!(expected_fee_shares > Uint128::zero());
 
-    // Model A (single user, correct dilution): total shares grow by the FULL
-    // credited value — the user keeps `value − fee`, the collector gets `fee`.
+    // Model B (single user, no user mint): only the fee is realized as LP. Total
+    // shares grow by `fee`; the user's deposited position keeps its share count
+    // and appreciates via the NAV of the enlarged pool.
     assert_eq!(
         bot.total_shares,
-        initial_shares.checked_add(value_in_token_0).unwrap(),
-        "pool grows by the full fill value (correct dilution)"
+        initial_shares.checked_add(expected_fee_shares).unwrap(),
+        "total shares grow only by the fee LP (no user mint)"
     );
 
     let owner_shares: cl8y_grid_vault::msg::ShareResponse = h
@@ -2019,12 +2020,8 @@ fn protocol_fee_mints_collector_lp_and_redeems() {
         .unwrap();
     assert_eq!(
         owner_shares.shares,
-        initial_shares
-            .checked_add(value_in_token_0)
-            .unwrap()
-            .checked_sub(expected_fee_shares)
-            .unwrap(),
-        "the user keeps `value − fee` as their LP growth"
+        initial_shares,
+        "the user's LP is not minted on a fill (single-user NAV growth)"
     );
 
     let collector_shares: cl8y_grid_vault::msg::ShareResponse = h

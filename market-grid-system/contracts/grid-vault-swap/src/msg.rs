@@ -19,6 +19,7 @@ pub struct InstantiateMsg {
     pub max_spread: Option<Decimal>,
     pub fee_registry: Option<String>,
     pub fee_collector: Option<String>,
+    pub proxy: Option<String>,
 }
 
 #[cw_serde]
@@ -44,6 +45,7 @@ pub enum ExecuteMsg {
         max_spread: Option<Decimal>,
         fee_registry: Option<String>,
         fee_collector: Option<String>,
+        proxy: Option<String>,
     },
     TransferAdmin {
         admin: String,
@@ -82,6 +84,19 @@ pub enum PairCw20HookMsg {
         deadline: Option<u64>,
         trader: Option<String>,
         hybrid: Option<HybridSwapParams>,
+    },
+}
+
+/// Hook sent to a shared swap-proxy when the vault routes its rebalance swap
+/// through a single, whitelistable provider. Mirrors the rebalancer's
+/// `SwapProxyHookMsg` (`rebalancer-system/packages/bot-types`).
+#[cw_serde]
+pub enum SwapProxyHookMsg {
+    Swap {
+        pair: String,
+        min_return: Uint128,
+        max_spread: Decimal,
+        deadline: u64,
     },
 }
 
@@ -199,6 +214,7 @@ pub struct ConfigResponse {
     pub paused: bool,
     pub fee_registry: Option<String>,
     pub fee_collector: Option<String>,
+    pub proxy: Option<String>,
 }
 
 #[cw_serde]

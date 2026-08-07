@@ -113,18 +113,20 @@ A small shared, per-network deployable core referenced by every vault:
 - **Vaults** — on each fill, determine the fee, mint LP to the fee-collector
   (see §5), and book the change.
 
-## 5. Charging the fee (per fill, single user, mint)
+## 5. Charging the fee (per fill, single user, fee-only mint)
 
-The three venues share **one** mechanic (model A, single user per bot/vault). On a
+The three venues share **one** mechanic (model B, single user per bot/vault). On a
 fill that credits `V` of token-0-normalized value, the vault:
 
 1. resolves the **single operating user's** effective fee via the fee-registry;
 2. `fee = V × effective_fee_bps / 10 000`;
-3. **mints** `V − fee` of LP to the user and `fee` of LP to the fee-collector.
+3. **mints only `fee`** of LP to the fee-collector — it does **not** mint LP to
+   the user.
 
-LP therefore **grows by `V`** with each fill — the user keeps their value net of
-the fee and the collector receives the fee, both as fresh LP (correct dilution,
-no burn). No other holder is minted or burned.
+The user's deposited position already exists; each fill drops the `V` assets into
+the pool so their existing shares appreciate via NAV (no dilution, no burn). Only
+the protocol fee is realized as fresh LP, credited to the fee-collector. No other
+holder is minted or burned.
 
 - **Limit-grid:** the single user is the bot owner (`bot.owner`); LP is the grid's
   internal `SHARES (bot_id, addr)` ledger.
@@ -144,9 +146,10 @@ systems. Fees are never a negative incentive: the effective fee is capped at
 credited.
 
 Mechanics (v1): on a fill landing value `V` in the vault, `fee = V ×
-effective_fee_bps / 10 000`. The vault mints `V − fee` to the user and `fee` to the
-fee-collector, growing supply by `V` (correct dilution). A transient fee-registry
-failure is non-blocking: the fill completes and the fee is skipped, never a revert.
+effective_fee_bps / 10 000`. The vault mints `fee` to the fee-collector only
+(single-user NAV growth — the user's existing shares appreciate by `V − fee`);
+supply grows by `fee`. A transient fee-registry failure is non-blocking: the fill
+completes and the fee is skipped, never a revert.
 
 ### Rebalancer optionality (pooled → single-user)
 

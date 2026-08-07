@@ -1849,26 +1849,10 @@ fn charge_fee(
     if fee_lp.is_zero() {
         return Ok(ChargeFee::None);
     }
-    let user_value = value_in_token0
-        .checked_sub(fee_lp)
-        .map_err(StdError::overflow)?;
 
-    // Model A (single user, correct dilution): the user keeps `value − fee` as a
-    // fresh LP mint and the fee LP goes to the collector. Total shares grow by the
-    // full fill value.
-    if !user_value.is_zero() {
-        SHARES.update(
-            deps.storage,
-            (bot_id, &bot.owner),
-            |current: Option<Uint128>| -> StdResult<Uint128> {
-                current
-                    .unwrap_or_default()
-                    .checked_add(user_value)
-                    .map_err(StdError::overflow)
-            },
-        )?;
-        bot.total_shares = bot.total_shares.checked_add(user_value)?;
-    }
+    // Single-user model: a fill mints NO extra LP to the user (their deposited
+    // position simply appreciates via NAV). Only the protocol fee is realized as
+    // fresh LP, minted straight to the fee-collector.
     SHARES.update(
         deps.storage,
         (bot_id, collector),

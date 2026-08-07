@@ -24,6 +24,7 @@ pub struct Config {
     pub last_cell: u32,
     pub fee_registry: Option<Addr>,
     pub fee_collector: Option<Addr>,
+    pub proxy: Option<Addr>,
 }
 
 #[cw_serde]

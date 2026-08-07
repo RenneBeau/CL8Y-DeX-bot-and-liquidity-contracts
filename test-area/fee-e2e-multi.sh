@@ -112,6 +112,13 @@ BV_CODE_ID=$(store_contract "$PROJECT_ROOT/rebalancer-system/target/wasm32-unkno
 SP_CODE_ID=$(store_contract "$PROJECT_ROOT/rebalancer-system/target/wasm32-unknown-unknown/release/cl8y_swap_proxy.wasm")
 log "code ids: market_grid=$MG_CODE_ID bot_vault=$BV_CODE_ID swap_proxy=$SP_CODE_ID"
 
+log "-- deploy ONE shared swap-proxy used by both the market-grid and the rebalancer --"
+SP_INIT=$(jq -nc --arg admin "$TEST_ADDRESS" --arg cl8y "$DUMMY_CL8Y" \
+    --arg registry "$FEE_REGISTRY" \
+    '{admin:$admin,cl8y_token:$cl8y,fee_registry:$registry}')
+SP_PROXY=$(instantiate_contract "$SP_CODE_ID" "$SP_INIT" cl8y-fee-e2e-shared-swap-proxy)
+log "shared swap-proxy: $SP_PROXY"
+
 POOL=$(query_smart "$PAIR_ADDRESS" '{"pool":{}}')
 RESERVE_0=$(jq -r '.data.assets[0].amount' <<<"$POOL")
 RESERVE_1=$(jq -r '.data.assets[1].amount' <<<"$POOL")
@@ -135,13 +142,20 @@ refresh_twap 100000000
 MG_INIT=$(jq -nc --arg admin "$TEST_ADDRESS" --arg pair "$PAIR_ADDRESS" --argjson twap 60 \
     --argjson grid_count 5 --arg lower "$LOWER_PRICE" --arg upper "$UPPER_PRICE" \
     --arg registry "$FEE_REGISTRY" --arg collector "$FEE_COLLECTOR" \
+    --arg proxy "$SP_PROXY" \
     '{admin:$admin,pair:$pair,twap_window_seconds:$twap,grid_count:$grid_count,
       lower_price:$lower,upper_price:$upper,allocation_tolerance_bps:600,
       max_spread:"0.1",max_execution_deviation_bps:1000,quote_slippage_bps:500,
       max_spot_twap_deviation_bps:1000,
-      fee_registry:$registry,fee_collector:$collector}')
+      fee_registry:$registry,fee_collector:$collector,proxy:$proxy}')
 MG_VAULT=$(instantiate_contract "$MG_CODE_ID" "$MG_INIT" cl8y-fee-e2e-market-grid)
 log "market-grid vault: $MG_VAULT"
+
+log "-- register the market-grid route on the SHARED proxy (single provider) --"
+MG_REG=$(jq -nc --arg vault "$MG_VAULT" --arg pair "$PAIR_ADDRESS" \
+    '{register_vault:{vault:$vault,pair:$pair}}')
+execute_from "$TEST_ADDRESS" "$SP_PROXY" "$MG_REG" >/dev/null
+log "market-grid route registered on shared proxy"
 
 log "-- deposit EMBER only (token0), forcing allocation deviation = 10000 bps --"
 deposit_market_token test1 "$EMBER_ADDRESS" "$MG_VAULT" 10000000000
@@ -159,8 +173,10 @@ MG_TIER=$(tx_event_value "$MG_RES" fee_tier)
 MG_SRC=$(tx_event_value "$MG_RES" fee_source)
 MG_SHARES=$(tx_event_value "$MG_RES" fee_shares)
 log "market-grid fee: fee_bps=$MG_BPS fee_tier=$MG_TIER fee_source=$MG_SRC fee_shares=$MG_SHARES"
-test "$MG_BPS" = "180"
-test "$MG_TIER" = ""
+# The market-grid bills its operator (config.admin = TEST_ADDRESS), who holds
+# 200 CL8Y -> tier 5 -> 50% discount -> 90 bps (see FEE_TIER_PROTOCOL §5).
+test "$MG_BPS" = "90"
+test "$MG_TIER" = "5"
 test "$MG_SRC" = "live"
 test "$MG_SHARES" -gt 0
 
@@ -186,17 +202,13 @@ log "treasury received EMBER +$((MSG_TREASURY_0_AFTER - MSG_TREASURY_0_BEFORE)) 
 
 ############################################################################
 echo
-log "############ REBALANCER (bot-vault via swap-proxy) ############"
+log "############ REBALANCER (bot-vault via the SAME shared swap-proxy) ############"
 echo
-SP_INIT=$(jq -nc --arg admin "$TEST_ADDRESS" --arg cl8y "$DUMMY_CL8Y" \
-    --arg registry "$FEE_REGISTRY" \
-    '{admin:$admin,cl8y_token:$cl8y,fee_registry:$registry}')
-SP_PROXY=$(instantiate_contract "$SP_CODE_ID" "$SP_INIT" cl8y-fee-e2e-swap-proxy)
-log "fresh swap-proxy: $SP_PROXY"
+log "reusing shared proxy $SP_PROXY (already registered market-grid route)"
 
 refresh_twap 100000000
 BV_INIT=$(jq -nc --arg admin "$TEST_ADDRESS" --arg keeper "$GRID_KEEPER_ADDRESS" \
-    --arg proxy "$SP_PROXY" --arg pair "$PAIR_ADDRESS" --argjson twap 60 \
+    --arg proxy "$SP_PROXY" --arg pair "$SECOND_PAIR_ADDRESS" --argjson twap 60 \
     --argjson liquidity_code_id 1 \
     --arg registry "$FEE_REGISTRY" --arg collector "$FEE_COLLECTOR" \
     '{admin:$admin,keeper:$keeper,proxy:$proxy,pair:$pair,twap_window_seconds:$twap,
@@ -208,7 +220,7 @@ BV_INIT=$(jq -nc --arg admin "$TEST_ADDRESS" --arg keeper "$GRID_KEEPER_ADDRESS"
 BV_VAULT=$(instantiate_contract "$BV_CODE_ID" "$BV_INIT" cl8y-fee-e2e-bot-vault)
 log "bot-vault: $BV_VAULT"
 
-REG=$(jq -nc --arg vault "$BV_VAULT" --arg pair "$PAIR_ADDRESS" \
+REG=$(jq -nc --arg vault "$BV_VAULT" --arg pair "$SECOND_PAIR_ADDRESS" \
     '{register_vault:{vault:$vault,pair:$pair}}')
 execute_from "$TEST_ADDRESS" "$SP_PROXY" "$REG" >/dev/null
 log "swap-proxy route registered for bot-vault"
@@ -228,8 +240,9 @@ BV_TIER=$(tx_event_value "$BV_RES" fee_tier)
 BV_SRC=$(tx_event_value "$BV_RES" fee_source)
 BV_SHARES=$(tx_event_value "$BV_RES" fee_shares)
 log "rebalancer fee: fee_bps=$BV_BPS fee_tier=$BV_TIER fee_source=$BV_SRC fee_shares=$BV_SHARES"
-test "$BV_BPS" = "180"
-test "$BV_TIER" = ""
+# The rebalancer bills its operator (config.admin = TEST_ADDRESS, tier-5 -> 90 bps).
+test "$BV_BPS" = "90"
+test "$BV_TIER" = "5"
 test "$BV_SRC" = "live"
 test "$BV_SHARES" -gt 0
 

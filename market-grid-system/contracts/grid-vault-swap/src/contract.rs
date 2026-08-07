@@ -9,7 +9,7 @@ use cw20::{BalanceResponse, Cw20ExecuteMsg, Cw20QueryMsg, Cw20ReceiveMsg};
 use crate::error::ContractError;
 use crate::msg::{
     ExecuteMsg, GridStatusResponse, HybridSwapParams, InstantiateMsg, MigrateMsg, PairCw20HookMsg,
-    PairQueryMsg, PoolResponse, QueryMsg, ReceiveMsg,
+    PairQueryMsg, PoolResponse, QueryMsg, ReceiveMsg, SwapProxyHookMsg,
 };
 use crate::state::{Config, PendingSwap, CONFIG, PAUSED, PENDING_SWAP, SHARES, TOTAL_SHARES};
 
@@ -100,6 +100,11 @@ pub fn instantiate(
         .as_deref()
         .map(|address| deps.api.addr_validate(address))
         .transpose()?;
+    let proxy = msg
+        .proxy
+        .as_deref()
+        .map(|address| deps.api.addr_validate(address))
+        .transpose()?;
     validate_risk_controls(
         max_trade_bps,
         max_execution_deviation_bps,
@@ -136,6 +141,7 @@ pub fn instantiate(
         last_cell: initial_cell,
         fee_registry,
         fee_collector,
+        proxy,
     };
     PAUSED.save(deps.storage, &false)?;
     TOTAL_SHARES.save(deps.storage, &Uint128::zero())?;
@@ -172,6 +178,7 @@ pub fn execute(
             max_spread,
             fee_registry,
             fee_collector,
+            proxy,
         } => execute_update_config(
             deps,
             env,
@@ -188,6 +195,7 @@ pub fn execute(
             max_spread,
             fee_registry,
             fee_collector,
+            proxy,
         ),
         ExecuteMsg::TransferAdmin { admin } => execute_transfer_admin(deps, info, admin),
         ExecuteMsg::AcceptAdmin {} => execute_accept_admin(deps, info),
@@ -457,6 +465,7 @@ fn execute_update_config(
     max_spread: Option<Decimal>,
     fee_registry: Option<String>,
     fee_collector: Option<String>,
+    proxy: Option<String>,
 ) -> Result<Response, ContractError> {
     assert_no_funds(&info)?;
     let mut config = CONFIG.load(deps.storage)?;
@@ -472,6 +481,12 @@ fn execute_update_config(
     }
     if let Some(value) = fee_collector {
         config.fee_collector = match value.as_str() {
+            "" => None,
+            address => Some(deps.api.addr_validate(address)?),
+        };
+    }
+    if let Some(value) = proxy {
+        config.proxy = match value.as_str() {
             "" => None,
             address => Some(deps.api.addr_validate(address)?),
         };
@@ -644,27 +659,11 @@ fn charge_fee(
     if fee_value.is_zero() {
         return Ok(ChargeFee::None);
     }
-    let user_value = value_in_token0
-        .checked_sub(fee_value)
-        .map_err(StdError::overflow)?;
 
-    // Mint shares as true growth (correct dilution): the user keeps
-    // `value − fee`, the fee LP goes to the fee-collector.
-    if !user_value.is_zero() {
-        SHARES.update(
-            deps.storage,
-            config.admin.as_str(),
-            |current: Option<Uint128>| -> StdResult<Uint128> {
-                current
-                    .unwrap_or_default()
-                    .checked_add(user_value)
-                    .map_err(StdError::overflow)
-            },
-        )?;
-        TOTAL_SHARES.update(deps.storage, |total| -> StdResult<Uint128> {
-            total.checked_add(user_value).map_err(StdError::overflow)
-        })?;
-    }
+    // Single-user model: the user's position already exists (deposited LP). A fill
+    // grows the pooled assets by `value_in_token0` but mints NO extra LP to the
+    // user — their existing shares simply appreciate via NAV. Only the protocol fee
+    // is realized as fresh LP, minted straight to the fee-collector.
     SHARES.update(
         deps.storage,
         collector.as_str(),
@@ -798,6 +797,7 @@ fn query_config(deps: Deps) -> StdResult<crate::msg::ConfigResponse> {
         paused: PAUSED.may_load(deps.storage)?.unwrap_or(true),
         fee_registry: config.fee_registry.as_ref().map(ToString::to_string),
         fee_collector: config.fee_collector.as_ref().map(ToString::to_string),
+        proxy: config.proxy.as_ref().map(ToString::to_string),
     })
 }
 
@@ -1112,6 +1112,27 @@ fn swap_message(
     min_return: Uint128,
     deadline: u64,
 ) -> StdResult<WasmMsg> {
+    // Unless a shared swap-proxy is configured, the vault swaps straight into
+    // the pair. When `proxy` is set, the offer token is sent to the single,
+    // whitelistable provider (the DEX whitelists one proxy), which routes the
+    // swap back to this vault — the "two fee planes" of FEE_TIER_PROTOCOL §2.
+    if let Some(proxy) = &config.proxy {
+        let hook = SwapProxyHookMsg::Swap {
+            pair: config.pair.to_string(),
+            min_return,
+            max_spread: config.max_spread,
+            deadline,
+        };
+        return Ok(WasmMsg::Execute {
+            contract_addr: offer_token.to_string(),
+            msg: to_json_binary(&Cw20ExecuteMsg::Send {
+                contract: proxy.to_string(),
+                amount,
+                msg: to_json_binary(&hook)?,
+            })?,
+            funds: vec![],
+        });
+    }
     let hook = PairCw20HookMsg::Swap {
         belief_price: None,
         max_spread: Some(config.max_spread),
@@ -1367,6 +1388,7 @@ mod tests {
             last_cell: 2,
             fee_registry: None,
             fee_collector: None,
+            proxy: None,
         };
         assert_eq!(
             grid_cell(
@@ -1590,6 +1612,7 @@ mod tests {
             last_cell: 2,
             fee_registry: None,
             fee_collector: None,
+            proxy: None,
         }
     }
 }
