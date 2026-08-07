@@ -206,36 +206,39 @@ holders lose strictly less LP.
   overrides (dummy fallback on a local chain) and wires `update_fee_config`
   onto the bot-vault.
 
-## Uniform Single-User Mint Rework (2026-08-07)
+## Uniform Single-User Fee-Only Mint Rework (2026-08-07)
 
-Following the CMM decision, the fee mechanic is **unified across all four workspaces
-into one model (A, single user)**: whichever venue, a fill crediting `V` token-0
-value resolves the **single operating user's** effective fee
-(`fee = V × fee_bps / 10 000`), **mints `V − fee` LP to the user and `fee` LP to the
-fee-collector**, growing supply by `V` (correct dilution, no burn, no pooled
-enumeration).
+Following the CMM decision, the fee mechanic is **unified across all venues into one
+model (B, fee-only mint, single user)**: whichever venue, a fill crediting `V`
+token-0 value resolves the **single operating user's** effective fee
+(`fee = V × fee_bps / 10 000`) and **mints ONLY `fee` LP to the fee-collector** — it
+does **not** mint LP to the user. The user's already-deposited position simply
+appreciates via NAV (the fill's `V` assets land in the pool holdings; supply grows
+by `fee`). No pooled enumeration, no burn.
 
 Changes per contract (see `FEE_TIER_PROTOCOL.md` §5/7/8/9):
 
 - `bot-liquidity` adds `ExecuteMsg::MintTo { recipient, amount }` (vault-gated,
   routes through the existing internal CW20 `Mint`).
-- `bot-vault` (rebalancer) `charge_fee` switches from the pooled value claim
-  (`FEE_SHARES` / `TOTAL_FEE_SHARES` + `RedeemShares`) to the single-user mint
-  (`config.admin`). `FEE_SHARES`/`TOTAL_FEE_SHARES`, `execute_redeem_fee_shares`.
-  and the `RedeemShares` variant are removed; `Shares` now returns the collector's
-  real external `bot-liquidity` LP balance.
-- `fee-collector` becomes liquidity-aware: it branches on the vault's
-  `Config.liquidity_contract` — set (rebalancer) → the collector withdraws its
-  external LP via `bot-liquidity` `Withdraw` (pro-rata); unset (grids) → sends
-  `RedeemShares` to the vault as before.
-- `market-grid` (`grid-vault-swap`) `charge_fee`: per-LP burn → single-user mint
-  (`config.admin`) on its internal `SHARES` ledger.
-- `limit-grid` (`grid-vault`) `charge_fee`: collector-only dilution mint →
-  model A (`bot.owner`), minting `V − fee` to the owner and `fee` to the collector.
+- `bot-vault` (rebalancer) `charge_fee` mints only the fee LP to the collector
+  (`config.admin` is billed at their own tier). `FEE_SHARES`/`TOTAL_FEE_SHARES`,
+  `execute_redeem_fee_shares`, and the `RedeemShares` variant are removed; `Shares`
+  now returns the collector's real external `bot-liquidity` LP balance.
+- `fee-collector` is liquidity-aware and stateless per vault (one collector serves
+  every bot): it branches on the vault's `Config.liquidity_contract` — set
+  (rebalancer) → the collector withdraws its external LP via `bot-liquidity`
+  `Withdraw` (pro-rata); unset (grids) → sends `RedeemShares` to the vault.
+- `market-grid` (`grid-vault-swap`) `charge_fee`: fee-only mint (`config.admin`) on
+  its internal `SHARES` ledger. Rebalance swaps route through the shared
+  `swap-proxy` (single provider, whitelisted = 0 DEX fee) when configured.
+- `limit-grid` (`grid-vault`) `charge_fee`: fee-only mint (`bot.owner`) — no user
+  LP is minted on a reconcile.
 
-Tests updated/added to cover the single-user mint (`charge_fee_mints_user_minus_fee_and_fee_to_collector`,
+Tests updated/added to cover the fee-only mint
+(`charge_fee_mints_only_fee_lp_to_collector`,
 `rebalance_mints_fee_lp_to_collector_and_can_redistribute_to_treasury`,
-`single_user_is_billed_at_the_admin_tier`, `protocol_fee_mints_collector_lp_and_redeems`).
+`single_user_is_billed_at_the_admin_tier`, `protocol_fee_mints_collector_lp_and_redeems`,
+`tier9_rebalance_through_zero_fee_proxy_collector_gets_exact_9bps`).
 
 Gates (all green, `cargo fmt --check` + `cargo clippy --all-targets -- -D warnings` +
 `cargo test --all-targets --locked`):
@@ -244,13 +247,33 @@ Gates (all green, `cargo fmt --check` + `cargo clippy --all-targets -- -D warnin
 |---|---|---|---|
 | `rebalancer-system` | 30 | 4 | 34 |
 | `fee-system` | 18 | 4 | 22 |
-| `market-grid-system` | 10 | 11 | 21 |
+| `market-grid-system` | 10 | 13 | 23 |
 | `limit-grid-system` | 29 | 21 | 50 |
 
-127 tests passed across the four workspaces; Clippy was strict (`-D warnings`) with
-zero findings everywhere. The on-chain `LocalTerra` and CI evidence from the earlier
-sections predates this rework and describes the superseded per-LP / value-claim
-behaviour; it must be re-run against this revision before an economic claim.
+129 tests passed across the four workspaces; Clippy was strict (`-D warnings`) with
+zero findings everywhere.
+
+### On-chain fee E2E (LocalTerra, 2026-08-07, single shared collector + treasury)
+
+All venues are wired to **one** `fee-registry`, **one** `fee-collector` and **one**
+`fee-treasury`; the market-grid and rebalancer share **one** `swap-proxy`.
+
+- **limit-grid** (`fee-e2e-test.sh`): tier-5 holder → 90 bps (live); zero-CL8Y owner
+  → 180 bps. Collector LP grew per fill; `collect` → treasury EMBER +8283, CORAL
+  +22635; collector shares → 0.
+- **market-grid** (`fee-e2e-multi.sh`): rebalance routed through the shared proxy;
+  fee 90 bps tier-5 live; `fee_shares=17,361,905` LP minted to the collector
+  (matches); `collect` → treasury EMBER +13,865,450 CORAL +1,910,513; collector
+  shares → 0.
+- **1000-EMBER market-grid** (`fee-e2e-market-1000.sh`): seed = 1000 EMBER;
+  rebalance swapped ~195.8 EMBER (0.90% of ~195,822,444 raw); `fee_shares=1,762,402`
+  → collector LP; `collect` → treasury EMBER +1,407,441 CORAL +190,197; collector
+  shares → 0. Confirms the fee-only mint on a 1000/grid pool.
+- **rebalancer** (`fee-e2e-multi.sh`): route registered on the same proxy, but the
+  leg currently reports no fee because the E2E does not provision `bot-liquidity`
+  (`config.liquidity_contract` unset); per §7 the collector then realizes via the
+  internal vault path only once that LP pool is set. This is a script-wiring gap,
+  not a contract defect.
 
 ## Existing CI Evidence
 
