@@ -10,7 +10,7 @@ license = "Apache-2.0"
 [workspace.dependencies]
 cosmwasm-schema = "1.5.9"
 cosmwasm-std = "1.5.11"
-cw-storage-plus = "1.2.0"
+cw-storage-plus = "3.0.1"
 cw2 = "1.1.2"
 cw-utils = "1.0.3"
 cw20 = "1.1.2"
