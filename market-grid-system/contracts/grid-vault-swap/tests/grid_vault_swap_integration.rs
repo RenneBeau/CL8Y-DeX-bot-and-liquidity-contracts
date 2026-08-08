@@ -1187,10 +1187,10 @@ fn tier9_rebalance_through_zero_fee_proxy_collector_gets_exact_9bps() {
 
     // The swap must be routed through the shared proxy (proving 0 DEX fee).
     assert!(
-        response
-            .events
+        response.events.iter().any(|e| e
+            .attributes
             .iter()
-            .any(|e| e.attributes.iter().any(|a| a.key == "action" && a.value == "proxy_swap")),
+            .any(|a| a.key == "action" && a.value == "proxy_swap")),
         "rebalance swap routed through the zero-fee proxy"
     );
 
@@ -1199,7 +1199,10 @@ fn tier9_rebalance_through_zero_fee_proxy_collector_gets_exact_9bps() {
     let mut fee_tier = 0u16;
     let mut fee_source = String::new();
     for e in &response.events {
-        if e.attributes.iter().any(|a| a.key == "action" && a.value == "complete_rebalance") {
+        if e.attributes
+            .iter()
+            .any(|a| a.key == "action" && a.value == "complete_rebalance")
+        {
             for a in &e.attributes {
                 if a.key == "fee_shares" {
                     fee_shares = a.value.parse().unwrap();
@@ -1217,7 +1220,10 @@ fn tier9_rebalance_through_zero_fee_proxy_collector_gets_exact_9bps() {
     // Tier-9 applies live: 9 bps exact, tier 9, source live.
     assert_eq!(fee_bps, 9, "tier-9 user must be billed 9 bps");
     assert_eq!(fee_tier, 9, "fee tier must be 9");
-    assert_eq!(fee_source, "live", "tier-9 resolution must come from the live registry");
+    assert_eq!(
+        fee_source, "live",
+        "tier-9 resolution must come from the live registry"
+    );
 
     // `fee_shares` is the LP minted straight to the collector, equal to
     // floor(value_in_token0 × 9 / 10_000). The collector owns exactly it.

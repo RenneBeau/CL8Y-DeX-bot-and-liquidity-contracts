@@ -116,8 +116,7 @@ fn execute_register_vault(
         .query_wasm_smart(&vault, &VaultQueryMsg::Config {})?;
     if vault_config_raw.pair != pair
         || vault_config_raw.proxy.as_deref() != Some(env.contract.address.as_str())
-        || vault_config_raw.asset_tokens
-            != asset_tokens.clone().map(|addr| addr.to_string())
+        || vault_config_raw.asset_tokens != asset_tokens.clone().map(|addr| addr.to_string())
     {
         return Err(ContractError::InvalidRoute);
     }

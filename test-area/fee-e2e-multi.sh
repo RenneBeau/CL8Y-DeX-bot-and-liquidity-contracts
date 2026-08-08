@@ -110,7 +110,8 @@ log "== store market-grid + rebalancer wasms =="
 MG_CODE_ID=$(store_contract "$PROJECT_ROOT/market-grid-system/target/wasm32-unknown-unknown/release/cl8y_grid_vault_swap.wasm")
 BV_CODE_ID=$(store_contract "$PROJECT_ROOT/rebalancer-system/target/wasm32-unknown-unknown/release/cl8y_bot_vault.wasm")
 SP_CODE_ID=$(store_contract "$PROJECT_ROOT/rebalancer-system/target/wasm32-unknown-unknown/release/cl8y_swap_proxy.wasm")
-log "code ids: market_grid=$MG_CODE_ID bot_vault=$BV_CODE_ID swap_proxy=$SP_CODE_ID"
+LIQ_CODE_ID=$(store_contract "$PROJECT_ROOT/rebalancer-system/target/wasm32-unknown-unknown/release/cl8y_bot_liquidity.wasm")
+log "code ids: market_grid=$MG_CODE_ID bot_vault=$BV_CODE_ID swap_proxy=$SP_CODE_ID bot_liquidity=$LIQ_CODE_ID"
 
 log "-- deploy ONE shared swap-proxy used by both the market-grid and the rebalancer --"
 SP_INIT=$(jq -nc --arg admin "$TEST_ADDRESS" --arg cl8y "$DUMMY_CL8Y" \
@@ -209,7 +210,7 @@ log "reusing shared proxy $SP_PROXY (already registered market-grid route)"
 refresh_twap 100000000
 BV_INIT=$(jq -nc --arg admin "$TEST_ADDRESS" --arg keeper "$GRID_KEEPER_ADDRESS" \
     --arg proxy "$SP_PROXY" --arg pair "$SECOND_PAIR_ADDRESS" --argjson twap 60 \
-    --argjson liquidity_code_id 1 \
+    --argjson liquidity_code_id "$LIQ_CODE_ID" \
     --arg registry "$FEE_REGISTRY" --arg collector "$FEE_COLLECTOR" \
     '{admin:$admin,keeper:$keeper,proxy:$proxy,pair:$pair,twap_window_seconds:$twap,
       liquidity_code_id:$liquidity_code_id,allocation_tolerance_bps:600,
@@ -225,12 +226,43 @@ REG=$(jq -nc --arg vault "$BV_VAULT" --arg pair "$SECOND_PAIR_ADDRESS" \
 execute_from "$TEST_ADDRESS" "$SP_PROXY" "$REG" >/dev/null
 log "swap-proxy route registered for bot-vault"
 
-log "-- fund bot-vault with EMBER only (token0), forcing allocation deviation --"
-transfer_token_to test1 "$EMBER_ADDRESS" "$BV_VAULT" 10000000000
+# The rebalancer fee-only mint (model B, FEE_TIER_PROTOCOL §7) requires the
+# bot-liquidity LP pool to exist and be wired onto the vault. Without it the
+# vault holds the tokens directly and charge_fee has no LP to mint into, so it
+# skips the fee. Provision the pool so the fee path is exercised end to end.
+LIQ_INIT=$(jq -nc --arg admin "$TEST_ADDRESS" --arg vault "$BV_VAULT" \
+    '{admin:$admin,vault:$vault,name:"Fee E2E Bot Liquidity",
+      symbol:"FEELIQ",decimals:6,minimum_initial_deposit:"100000",marketing:null}')
+BV_LIQUIDITY=$(instantiate_contract "$LIQ_CODE_ID" "$LIQ_INIT" cl8y-fee-e2e-bot-liquidity)
+SET_LIQ=$(jq -nc --arg liquidity "$BV_LIQUIDITY" \
+    '{set_liquidity_contract:{liquidity_contract:$liquidity}}')
+execute_from "$TEST_ADDRESS" "$BV_VAULT" "$SET_LIQ" >/dev/null
+log "bot-liquidity pool: $BV_LIQUIDITY wired onto bot-vault"
+
+log "-- bootstrap the bot-liquidity pool with a proportional deposit --"
+BV_POOL=$(query_smart "$SECOND_PAIR_ADDRESS" '{"pool":{}}')
+BV_RES_0=$(jq -r '.data.assets[0].amount' <<<"$BV_POOL")
+BV_RES_1=$(jq -r '.data.assets[1].amount' <<<"$BV_POOL")
+BV_A0=$((BV_RES_0 / 50))
+BV_A1=$((BV_RES_1 / 50))
+APPROVE_L0=$(jq -nc --arg spender "$BV_LIQUIDITY" --arg amount "$BV_A0" \
+    '{increase_allowance:{spender:$spender,amount:$amount,expires:null}}')
+APPROVE_L1=$(jq -nc --arg spender "$BV_LIQUIDITY" --arg amount "$BV_A1" \
+    '{increase_allowance:{spender:$spender,amount:$amount,expires:null}}')
+execute_from "$TEST_ADDRESS" "$LUNC_C_ADDRESS" "$APPROVE_L0" >/dev/null
+execute_from "$TEST_ADDRESS" "$EMBER_ADDRESS" "$APPROVE_L1" >/dev/null
+BV_DEADLINE_D=$(($(now_sec) + 300))
+BV_DEPOSIT=$(jq -nc --arg a0 "$BV_A0" --arg a1 "$BV_A1" --argjson deadline "$BV_DEADLINE_D" \
+    '{deposit:{amounts:[$a0,$a1],min_shares:"1",deadline:$deadline,swap:null}}')
+execute_from "$TEST_ADDRESS" "$BV_LIQUIDITY" "$BV_DEPOSIT" >/dev/null
+log "bot-liquidity bootstrapped (deposit $BV_A0 + $BV_A1)"
+
+log "-- inject EMBER only on top, forcing allocation deviation --"
+BV_INJECT=$(( BV_A1 * 4 + 10000000000 ))
+transfer_token_to test1 "$EMBER_ADDRESS" "$BV_VAULT" "$BV_INJECT"
 BV_STATUS=$(query_smart "$BV_VAULT" '{"rebalance_status":{}}')
-jq -e '.data.should_rebalance == true and .data.allocation_deviation_bps == 10000' \
-    <<<"$BV_STATUS" >/dev/null
-log "rebalance_status: should_rebalance=true deviation=10000"
+jq -e '.data.should_rebalance == true' <<<"$BV_STATUS" >/dev/null
+log "rebalance_status: should_rebalance=true deviation=$(jq -r '.data.allocation_deviation_bps' <<<"$BV_STATUS")"
 
 log "-- keeper rebalance via swap-proxy; fee accrued in reply --"
 BV_DEADLINE=$(($(now_sec) + 300))
@@ -253,18 +285,18 @@ test "$BV_COLLECTOR_SHARES" = "$BV_SHARES"
 log "collector fee-shares in bot-vault: $BV_COLLECTOR_SHARES (matches fee_shares)"
 
 log "-- collector collect -> dummy treasury (pro-rata of both balances) --"
-RB_TREASURY_0_BEFORE=$(cw20_balance_of "$EMBER_ADDRESS" "$FEE_TREASURY")
-RB_TREASURY_1_BEFORE=$(cw20_balance_of "$CORAL_ADDRESS" "$FEE_TREASURY")
+RB_TREASURY_0_BEFORE=$(cw20_balance_of "$LUNC_C_ADDRESS" "$FEE_TREASURY")
+RB_TREASURY_1_BEFORE=$(cw20_balance_of "$EMBER_ADDRESS" "$FEE_TREASURY")
 RCOLLECT=$(jq -nc --arg vault "$BV_VAULT" --argjson bot_id 0 '{collect:{vault:$vault,bot_id:$bot_id}}')
 wait_tx "$(terrad_tx_from gridkeeper wasm execute "$FEE_COLLECTOR" "$RCOLLECT" | jq -r '.txhash')" >/dev/null
-RB_TREASURY_0_AFTER=$(cw20_balance_of "$EMBER_ADDRESS" "$FEE_TREASURY")
-RB_TREASURY_1_AFTER=$(cw20_balance_of "$CORAL_ADDRESS" "$FEE_TREASURY")
+RB_TREASURY_0_AFTER=$(cw20_balance_of "$LUNC_C_ADDRESS" "$FEE_TREASURY")
+RB_TREASURY_1_AFTER=$(cw20_balance_of "$EMBER_ADDRESS" "$FEE_TREASURY")
 test "$RB_TREASURY_0_AFTER" -gt "$RB_TREASURY_0_BEFORE"
 test "$RB_TREASURY_1_AFTER" -gt "$RB_TREASURY_1_BEFORE"
 BV_COLLECTOR_SHARES_ZERO=$(query_smart "$BV_VAULT" \
     "{\"shares\":{\"bot_id\":0,\"address\":\"$FEE_COLLECTOR\"}}" | jq -r '.data.shares')
 test "$BV_COLLECTOR_SHARES_ZERO" = "0"
-log "treasury received EMBER +$((RB_TREASURY_0_AFTER - RB_TREASURY_0_BEFORE)) CORAL +$((RB_TREASURY_1_AFTER - RB_TREASURY_1_BEFORE)); collector fee-shares now 0"
+log "treasury received LUNC-C +$((RB_TREASURY_0_AFTER - RB_TREASURY_0_BEFORE)) EMBER +$((RB_TREASURY_1_AFTER - RB_TREASURY_1_BEFORE)); collector fee-shares now 0"
 
 echo
 log "ALL PASS: market-grid + rebalancer per-execution fees verified on-chain"

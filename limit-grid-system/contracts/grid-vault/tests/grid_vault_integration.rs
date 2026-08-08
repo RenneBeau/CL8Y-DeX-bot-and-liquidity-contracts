@@ -2019,8 +2019,7 @@ fn protocol_fee_mints_collector_lp_and_redeems() {
         )
         .unwrap();
     assert_eq!(
-        owner_shares.shares,
-        initial_shares,
+        owner_shares.shares, initial_shares,
         "the user's LP is not minted on a fill (single-user NAV growth)"
     );
 

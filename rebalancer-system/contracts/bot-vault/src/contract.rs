@@ -1231,7 +1231,7 @@ fn charge_fee(
     if fee_bps == 0 {
         return Ok((ChargeFee::None, vec![]));
     }
-let fee_lp = value_in_token0.multiply_ratio(fee_bps, 10_000u16);
+    let fee_lp = value_in_token0.multiply_ratio(fee_bps, 10_000u16);
     if fee_lp.is_zero() {
         return Ok((ChargeFee::None, vec![]));
     }
