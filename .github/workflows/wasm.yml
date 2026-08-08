@@ -11,6 +11,9 @@ permissions:
 
 env:
   OPTIMIZER_IMAGE: cosmwasm/workspace-optimizer:0.16.1@sha256:b9c92b2900b7ebaab3499203615c1b8589592bc557355ed3432e48851ffde69e
+  CL8Y_CANONICAL_FEE_COLLECTOR: terra1x46rqay4d3cssq8gxxvqz8xt6nwlz4td20k38v
+  CL8Y_CANONICAL_FEE_REGISTRY: terra1mpys68uwajmcjn6lwctan39v5sf4yk3agxp8pns02kqfnym3racsunwpqy
+  CL8Y_CANONICAL_SWAP_PROXY: terra16j5u6ey7a84g40sr3gd94nzg5w5fm45046k9s2347qhfpwm5fr6sem3lr2
 
 jobs:
   build:
@@ -22,9 +25,12 @@ jobs:
           mkdir -p evidence artifacts/release
           SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)
           export SOURCE_DATE_EPOCH
-          .github/scripts/reproducible-build.sh rebalancer-system artifacts/release 2>&1 | tee evidence/rebalancer-build.log
-          .github/scripts/reproducible-build.sh market-grid-system artifacts/release 2>&1 | tee evidence/grid-swap-build.log
-          .github/scripts/reproducible-build.sh limit-grid-system artifacts/release 2>&1 | tee evidence/limit-grid-system-build.log
+          for workspace in rebalancer-system market-grid-system limit-grid-system fee-system; do
+            .github/scripts/reproducible-build.sh "$workspace" artifacts/release default \
+              2>&1 | tee "evidence/$workspace-default-build.log"
+            .github/scripts/reproducible-build.sh "$workspace" artifacts/release mainnet \
+              2>&1 | tee "evidence/$workspace-mainnet-build.log"
+          done
           (cd artifacts/release && sha256sum -- *.wasm | LC_ALL=C sort) | tee evidence/checksums.txt
       - name: Upload optimized Wasm
         if: always()

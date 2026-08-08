@@ -1,5 +1,7 @@
 import json
+import math
 import time
+from enum import Enum
 
 from .db import Database
 from .rpc import RpcError
@@ -10,6 +12,13 @@ ACTIVE_BATCH_STATES = (
 )
 MAX_FAILURES = 3
 RETRY_BACKOFF_SECONDS = 60
+
+
+class TxResultCode(str, Enum):
+    CHECK_FAILED = "check_failed"
+    DELIVER_FAILED = "deliver_failed"
+    PAGE_REVERTED = "page_reverted"
+    UNKNOWN_BROADCAST = "unknown_broadcast"
 
 
 def _has_reverted_grid_page(response: dict) -> bool:
@@ -31,6 +40,13 @@ class Keeper:
                  confirmation_blocks: int = 0, latest_height=None):
         if max_orders < 1:
             raise ValueError("max_orders must be positive")
+        if not math.isfinite(poll_seconds) or not math.isfinite(timeout_seconds) \
+                or poll_seconds <= 0 or timeout_seconds <= 0:
+            raise ValueError("poll_seconds and timeout_seconds must be positive")
+        if confirmation_blocks < 0:
+            raise ValueError("confirmation_blocks must not be negative")
+        if confirmation_blocks and latest_height is None:
+            raise ValueError("latest_height is required when confirmation_blocks is nonzero")
         self.db, self.terrad, self.max_orders = db, terrad, max_orders
         self.poll_seconds, self.timeout_seconds = poll_seconds, timeout_seconds
         self.sleep, self.clock = sleep, clock
@@ -39,7 +55,8 @@ class Keeper:
         self.latest_height = latest_height
 
     def _record_failure(self, batch_id: int, attempt_id: int, attempt_state: str,
-                        error: str, response: dict | None = None, deliver_code: int | None = None) -> str:
+                         error: str, response: dict | None = None, deliver_code: int | None = None,
+                         result_code: TxResultCode | None = None) -> str:
         batch = self.db.conn.execute("SELECT failure_count FROM batches WHERE id=?", (batch_id,)).fetchone()
         failures = int(batch["failure_count"]) + 1
         state = "intervention" if failures >= MAX_FAILURES else "ready"
@@ -53,7 +70,7 @@ class Keeper:
             )
             conn.execute(
                 "UPDATE batches SET state=?,error=?,failure_count=?,next_retry_at=? WHERE id=?",
-                (state, error, failures, next_retry, batch_id),
+                (state, f"{(result_code or TxResultCode.DELIVER_FAILED).value}:{error}", failures, next_retry, batch_id),
             )
         return state
 
@@ -74,7 +91,7 @@ class Keeper:
             ).fetchall()
             if not order_rows:
                 return None
-            events = []
+            events: list[int] = []
             items = []
             through = 0
             for order in order_rows:
@@ -164,19 +181,37 @@ class Keeper:
                 conn.execute("UPDATE batches SET state='unknown',error=? WHERE id=?", (str(exc), batch_id))
             return "unknown"
         tx_response = response.get("tx_response", response)
-        code = int(tx_response.get("code", 0) or 0)
+        if not isinstance(tx_response, dict) or "code" not in tx_response:
+            error = "broadcast response omitted transaction code"
+            with self.db.transaction(immediate=True) as conn:
+                conn.execute("UPDATE tx_attempts SET state='unknown',error=?,response_json=?,updated_at=? WHERE id=?",
+                             (error, json.dumps(response, sort_keys=True), int(time.time()), attempt_id))
+                conn.execute("UPDATE batches SET state='unknown',error=? WHERE id=?", (error, batch_id))
+            return "unknown"
+        try:
+            code = int(tx_response["code"])
+        except (TypeError, ValueError):
+            code = None
         tx_hash = tx_response.get("txhash") or tx_response.get("hash")
+        if code is None or not tx_hash:
+            error = "broadcast response contained invalid code or omitted tx hash"
+            with self.db.transaction(immediate=True) as conn:
+                conn.execute("UPDATE tx_attempts SET state='unknown',error=?,response_json=?,updated_at=? WHERE id=?",
+                             (error, json.dumps(response, sort_keys=True), int(time.time()), attempt_id))
+                conn.execute("UPDATE batches SET state='unknown',error=? WHERE id=?", (error, batch_id))
+            return "unknown"
         with self.db.transaction(immediate=True) as conn:
             conn.execute("UPDATE tx_attempts SET tx_hash=?,check_code=?,response_json=?,updated_at=? WHERE id=?",
                          (tx_hash, code, json.dumps(response, sort_keys=True), int(time.time()), attempt_id))
             conn.execute("UPDATE batches SET tx_hash=? WHERE id=?", (tx_hash, batch_id))
-            if code != 0 or not tx_hash:
+            if code != 0:
                 error = tx_response.get("raw_log") or tx_response.get("log") or "CheckTx failed or omitted tx hash"
             else:
                 conn.execute("UPDATE tx_attempts SET state='broadcast' WHERE id=?", (attempt_id,))
                 conn.execute("UPDATE batches SET state='broadcast' WHERE id=?", (batch_id,))
-        if code != 0 or not tx_hash:
-            self._record_failure(batch_id, attempt_id, "check_failed", error)
+        if code != 0:
+            self._record_failure(batch_id, attempt_id, "check_failed", error,
+                                 result_code=TxResultCode.CHECK_FAILED)
             return "check_failed"
         return self._poll(batch_id, attempt_id, tx_hash)
 
@@ -188,8 +223,18 @@ class Keeper:
             except RpcError:
                 response = None
             if response:
-                tx_response = response.get("tx_response", response)
-                tx_height = int(tx_response.get("height", 0) or 0)
+                try:
+                    tx_response = response.get("tx_response", response)
+                    observed_hash = tx_response.get("txhash") or tx_response.get("hash")
+                    if "code" not in tx_response or "height" not in tx_response or not observed_hash:
+                        raise ValueError
+                    tx_height = int(tx_response["height"])
+                    code = int(tx_response["code"])
+                    if tx_height <= 0 or observed_hash.lower() != tx_hash.lower():
+                        raise ValueError
+                except (AttributeError, TypeError, ValueError):
+                    response = None
+            if response:
                 if self.confirmation_blocks and (
                     not tx_height or self.latest_height() < tx_height + self.confirmation_blocks
                 ):
@@ -202,16 +247,17 @@ class Keeper:
                         return "timeout"
                     self.sleep(self.poll_seconds)
                     continue
-                code = int(tx_response.get("code", 0) or 0)
                 if code == 0:
                     if _has_reverted_grid_page(response):
                         error = "grid cancel or claim page reverted"
-                        self._record_failure(batch_id, attempt_id, "page_reverted", error, response, 0)
+                        self._record_failure(batch_id, attempt_id, "page_reverted", error, response, 0,
+                                             TxResultCode.PAGE_REVERTED)
                         return "page_reverted"
                     self._confirm(batch_id, attempt_id, tx_hash, response)
                     return "confirmed"
                 error = tx_response.get("raw_log") or tx_response.get("log") or "DeliverTx failed"
-                self._record_failure(batch_id, attempt_id, "deliver_failed", error, response, code)
+                self._record_failure(batch_id, attempt_id, "deliver_failed", error, response, code,
+                                     TxResultCode.DELIVER_FAILED)
                 return "deliver_failed"
             if self.clock() - start >= self.timeout_seconds:
                 with self.db.transaction(immediate=True) as conn:
@@ -221,10 +267,26 @@ class Keeper:
             self.sleep(self.poll_seconds)
 
     def _confirm(self, batch_id: int, attempt_id: int, tx_hash: str, response: dict) -> None:
+        tx_response = response.get("tx_response", response)
+        try:
+            tx_height = int(tx_response["height"])
+            observed_hash = tx_response.get("txhash") or tx_response.get("hash")
+            code = int(tx_response["code"])
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            raise ValueError("cannot confirm from incomplete transaction state") from exc
+        if tx_height <= 0 or code != 0 or not observed_hash or observed_hash.lower() != tx_hash.lower():
+            raise ValueError("cannot confirm from mismatched transaction state")
         with self.db.transaction(immediate=True) as conn:
             batch = conn.execute("SELECT vault_address,through_height FROM batches WHERE id=?", (batch_id,)).fetchone()
-            conn.execute("UPDATE raw_events SET reconciled_batch_id=? WHERE id IN "
-                         "(SELECT event_id FROM batch_events WHERE batch_id=?)", (batch_id, batch_id))
+            # The on-chain reconcile covers these order identities at execution height,
+            # including fills indexed after the immutable batch snapshot was frozen.
+            conn.execute(
+                "UPDATE raw_events SET reconciled_batch_id=? WHERE reconciled_batch_id IS NULL "
+                "AND vault_address=? AND height<=? AND EXISTS (SELECT 1 FROM batch_items i "
+                "WHERE i.batch_id=? AND i.pair_address=raw_events.pair_address "
+                "AND i.order_id=raw_events.order_id)",
+                (batch_id, batch["vault_address"], tx_height, batch_id),
+            )
             conn.execute("UPDATE tx_attempts SET state='confirmed',deliver_code=0,response_json=?,updated_at=? WHERE id=?",
                          (json.dumps(response, sort_keys=True), int(time.time()), attempt_id))
             conn.execute("UPDATE batches SET state='confirmed',confirmed_at=?,tx_hash=?,error=NULL WHERE id=?",

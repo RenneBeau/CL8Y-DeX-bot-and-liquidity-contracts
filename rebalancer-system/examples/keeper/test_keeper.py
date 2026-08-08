@@ -3,7 +3,7 @@ import os
 import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 from keeper import (
     TxTracker,
@@ -20,6 +20,11 @@ from keeper import (
     smart_query,
     tx_command,
     run_command,
+    ProcessLock,
+    StateIdentityError,
+    StateLockError,
+    resolve_state,
+    restore_backup,
 )
 
 
@@ -99,6 +104,82 @@ class TxTrackerTests(unittest.TestCase):
         self.assertIsNone(state["pending_plan"])
         self.assertIsNone(state["pending_since"])
         self.assertIsNone(state["suppressed_plan"])
+
+    def test_changed_chain_vault_or_signer_is_refused(self):
+        identity = {"chain_id": "chain1", "vault": "vault1", "signer": "os:key1",
+                    "protocol_kind": "rebalancer"}
+        TxTracker(self.path, identity).save()
+        for changed in ({**identity, "chain_id": "chain2"},
+                        {**identity, "vault": "vault2"},
+                        {**identity, "signer": "os:key2"}):
+            with self.assertRaises(StateIdentityError):
+                TxTracker(self.path, changed)
+
+    def test_process_lock_contention_is_nonblocking(self):
+        first = ProcessLock(self.path)
+        with self.assertRaises(StateLockError):
+            ProcessLock(self.path)
+        first.close()
+        ProcessLock(self.path).close()
+
+    def test_checksum_corruption_is_refused_and_quarantined(self):
+        tracker = TxTracker(self.path)
+        tracker.save()
+        with open(self.path, "r+", encoding="utf-8") as state_file:
+            state = json.load(state_file)
+            state["pending_hash"] = "tampered"
+            state_file.seek(0)
+            json.dump(state, state_file)
+            state_file.truncate()
+        with self.assertRaises(StateIdentityError):
+            TxTracker(self.path)
+        self.assertTrue(any(name.startswith("state.json.corrupt.") for name in os.listdir(self.tmp.name)))
+
+    def test_atomic_state_retains_only_bounded_backups(self):
+        tracker = TxTracker(self.path)
+        for number in range(6):
+            tracker.pending_since = number
+            tracker.save()
+        self.assertEqual(sorted(name for name in os.listdir(self.tmp.name) if ".bak." in name),
+                         ["state.json.bak.1", "state.json.bak.2", "state.json.bak.3"])
+
+    def test_safe_reason_specific_resolve_and_unknown_refusal(self):
+        args = _make_args(state_file=self.path)
+        tracker = TxTracker(self.path)
+        tracker.suppressed_plan = "failed-plan"
+        tracker.save()
+        with patch("keeper.query_account", return_value={"sequence": "2"}), \
+                patch("keeper.smart_query", return_value={"should_rebalance": False}):
+            result = resolve_state(args, tracker, "keeper", "deterministic-failure")
+        self.assertIsNone(tracker.suppressed_plan)
+        self.assertTrue(os.path.exists(result["backup"]))
+
+        tracker.broadcasting = True
+        tracker.save()
+        with patch("keeper.query_account", return_value={"sequence": "2"}), \
+                patch("keeper.smart_query", return_value={"should_rebalance": True}):
+            with self.assertRaises(StateIdentityError):
+                resolve_state(args, tracker, "keeper", "deterministic-failure")
+
+    def test_explicit_backup_restore_verifies_chain_and_refuses_unknown(self):
+        args = _make_args(state_file=self.path)
+        identity = {"chain_id": "localterra", "vault": "vault", "signer": "os:test1:keeper",
+                    "protocol_kind": "rebalancer"}
+        backup = TxTracker(self.path + ".bak.1", identity)
+        backup.save()
+        with open(self.path, "w", encoding="utf-8") as state_file:
+            state_file.write("corrupt")
+        with patch("keeper.query_account", return_value={"sequence": "2"}), \
+                patch("keeper.smart_query", return_value={"should_rebalance": False}):
+            restore_backup(args, identity, "keeper", 1)
+        self.assertEqual(TxTracker(self.path, identity).identity, identity)
+
+        backup.broadcasting = True
+        backup.save()
+        with patch("keeper.query_account", return_value={"sequence": "2"}), \
+                patch("keeper.smart_query", return_value={"should_rebalance": True}):
+            with self.assertRaises(StateIdentityError):
+                restore_backup(args, identity, "keeper", 1)
 
 
 class BuildRebalanceTests(unittest.TestCase):
@@ -211,11 +292,12 @@ class QueryFinalTxTests(unittest.TestCase):
                 "code": "0",
                 "raw_log": "[]",
                 "height": "100",
+                "txhash": "txhash1",
             }
         }
         with patch("keeper.get_json", return_value=lcd_data) as mock_get:
             result = query_final_tx("http://lcd", "http://rpc", "txhash1")
-        self.assertEqual(result, {"code": 0, "raw_log": "[]", "height": "100"})
+        self.assertEqual(result, {"code": 0, "raw_log": "[]", "height": "100", "hash": "txhash1"})
         mock_get.assert_called_once()
 
     def test_falls_back_to_rpc_when_lcd_returns_empty(self):
@@ -224,11 +306,12 @@ class QueryFinalTxTests(unittest.TestCase):
             "result": {
                 "tx_result": {"code": 3, "log": "failed"},
                 "height": "200",
+                "hash": "txhash2",
             }
         }
         with patch("keeper.get_json", side_effect=[lcd_data, rpc_data]) as mock_get:
             result = query_final_tx("http://lcd", "http://rpc", "txhash2")
-        self.assertEqual(result, {"code": 3, "raw_log": "failed", "height": "200"})
+        self.assertEqual(result, {"code": 3, "raw_log": "failed", "height": "200", "hash": "txhash2"})
         self.assertEqual(mock_get.call_count, 2)
 
     def test_falls_back_to_rpc_on_lcd_404(self):
@@ -236,6 +319,7 @@ class QueryFinalTxTests(unittest.TestCase):
             "result": {
                 "tx_result": {"code": 0, "log": ""},
                 "height": "300",
+                "hash": "txhash3",
             }
         }
         with patch("keeper.get_json") as mock_get:
@@ -244,7 +328,7 @@ class QueryFinalTxTests(unittest.TestCase):
                 rpc_data,
             ]
             result = query_final_tx("http://lcd", "http://rpc", "txhash3")
-        self.assertEqual(result, {"code": 0, "raw_log": "", "height": "300"})
+        self.assertEqual(result, {"code": 0, "raw_log": "", "height": "300", "hash": "txhash3"})
         self.assertEqual(mock_get.call_count, 2)
 
     def test_returns_none_when_both_404(self):
@@ -271,11 +355,27 @@ class QueryFinalTxTests(unittest.TestCase):
             result = query_final_tx("http://lcd", "http://rpc", "txhash5")
         self.assertIsNone(result)
 
-    def test_re_raises_non_404_lcd_error(self):
+    def test_lcd_500_falls_back_to_rpc(self):
         with patch("keeper.get_json") as mock_get:
-            mock_get.side_effect = HTTPError("url", 500, "Server Error", {}, None)
-            with self.assertRaises(HTTPError):
-                query_final_tx("http://lcd", "http://rpc", "txhash6")
+            mock_get.side_effect = [
+                HTTPError("url", 500, "Server Error", {}, None),
+                {"result": {"tx_result": {"code": 0}, "height": "12", "hash": "txhash6"}},
+            ]
+            self.assertEqual(query_final_tx("http://lcd", "http://rpc", "txhash6")["hash"], "txhash6")
+
+    def test_lcd_schema_failure_falls_back_to_rpc(self):
+        with patch("keeper.get_json", side_effect=[
+            {"tx_response": {"height": "12"}},
+            {"result": {"tx_result": {"code": 0}, "height": "12", "hash": "txhash8"}},
+        ]):
+            self.assertEqual(query_final_tx("lcd", "rpc", "txhash8")["code"], 0)
+
+    def test_lcd_transport_failure_falls_back_to_rpc(self):
+        with patch("keeper.get_json", side_effect=[
+            URLError("offline"),
+            {"result": {"tx_result": {"code": 0}, "height": "12", "hash": "txhash9"}},
+        ]):
+            self.assertEqual(query_final_tx("lcd", "rpc", "txhash9")["hash"], "txhash9")
 
 
 class PollPendingTests(unittest.TestCase):
@@ -283,7 +383,7 @@ class PollPendingTests(unittest.TestCase):
         args = MagicMock(lcd="lcd", rpc="rpc", tx_timeout_seconds=60, tx_poll_seconds=1,
                          confirmation_blocks=0)
         tracker = MagicMock(pending_hash="hash1", pending_plan="fp")
-        query_tx = MagicMock(return_value={"code": 0, "raw_log": "", "height": "50"})
+        query_tx = MagicMock(return_value={"code": 0, "raw_log": "", "height": "50", "hash": "hash1"})
         sleep = MagicMock()
 
         result = poll_pending(args, tracker, query_tx=query_tx, sleep=sleep)
@@ -299,7 +399,7 @@ class PollPendingTests(unittest.TestCase):
         args = MagicMock(lcd="lcd", rpc="rpc", tx_timeout_seconds=60, tx_poll_seconds=1,
                          confirmation_blocks=0)
         tracker = MagicMock(pending_hash="hash2", pending_plan="fp_bad")
-        query_tx = MagicMock(return_value={"code": 5, "raw_log": "out of gas", "height": "51"})
+        query_tx = MagicMock(return_value={"code": 5, "raw_log": "out of gas", "height": "51", "hash": "hash2"})
         sleep = MagicMock()
 
         with self.assertRaises(DeterministicTxError) as ctx:
@@ -330,7 +430,7 @@ class PollPendingTests(unittest.TestCase):
         args = MagicMock(lcd="lcd", rpc="rpc", tx_timeout_seconds=30, tx_poll_seconds=1,
                          confirmation_blocks=0)
         tracker = MagicMock(pending_hash="hash4", pending_plan="fp4")
-        query_tx = MagicMock(side_effect=[None, None, {"code": 0, "raw_log": "", "height": "55"}])
+        query_tx = MagicMock(side_effect=[None, None, {"code": 0, "raw_log": "", "height": "55", "hash": "hash4"}])
         sleep = MagicMock()
 
         result = poll_pending(args, tracker, query_tx=query_tx, sleep=sleep)
@@ -343,7 +443,7 @@ class PollPendingTests(unittest.TestCase):
         args = MagicMock(lcd="lcd", rpc="rpc", tx_timeout_seconds=30, tx_poll_seconds=1,
                          confirmation_blocks=2)
         tracker = MagicMock(pending_hash="hash5", pending_plan="fp5")
-        included = {"code": 0, "raw_log": "", "height": "50"}
+        included = {"code": 0, "raw_log": "", "height": "50", "hash": "hash5"}
         query_tx = MagicMock(side_effect=[included, None, included])
         latest_height = MagicMock(side_effect=[51, 52])
         sleep = MagicMock()
@@ -355,6 +455,16 @@ class PollPendingTests(unittest.TestCase):
         self.assertEqual(query_tx.call_count, 3)
         self.assertEqual(latest_height.call_count, 2)
         self.assertIsNone(tracker.pending_hash)
+
+    def test_mismatched_hash_times_out_without_clearing_pending(self):
+        args = MagicMock(lcd="lcd", rpc="rpc", tx_timeout_seconds=1, tx_poll_seconds=1,
+                         confirmation_blocks=0)
+        tracker = MagicMock(pending_hash="expected", pending_plan="fp")
+        result = {"code": 0, "height": "50", "hash": "other"}
+        with patch("keeper.time.monotonic", side_effect=[0, 2]):
+            self.assertFalse(poll_pending(args, tracker, query_tx=MagicMock(return_value=result),
+                                          sleep=MagicMock()))
+        self.assertEqual(tracker.pending_hash, "expected")
 
 
 def _make_args(**overrides):
@@ -399,7 +509,7 @@ class RunOnceTests(unittest.TestCase):
         tracker = MagicMock(pending_hash=None)
 
         plan = {"should_rebalance": False, "price_deviation_bps": 50}
-        with patch("keeper.smart_query", return_value=plan) as mock_query:
+        with patch("keeper.smart_query", return_value=plan):
             run_once(args, tracker)
 
         tracker.save.assert_called_once()
@@ -516,6 +626,17 @@ class RunOnceTests(unittest.TestCase):
                 "previous broadcast outcome is unknown; operator intervention required"
             )
 
+    def test_invalid_post_send_response_remains_broadcasting_after_restart(self):
+        args = _make_args()
+        with tempfile.TemporaryDirectory() as directory:
+            tracker = TxTracker(os.path.join(directory, "state.json"))
+            plan = {"should_rebalance": True, "offer_token": "token1"}
+            with patch("keeper.smart_query", return_value=plan), patch("keeper.preflight"), \
+                    patch("keeper.broadcast", side_effect=RuntimeError("invalid sync response")):
+                with self.assertRaises(RuntimeError):
+                    run_once(args, tracker)
+            self.assertTrue(TxTracker(tracker.path).broadcasting)
+
     def test_broadcast_suppresses_on_deterministic_failure(self):
         args = _make_args()
         tracker = MagicMock(pending_hash=None, suppressed_plan=None)
@@ -628,6 +749,15 @@ class RunCommandTests(unittest.TestCase):
             run_command(["some", "command"])
         self.assertNotIsInstance(error.exception, DeterministicTxError)
 
+    @patch("keeper.subprocess.run")
+    def test_file_keyring_credential_is_only_supplied_on_stdin(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+        run_command(["terrad", "keys", "show"], "secret-password\n")
+        call = mock_run.call_args
+        self.assertEqual(call.kwargs["input"], "secret-password\n")
+        self.assertNotIn("secret-password", call.args[0])
+        self.assertNotIn("env", call.kwargs)
+
 
 class BroadcastTests(unittest.TestCase):
     @patch("keeper.run_command")
@@ -708,3 +838,13 @@ class ParseArgsTests(unittest.TestCase):
         with patch("sys.argv", ["keeper.py", "--vault", "vault1", "--tx-poll-seconds", "0.5"]):
             args = parse_args()
         self.assertEqual(args.tx_poll_seconds, 0.5)
+
+    def test_rejects_zero_loop_poll(self):
+        with self.assertRaises(SystemExit):
+            parse_args(["--vault", "vault1", "--poll-seconds", "0"])
+
+    def test_rejects_nonfinite_transaction_timing(self):
+        for option, value in (("--tx-poll-seconds", "nan"),
+                              ("--tx-timeout-seconds", "inf")):
+            with self.assertRaises(SystemExit):
+                parse_args(["--vault", "vault1", option, value])

@@ -1,6 +1,6 @@
 [package]
 name = "cl8y-grid-vault-swap"
-version = "0.1.0"
+version = "0.2.0"
 edition.workspace = true
 license.workspace = true
 
@@ -12,8 +12,9 @@ library = []
 # Production-lock feature (off by default). When enabled, the vault's
 # `fee_collector` and `proxy` are verified against the canonical mainnet
 # addresses in `src/mainnet.rs`: instantiate REJECTS non-canonical values and
-# `update_config` refuses to re-point them. Canonical constants are `None`
-# until the fee-collector and swap-proxy are deployed to mainnet.
+# `update_config` refuses to re-point them. Builds require the canonical values
+# through CL8Y_CANONICAL_FEE_REGISTRY, CL8Y_CANONICAL_FEE_COLLECTOR, and
+# CL8Y_CANONICAL_SWAP_PROXY.
 mainnet = []
 
 [dependencies]
@@ -24,6 +25,7 @@ cw2.workspace = true
 cw20.workspace = true
 thiserror.workspace = true
 serde.workspace = true
+semver.workspace = true
 base64ct.workspace = true
 zeroize.workspace = true
 
@@ -31,3 +33,4 @@ zeroize.workspace = true
 cw-multi-test = "1.2.0"
 cw20-base = { version = "1.1.2", features = ["library"] }
 cl8y-fee-registry = { path = "../../../fee-system/contracts/fee-registry" }
+proptest = { version = "=1.5.0", default-features = false, features = ["std"] }

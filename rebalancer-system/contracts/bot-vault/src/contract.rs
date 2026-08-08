@@ -5,8 +5,8 @@ use bot_types::{
     VaultQueryMsg,
 };
 use cl8y_dex::{
-    Asset, AssetInfo, HybridSimulationResponse, HybridSwapParams, ObserveResponse, PairInfo,
-    PairQueryMsg, PoolResponse,
+    Asset, AssetInfo, FactoryQueryMsg, HybridSimulationResponse, HybridSwapParams, ObserveResponse,
+    PairInfo, PairQueryMsg, PairResponse, PoolResponse,
 };
 use cosmwasm_schema::cw_serde;
 use cosmwasm_std::{
@@ -19,7 +19,8 @@ use cw20::{BalanceResponse, Cw20ExecuteMsg, Cw20QueryMsg, TokenInfoResponse};
 use crate::error::ContractError;
 use crate::msg::{InstantiateMsg, MigrateMsg};
 use crate::state::{
-    Config, PendingRebalance, CONFIG, LIQUIDITY_CODE_ID, PAUSED, PENDING_ADMIN, PENDING_REBALANCE,
+    CachedEffectiveFee, Config, PendingRebalance, CONFIG, FEE_CACHE, LIQUIDITY_CODE_ID, PAUSED,
+    PENDING_ADMIN, PENDING_REBALANCE,
 };
 
 const CONTRACT_NAME: &str = "crates.io:cl8y-bot-vault";
@@ -41,6 +42,7 @@ const MAX_TRADE_POOL_BPS: u16 = 2_000;
 const MAX_ALLOCATION_TOLERANCE_BPS: u16 = 2_000;
 const MAX_TWAP_WINDOW_SECONDS: u32 = 86_400;
 const REBALANCE_REPLY_ID: u64 = 1;
+const UNDISCOUNTED_FEE_BPS: u16 = 180;
 
 #[cw_serde]
 enum LiquidityQueryMsg {
@@ -73,6 +75,9 @@ pub fn instantiate(
     if msg.liquidity_code_id == 0 {
         return Err(ContractError::InvalidLiquidityContract);
     }
+    if msg.pair_code_id == 0 {
+        return Err(ContractError::InvalidPair);
+    }
     set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
     let pair = deps.api.addr_validate(&msg.pair)?;
     let pair_info: PairInfo = deps
@@ -81,6 +86,8 @@ pub fn instantiate(
     if pair_info.contract_addr != pair {
         return Err(ContractError::InvalidPair);
     }
+    let factory = deps.api.addr_validate(&msg.factory)?;
+    validate_pair_provenance(deps.as_ref(), &pair, &factory, msg.pair_code_id, &pair_info)?;
     let [asset_0, asset_1] = pair_info.asset_infos;
     let asset_tokens = [
         token_addr(deps.as_ref(), asset_0)?,
@@ -132,6 +139,7 @@ pub fn instantiate(
     let proxy = deps.api.addr_validate(&msg.proxy)?;
     #[cfg(feature = "mainnet")]
     {
+        crate::mainnet::assert_fee_registry_canonical_mainnet(fee_registry.as_ref())?;
         crate::mainnet::assert_fee_collector_canonical_mainnet(fee_collector.as_ref())?;
         crate::mainnet::assert_proxy_canonical_mainnet(&proxy)?;
     }
@@ -148,7 +156,9 @@ pub fn instantiate(
         keeper: deps.api.addr_validate(&msg.keeper)?,
         liquidity_contract: None,
         proxy,
+        factory,
         pair,
+        pair_code_id: msg.pair_code_id,
         asset_tokens,
         decimals: token_0.decimals,
         twap_window_seconds: msg.twap_window_seconds,
@@ -393,6 +403,7 @@ fn execute_rebalance(
         return Err(ContractError::RebalancePending);
     }
     ensure_no_liquidity_operation(deps.as_ref(), &config)?;
+    assert_pair_code(deps.as_ref(), &config)?;
     if deadline < env.block.time.seconds() {
         return Err(ContractError::Expired);
     }
@@ -511,7 +522,8 @@ pub fn reply(deps: DepsMut, env: Env, reply: Reply) -> Result<Response, Contract
         .add_attribute("action", "complete_rebalance")
         .add_attribute("allocation_deviation_bps", current.to_string())
         .add_attribute("reference_updated", within_tolerance.to_string());
-    let (fee_charge, mint_msgs) = charge_fee(&mut deps, &config, value_in_token0)?;
+    let pre_fee_nav = nav_in_token0(settled, pending.captured_twap)?;
+    let (fee_charge, mint_msgs) = charge_fee(&mut deps, &config, value_in_token0, pre_fee_nav)?;
     match fee_charge {
         ChargeFee::None => {}
         ChargeFee::Applied(fee) => {
@@ -524,9 +536,6 @@ pub fn reply(deps: DepsMut, env: Env, reply: Reply) -> Result<Response, Contract
                 )
                 .add_attribute("fee_source", fee.source)
                 .add_attribute("fee_shares", fee.shares.to_string());
-        }
-        ChargeFee::Unavailable(reason) => {
-            response = response.add_attribute("fee_skipped", reason);
         }
     }
     for mint_msg in mint_msgs {
@@ -719,7 +728,9 @@ pub fn query(deps: Deps, env: Env, msg: VaultQueryMsg) -> StdResult<Binary> {
             liquidity_code_id: LIQUIDITY_CODE_ID.may_load(deps.storage)?,
             paused: PAUSED.may_load(deps.storage)?.unwrap_or(true),
             proxy: config.proxy.to_string(),
+            factory: config.factory.to_string(),
             pair: config.pair.to_string(),
+            pair_code_id: config.pair_code_id,
             asset_tokens: config.asset_tokens.map(|addr| addr.to_string()),
             decimals: config.decimals,
             twap_window_seconds: config.twap_window_seconds,
@@ -1159,6 +1170,35 @@ fn validate_rebalance_outcome(
     Ok(current <= tolerance)
 }
 
+fn assert_pair_code(deps: Deps, config: &Config) -> Result<(), ContractError> {
+    if deps.querier.query_wasm_contract_info(&config.pair)?.code_id != config.pair_code_id {
+        return Err(ContractError::PairCodeMismatch);
+    }
+    Ok(())
+}
+
+fn validate_pair_provenance(
+    deps: Deps,
+    pair: &Addr,
+    factory: &Addr,
+    pair_code_id: u64,
+    pair_info: &PairInfo,
+) -> Result<(), ContractError> {
+    if pair_code_id == 0 || deps.querier.query_wasm_contract_info(pair)?.code_id != pair_code_id {
+        return Err(ContractError::InvalidPair);
+    }
+    let registered: PairResponse = deps.querier.query_wasm_smart(
+        factory,
+        &FactoryQueryMsg::Pair {
+            asset_infos: pair_info.asset_infos.clone(),
+        },
+    )?;
+    if registered.pair.contract_addr != *pair {
+        return Err(ContractError::InvalidPair);
+    }
+    Ok(())
+}
+
 #[cw_serde]
 enum FeeRegistryQueryMsg {
     EffectiveFee { trader: String },
@@ -1188,25 +1228,22 @@ struct FeeApplied {
 enum ChargeFee {
     None,
     Applied(FeeApplied),
-    /// Fee-registry read failed. The rebalance still completes; the fee is
-    /// skipped rather than reverting the swap.
-    Unavailable(String),
 }
 
 /// Protocol fee per executed rebalance swap (token-0 value based), resolved as
 /// a **single user** (`FEE_TIER_PROTOCOL.md` §5): the operating user — the
 /// address that instantiated / deposited into the vault (`config.admin`) — is
-/// billed at THEIR OWN tier for the full fill value. Only the fee is minted as
-/// LP to the configured fee-collector — no user LP is minted on a fill (the user's
-/// deposited bot-liquidity position simply appreciates via NAV). No fee is charged
-/// when the vault has no fee configured, no liquidity contract, or the resolved
-/// rate is zero. A transient fee-registry failure is non-blocking (the whole charge
-/// is skipped, never a revert). Returns the mint messages to append to the
-/// rebalance response.
+/// billed at THEIR OWN tier for the full fill value. Collector LP is calculated
+/// from pre-fee NAV so its post-mint redemption value does not exceed the fee;
+/// no user LP is minted on a fill. No fee is charged when the vault has no fee
+/// configured, no liquidity contract, or the resolved rate is zero. A transient
+/// fee-registry failure uses the vault-local user cache, or the canonical
+/// undiscounted rate when there is no cache. Returns the mint messages to append.
 fn charge_fee(
     deps: &mut DepsMut,
     config: &Config,
     value_in_token0: Uint128,
+    pre_fee_nav: Uint128,
 ) -> Result<(ChargeFee, Vec<WasmMsg>), ContractError> {
     let (Some(registry), Some(collector)) = (&config.fee_registry, &config.fee_collector) else {
         return Ok((ChargeFee::None, vec![]));
@@ -1223,28 +1260,57 @@ fn charge_fee(
     // that instantiated / deposited into the vault — is billed at THEIR OWN tier
     // for the full fill value. `config.admin` is the operator identity.
     let user = config.admin.to_string();
-    let fee: FeeRegistryEffectiveFeeResponse = match deps.querier.query_wasm_smart(
-        registry,
-        &FeeRegistryQueryMsg::EffectiveFee {
-            trader: user.clone(),
+    let (fee_bps, tier, source) = match deps
+        .querier
+        .query_wasm_smart::<FeeRegistryEffectiveFeeResponse>(
+            registry,
+            &FeeRegistryQueryMsg::EffectiveFee {
+                trader: user.clone(),
+            },
+        ) {
+        Ok(fee) => {
+            let fee_bps = fee.fee_bps.min(10_000);
+            FEE_CACHE.save(
+                deps.storage,
+                &config.admin,
+                &CachedEffectiveFee {
+                    fee_bps,
+                    tier_id: fee.tier_id,
+                },
+            )?;
+            (fee_bps, fee.tier_id, fee.source)
+        }
+        Err(_) => match FEE_CACHE.may_load(deps.storage, &config.admin)? {
+            Some(cached) => (
+                cached.fee_bps.min(10_000),
+                cached.tier_id,
+                "vault_cached".into(),
+            ),
+            None => (UNDISCOUNTED_FEE_BPS, None, "lowest".into()),
         },
-    ) {
-        Ok(fee) => fee,
-        Err(err) => return Ok((ChargeFee::Unavailable(err.to_string()), vec![])),
     };
-    // Defensive bound: cap the effective fee at 100% (10_000 bps).
-    let fee_bps = fee.fee_bps.min(10_000);
     if fee_bps == 0 {
         return Ok((ChargeFee::None, vec![]));
     }
-    let fee_lp = value_in_token0.multiply_ratio(fee_bps, 10_000u16);
-    if fee_lp.is_zero() {
+    let fee_value = value_in_token0.multiply_ratio(fee_bps, 10_000u16);
+    if fee_value.is_zero() || fee_value >= pre_fee_nav {
+        return Ok((ChargeFee::None, vec![]));
+    }
+
+    let token_info: TokenInfoResponse = deps
+        .querier
+        .query_wasm_smart(liquidity, &Cw20QueryMsg::TokenInfo {})?;
+    if token_info.total_supply.is_zero() {
+        return Ok((ChargeFee::None, vec![]));
+    }
+    let fee_shares = fee_shares_for_value(fee_value, pre_fee_nav, token_info.total_supply)?;
+    if fee_shares.is_zero() {
         return Ok((ChargeFee::None, vec![]));
     }
 
     // Single-user (`FEE_TIER_PROTOCOL.md` §5, model B): a fill mints NO extra LP
     // to the user — their deposited bot-liquidity position appreciates via NAV.
-    // Only the protocol fee is minted, straight to the fee-collector.
+    // Dilutive shares worth no more than the protocol fee are minted to the collector.
     let mint_msg = |recipient: &str, amount: Uint128| -> StdResult<WasmMsg> {
         Ok(WasmMsg::Execute {
             contract_addr: liquidity.to_string(),
@@ -1255,18 +1321,48 @@ fn charge_fee(
             funds: vec![],
         })
     };
-    let messages = vec![mint_msg(collector.as_str(), fee_lp)?];
+    let messages = vec![mint_msg(collector.as_str(), fee_shares)?];
 
     Ok((
         ChargeFee::Applied(FeeApplied {
             fee_bps,
-            shares: fee_lp,
+            shares: fee_shares,
             holders: 1,
-            tier: fee.tier_id,
-            source: fee.source,
+            tier,
+            source,
         }),
         messages,
     ))
+}
+
+fn fee_shares_for_value(fee_value: Uint128, nav: Uint128, supply: Uint128) -> StdResult<Uint128> {
+    if fee_value.is_zero() || supply.is_zero() || fee_value >= nav {
+        return Ok(Uint128::zero());
+    }
+    let shares = Uint256::from(fee_value)
+        .checked_mul(Uint256::from(supply))
+        .map_err(StdError::overflow)?
+        .checked_div(Uint256::from(
+            nav.checked_sub(fee_value).map_err(StdError::overflow)?,
+        ))
+        .map_err(|error| StdError::generic_err(error.to_string()))?;
+    shares
+        .try_into()
+        .map_err(|_| StdError::generic_err("fee share overflow"))
+}
+
+fn nav_in_token0(balances: [Uint128; 2], price: Decimal) -> StdResult<Uint128> {
+    if price.is_zero() {
+        return Err(StdError::generic_err("NAV price is zero"));
+    }
+    let token1_in_token0 = Uint256::from(balances[1])
+        .checked_mul(Uint256::from(Decimal::one().atomics()))
+        .map_err(StdError::overflow)?
+        .checked_div(Uint256::from(price.atomics()))
+        .map_err(|error| StdError::generic_err(error.to_string()))?;
+    (Uint256::from(balances[0]) + token1_in_token0)
+        .try_into()
+        .map_err(|_| StdError::generic_err("NAV overflow"))
 }
 
 fn execute_update_fee_config(
@@ -1278,12 +1374,21 @@ fn execute_update_fee_config(
     let mut config = CONFIG.load(deps.storage)?;
     assert_admin(&config, &info.sender)?;
     #[cfg(feature = "mainnet")]
-    if let Some(value) = &fee_collector {
-        let parsed = match value.as_str() {
-            "" => None,
-            address => Some(deps.api.addr_validate(address)?),
-        };
-        crate::mainnet::assert_fee_collector_canonical_mainnet(parsed.as_ref())?;
+    {
+        if let Some(value) = &fee_registry {
+            let parsed = match value.as_str() {
+                "" => None,
+                address => Some(deps.api.addr_validate(address)?),
+            };
+            crate::mainnet::assert_fee_registry_canonical_mainnet(parsed.as_ref())?;
+        }
+        if let Some(value) = &fee_collector {
+            let parsed = match value.as_str() {
+                "" => None,
+                address => Some(deps.api.addr_validate(address)?),
+            };
+            crate::mainnet::assert_fee_collector_canonical_mainnet(parsed.as_ref())?;
+        }
     }
     if let Some(value) = fee_registry {
         config.fee_registry = match value.as_str() {
@@ -1312,7 +1417,9 @@ fn vault_config(
         keeper: Addr::unchecked("keeper"),
         liquidity_contract: liquidity.map(Addr::unchecked),
         proxy: Addr::unchecked("proxy"),
+        factory: Addr::unchecked("factory"),
         pair: Addr::unchecked("pair"),
+        pair_code_id: 7,
         asset_tokens: [Addr::unchecked("t0"), Addr::unchecked("t1")],
         decimals: 6,
         twap_window_seconds: 300,
@@ -1427,6 +1534,59 @@ fn pool_smart_response(
 mod tests {
     use super::*;
     use cosmwasm_std::testing::{mock_dependencies, mock_env, mock_info};
+    use proptest::prelude::*;
+    use proptest::test_runner::Config as ProptestConfig;
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 128,
+            ..ProptestConfig::default()
+        })]
+
+        #[test]
+        fn fee_shares_match_dilution_model_and_never_overclaim(
+            nav in 1u128..=u128::MAX,
+            fee in any::<u128>(),
+            supply in any::<u128>(),
+        ) {
+            let fee = fee.min(nav - 1);
+            let expected = Uint256::from(fee) * Uint256::from(supply) / Uint256::from(nav - fee);
+            let actual = fee_shares_for_value(Uint128::new(fee), Uint128::new(nav), Uint128::new(supply));
+            if expected > Uint256::from(u128::MAX) {
+                prop_assert!(actual.is_err());
+            } else {
+                let shares = actual.unwrap();
+                prop_assert_eq!(Uint256::from(shares), expected);
+                if supply != 0 {
+                    let claim = Uint256::from(nav) * Uint256::from(shares)
+                        / (Uint256::from(supply) + Uint256::from(shares));
+                    prop_assert!(claim <= Uint256::from(fee));
+                }
+            }
+        }
+
+        #[test]
+        fn changing_nav_repeated_fee_model_preserves_supply_accounting(
+            initial_supply in 1u128..=u64::MAX as u128,
+            steps in prop::collection::vec((2u64..=u64::MAX, 1u16..=2_000u16), 1..16),
+        ) {
+            // NAV changes invalidate a bound on all historical collector shares;
+            // each new tranche is checked only against its contemporaneous fee.
+            let mut supply = Uint128::new(initial_supply);
+            let mut collector = Uint128::zero();
+            for (nav, fee_bps) in steps {
+                let nav = Uint128::new(nav as u128);
+                let desired = nav.multiply_ratio(fee_bps, 10_000u16);
+                let minted = fee_shares_for_value(desired, nav, supply).unwrap();
+                let next = supply.checked_add(minted).unwrap();
+                let tranche_claim = Uint256::from(nav) * Uint256::from(minted) / Uint256::from(next);
+                prop_assert!(tranche_claim <= Uint256::from(desired));
+                supply = next;
+                collector = collector.checked_add(minted).unwrap();
+            }
+            prop_assert_eq!(supply, Uint128::new(initial_supply).checked_add(collector).unwrap());
+        }
+    }
     use cosmwasm_std::{from_json, ContractInfoResponse, ContractResult, SystemResult, WasmQuery};
 
     #[test]
@@ -1455,6 +1615,69 @@ mod tests {
     }
 
     #[test]
+    fn pair_provenance_requires_factory_registration_and_pinned_code() {
+        let pair_info = PairInfo {
+            asset_infos: [
+                AssetInfo::Token {
+                    contract_addr: "token0".into(),
+                },
+                AssetInfo::Token {
+                    contract_addr: "token1".into(),
+                },
+            ],
+            contract_addr: Addr::unchecked("pair"),
+            liquidity_token: Addr::unchecked("pair-lp"),
+        };
+        let pair = Addr::unchecked("pair");
+        let factory = Addr::unchecked("factory");
+
+        let mut deps = mock_dependencies();
+        deps.querier.update_wasm(|query| match query {
+            WasmQuery::ContractInfo { .. } => {
+                let mut response = ContractInfoResponse::default();
+                response.code_id = 8;
+                SystemResult::Ok(ContractResult::Ok(to_json_binary(&response).unwrap()))
+            }
+            _ => panic!("factory must not be queried after code mismatch"),
+        });
+        assert_eq!(
+            validate_pair_provenance(deps.as_ref(), &pair, &factory, 7, &pair_info),
+            Err(ContractError::InvalidPair)
+        );
+
+        let mut deps = mock_dependencies();
+        deps.querier.update_wasm(|query| match query {
+            WasmQuery::ContractInfo { .. } => {
+                let mut response = ContractInfoResponse::default();
+                response.code_id = 7;
+                SystemResult::Ok(ContractResult::Ok(to_json_binary(&response).unwrap()))
+            }
+            WasmQuery::Smart { .. } => SystemResult::Ok(ContractResult::Ok(
+                to_json_binary(&PairResponse {
+                    pair: PairInfo {
+                        asset_infos: [
+                            AssetInfo::Token {
+                                contract_addr: "token0".into(),
+                            },
+                            AssetInfo::Token {
+                                contract_addr: "token1".into(),
+                            },
+                        ],
+                        contract_addr: Addr::unchecked("unregistered-pair"),
+                        liquidity_token: Addr::unchecked("pair-lp"),
+                    },
+                })
+                .unwrap(),
+            )),
+            _ => panic!("unexpected query"),
+        });
+        assert_eq!(
+            validate_pair_provenance(deps.as_ref(), &pair, &factory, 7, &pair_info),
+            Err(ContractError::InvalidPair)
+        );
+    }
+
+    #[test]
     fn threshold_updates_apply_the_correct_bounds() {
         let mut deps = mock_dependencies();
         CONFIG
@@ -1465,7 +1688,9 @@ mod tests {
                     keeper: Addr::unchecked("keeper"),
                     liquidity_contract: None,
                     proxy: Addr::unchecked("proxy"),
+                    factory: Addr::unchecked("factory"),
                     pair: Addr::unchecked("pair"),
+                    pair_code_id: 7,
                     asset_tokens: [Addr::unchecked("token0"), Addr::unchecked("token1")],
                     decimals: 6,
                     twap_window_seconds: 0,
@@ -1553,7 +1778,9 @@ mod tests {
                     keeper: Addr::unchecked("keeper"),
                     liquidity_contract: None,
                     proxy: Addr::unchecked("proxy"),
+                    factory: Addr::unchecked("factory"),
                     pair: Addr::unchecked("pair"),
+                    pair_code_id: 7,
                     asset_tokens: [Addr::unchecked("token0"), Addr::unchecked("token1")],
                     decimals: 6,
                     twap_window_seconds: 60,
@@ -1740,7 +1967,9 @@ mod tests {
             keeper: Addr::unchecked("keeper"),
             liquidity_contract: Some(Addr::unchecked("liquidity")),
             proxy: Addr::unchecked("proxy"),
+            factory: Addr::unchecked("factory"),
             pair: Addr::unchecked("pair"),
+            pair_code_id: 7,
             asset_tokens: [Addr::unchecked("token0"), Addr::unchecked("token1")],
             decimals: 6,
             twap_window_seconds: 60,
@@ -1843,7 +2072,9 @@ mod tests {
             keeper: Addr::unchecked("keeper"),
             liquidity_contract: Some(Addr::unchecked("legacy_liquidity")),
             proxy: Addr::unchecked("proxy"),
+            factory: Addr::unchecked("factory"),
             pair: Addr::unchecked("pair"),
+            pair_code_id: 7,
             asset_tokens: [Addr::unchecked("token0"), Addr::unchecked("token1")],
             decimals: 6,
             twap_window_seconds: 60,
@@ -1969,6 +2200,14 @@ mod tests {
     #[test]
     fn fee_config_update_is_admin_gated_and_can_clear() {
         let mut deps = mock_dependencies();
+        #[cfg(feature = "mainnet")]
+        let collector = crate::mainnet::CANONICAL_FEE_COLLECTOR.to_string();
+        #[cfg(feature = "mainnet")]
+        let registry = crate::mainnet::CANONICAL_FEE_REGISTRY.to_string();
+        #[cfg(not(feature = "mainnet"))]
+        let collector = "collector".to_string();
+        #[cfg(not(feature = "mainnet"))]
+        let registry = "registry".to_string();
         CONFIG
             .save(
                 &mut deps.storage,
@@ -1977,7 +2216,9 @@ mod tests {
                     keeper: Addr::unchecked("keeper"),
                     liquidity_contract: None,
                     proxy: Addr::unchecked("proxy"),
+                    factory: Addr::unchecked("factory"),
                     pair: Addr::unchecked("pair"),
+                    pair_code_id: 7,
                     asset_tokens: [Addr::unchecked("t0"), Addr::unchecked("t1")],
                     decimals: 6,
                     twap_window_seconds: 300,
@@ -2000,8 +2241,8 @@ mod tests {
             execute_update_fee_config(
                 deps.as_mut(),
                 mock_info("attacker", &[]),
-                Some("registry".to_string()),
-                Some("collector".to_string()),
+                Some(registry.clone()),
+                Some(collector.clone()),
             )
             .unwrap_err(),
             ContractError::Unauthorized
@@ -2010,24 +2251,35 @@ mod tests {
         execute_update_fee_config(
             deps.as_mut(),
             mock_info("admin", &[]),
-            Some("registry".to_string()),
-            Some("collector".to_string()),
+            Some(registry.clone()),
+            Some(collector.clone()),
         )
         .unwrap();
         let config = CONFIG.load(&deps.storage).unwrap();
-        assert_eq!(config.fee_registry, Some(Addr::unchecked("registry")));
-        assert_eq!(config.fee_collector, Some(Addr::unchecked("collector")));
+        assert_eq!(config.fee_registry, Some(Addr::unchecked(&registry)));
+        assert_eq!(config.fee_collector, Some(Addr::unchecked(&collector)));
 
-        execute_update_fee_config(
+        #[cfg(not(feature = "mainnet"))]
+        {
+            execute_update_fee_config(
+                deps.as_mut(),
+                mock_info("admin", &[]),
+                Some(String::new()),
+                Some(String::new()),
+            )
+            .unwrap();
+            let config = CONFIG.load(&deps.storage).unwrap();
+            assert_eq!(config.fee_registry, None);
+            assert_eq!(config.fee_collector, None);
+        }
+        #[cfg(feature = "mainnet")]
+        assert!(execute_update_fee_config(
             deps.as_mut(),
             mock_info("admin", &[]),
             Some(String::new()),
             Some(String::new()),
         )
-        .unwrap();
-        let config = CONFIG.load(&deps.storage).unwrap();
-        assert_eq!(config.fee_registry, None);
-        assert_eq!(config.fee_collector, None);
+        .is_err());
     }
 
     #[test]
@@ -2035,9 +2287,14 @@ mod tests {
         let mut deps = mock_dependencies();
         let config = vault_config(None, None, None);
         assert!(matches!(
-            charge_fee(&mut deps.as_mut(), &config, Uint128::new(1_000))
-                .unwrap()
-                .0,
+            charge_fee(
+                &mut deps.as_mut(),
+                &config,
+                Uint128::new(1_000),
+                Uint128::new(10_000),
+            )
+            .unwrap()
+            .0,
             ChargeFee::None
         ));
 
@@ -2046,26 +2303,37 @@ mod tests {
         install_pool_mock(&mut deps, &[], &[("admin", 1_000)]);
         let config = vault_config(Some("liquidity"), Some("registry"), Some("collector"));
         assert!(matches!(
-            charge_fee(&mut deps.as_mut(), &config, Uint128::zero())
-                .unwrap()
-                .0,
+            charge_fee(
+                &mut deps.as_mut(),
+                &config,
+                Uint128::zero(),
+                Uint128::new(10_000),
+            )
+            .unwrap()
+            .0,
             ChargeFee::None
         ));
     }
 
     #[test]
-    fn charge_fee_mints_only_fee_lp_to_collector() {
+    fn charge_fee_mints_exact_dilutive_shares_to_collector() {
         let mut deps = mock_dependencies();
         // Single user = the operating vault `admin`, taxed at 1_000 bps (10%).
-        // Fill value 1 000 => fee 100 LP to collector, NO user LP minted (model B).
-        install_pool_mock(&mut deps, &[], &[("admin", 1_000)]);
+        // Fill value 1 000 => fee value 100. At NAV 2 and supply 1 000, the
+        // collector receives floor(100 * 1 000 / (2 000 - 100)) = 52 shares.
+        install_pool_mock(&mut deps, &[("holder", 1_000)], &[("admin", 1_000)]);
         let config = vault_config(Some("liquidity"), Some("registry"), Some("collector"));
-        let (charge, messages) =
-            charge_fee(&mut deps.as_mut(), &config, Uint128::new(1_000)).unwrap();
+        let (charge, messages) = charge_fee(
+            &mut deps.as_mut(),
+            &config,
+            Uint128::new(1_000),
+            Uint128::new(2_000),
+        )
+        .unwrap();
         match charge {
             ChargeFee::Applied(fee) => {
                 assert_eq!(fee.fee_bps, 1_000, "single user at their exact rate");
-                assert_eq!(fee.shares, Uint128::new(100), "fee LP to collector");
+                assert_eq!(fee.shares, Uint128::new(52), "collector fee shares");
                 assert_eq!(fee.holders, 1);
                 assert_eq!(fee.source, "live");
             }
@@ -2086,7 +2354,7 @@ mod tests {
                 m => panic!("unexpected message {m:?}"),
             })
             .collect();
-        assert!(minted.contains(&("collector".to_string(), Uint128::new(100))));
+        assert!(minted.contains(&("collector".to_string(), Uint128::new(52))));
         assert!(
             !minted.iter().any(|(r, _)| r == "admin"),
             "no user LP is minted on a fill"
@@ -2094,26 +2362,112 @@ mod tests {
     }
 
     #[test]
+    fn charge_fee_converts_fee_value_at_varied_nav_per_share_without_overcharge() {
+        let cases = [
+            ("0.5", 500u128, 20u128),
+            ("1", 1_000, 10),
+            ("2", 2_000, 5),
+            ("nonintegral", 1_333, 7),
+        ];
+
+        for (label, nav, expected_shares) in cases {
+            let mut deps = mock_dependencies();
+            install_pool_mock(&mut deps, &[("holder", 1_000)], &[("admin", 1_000)]);
+            let config = vault_config(Some("liquidity"), Some("registry"), Some("collector"));
+            let (charge, messages) = charge_fee(
+                &mut deps.as_mut(),
+                &config,
+                Uint128::new(100),
+                Uint128::new(nav),
+            )
+            .unwrap();
+
+            let ChargeFee::Applied(fee) = charge else {
+                panic!("expected fee at NAV/share {label}");
+            };
+            assert_eq!(fee.shares, Uint128::new(expected_shares), "{label}");
+            let WasmMsg::Execute { msg, .. } = &messages[0] else {
+                panic!("expected collector mint");
+            };
+            let LiquidityExecuteMsg::MintTo { recipient, amount } = from_json(msg).unwrap();
+            assert_eq!(recipient, "collector", "{label}");
+            assert_eq!(amount, Uint128::new(expected_shares), "{label}");
+
+            let economic_claim = Uint256::from(nav) * Uint256::from(expected_shares)
+                / Uint256::from(1_000u128 + expected_shares);
+            assert!(economic_claim <= Uint256::from(10u128), "{label}");
+        }
+    }
+
+    #[test]
+    fn nav_uses_both_settled_balances_at_captured_price() {
+        assert_eq!(
+            nav_in_token0(
+                [Uint128::new(400), Uint128::new(1_200)],
+                Decimal::from_ratio(2u128, 1u128),
+            )
+            .unwrap(),
+            Uint128::new(1_000)
+        );
+        assert!(nav_in_token0([Uint128::one(), Uint128::one()], Decimal::zero()).is_err());
+    }
+
+    #[test]
+    fn charge_fee_skips_zero_supply_and_fee_at_least_nav() {
+        let config = vault_config(Some("liquidity"), Some("registry"), Some("collector"));
+        let mut deps = mock_dependencies();
+        install_pool_mock(&mut deps, &[], &[("admin", 1_000)]);
+        assert!(matches!(
+            charge_fee(
+                &mut deps.as_mut(),
+                &config,
+                Uint128::new(100),
+                Uint128::new(1_000),
+            )
+            .unwrap()
+            .0,
+            ChargeFee::None
+        ));
+
+        let mut deps = mock_dependencies();
+        install_pool_mock(&mut deps, &[("holder", 1_000)], &[("admin", 10_000)]);
+        assert!(matches!(
+            charge_fee(
+                &mut deps.as_mut(),
+                &config,
+                Uint128::new(1_000),
+                Uint128::new(1_000),
+            )
+            .unwrap()
+            .0,
+            ChargeFee::None
+        ));
+    }
+
+    #[test]
     fn charge_fee_applies_every_canonical_ladder_rate() {
         const LADDER: [(u8, u16); 9] = [
-            (1, 1_755),
-            (2, 1_620),
-            (3, 1_440),
-            (4, 1_170),
-            (5, 900),
-            (6, 720),
-            (7, 450),
-            (8, 270),
-            (9, 90),
+            (1, 175),
+            (2, 162),
+            (3, 144),
+            (4, 117),
+            (5, 90),
+            (6, 72),
+            (7, 45),
+            (8, 27),
+            (9, 9),
         ];
 
         for (tier_id, fee_bps) in LADDER {
             let mut deps = mock_dependencies();
-            install_pool_mock(&mut deps, &[], &[("admin", fee_bps)]);
+            install_pool_mock(&mut deps, &[("holder", 100_000)], &[("admin", fee_bps)]);
             let config = vault_config(Some("liquidity"), Some("registry"), Some("collector"));
             let fill_value = Uint128::new(100_000);
-            let (charge, messages) = charge_fee(&mut deps.as_mut(), &config, fill_value).unwrap();
-            let expected_fee_lp = fill_value.multiply_ratio(fee_bps, 10_000u16);
+            let nav = Uint128::new(1_000_000);
+            let (charge, messages) =
+                charge_fee(&mut deps.as_mut(), &config, fill_value, nav).unwrap();
+            let fee_value = fill_value.multiply_ratio(fee_bps, 10_000u16);
+            let expected_fee_lp = fee_value.multiply_ratio(100_000u128, nav - fee_value);
 
             match charge {
                 ChargeFee::Applied(fee) => {
@@ -2144,11 +2498,14 @@ mod tests {
     }
 
     #[test]
-    fn charge_fee_skips_when_registry_unreachable_or_zero_rate() {
-        // A configured pool but the fee-registry query fails => the whole charge
-        // is skipped non-blockingly (no fee, no revert).
+    fn charge_fee_uses_cached_rate_and_tier_after_registry_failure() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
         let mut deps = mock_dependencies();
-        deps.querier.update_wasm(|query| match query {
+        let registry_available = Rc::new(Cell::new(true));
+        let available = Rc::clone(&registry_available);
+        deps.querier.update_wasm(move |query| match query {
             WasmQuery::Smart { contract_addr, .. } => {
                 if contract_addr == "liquidity" {
                     SystemResult::Ok(ContractResult::Ok(
@@ -2157,6 +2514,17 @@ mod tests {
                             symbol: "PLP".to_string(),
                             decimals: 6,
                             total_supply: Uint128::new(2_000),
+                        })
+                        .unwrap(),
+                    ))
+                } else if available.get() {
+                    SystemResult::Ok(ContractResult::Ok(
+                        to_json_binary(&FeeRegistryEffectiveFeeResponse {
+                            fee_bps: 333,
+                            discount_bps: 0,
+                            tier_id: Some(4),
+                            holding: None,
+                            source: "registry_live".to_string(),
                         })
                         .unwrap(),
                     ))
@@ -2170,21 +2538,114 @@ mod tests {
             _ => panic!("unexpected query"),
         });
         let config = vault_config(Some("liquidity"), Some("registry"), Some("collector"));
-        assert!(matches!(
-            charge_fee(&mut deps.as_mut(), &config, Uint128::new(1_000))
-                .unwrap()
-                .0,
-            ChargeFee::Unavailable(_)
-        ));
+        let (live, _) = charge_fee(
+            &mut deps.as_mut(),
+            &config,
+            Uint128::new(1_000),
+            Uint128::new(10_000),
+        )
+        .unwrap();
+        let ChargeFee::Applied(live) = live else {
+            panic!("expected live fee");
+        };
+        assert_eq!(
+            (live.fee_bps, live.tier, live.source.as_str()),
+            (333, Some(4), "registry_live")
+        );
+        assert_eq!(
+            FEE_CACHE.load(&deps.storage, &config.admin).unwrap(),
+            CachedEffectiveFee {
+                fee_bps: 333,
+                tier_id: Some(4),
+            }
+        );
 
+        registry_available.set(false);
+        let (cached, _) = charge_fee(
+            &mut deps.as_mut(),
+            &config,
+            Uint128::new(1_000),
+            Uint128::new(10_000),
+        )
+        .unwrap();
+        let ChargeFee::Applied(cached) = cached else {
+            panic!("expected cached fee");
+        };
+        assert_eq!(
+            (cached.fee_bps, cached.tier, cached.source.as_str()),
+            (333, Some(4), "vault_cached")
+        );
+
+        let mut transferred = config;
+        transferred.admin = Addr::unchecked("next-admin");
+        let (lowest, _) = charge_fee(
+            &mut deps.as_mut(),
+            &transferred,
+            Uint128::new(1_000),
+            Uint128::new(10_000),
+        )
+        .unwrap();
+        let ChargeFee::Applied(lowest) = lowest else {
+            panic!("new admin must use the no-cache fallback");
+        };
+        assert_eq!((lowest.fee_bps, lowest.source.as_str()), (180, "lowest"));
+    }
+
+    #[test]
+    fn charge_fee_uses_undiscounted_rate_without_cache_or_zero_bypass() {
+        let mut deps = mock_dependencies();
+        deps.querier.update_wasm(|query| match query {
+            WasmQuery::Smart { contract_addr, .. } if contract_addr == "liquidity" => {
+                SystemResult::Ok(ContractResult::Ok(
+                    to_json_binary(&TokenInfoResponse {
+                        name: "Pool LP".to_string(),
+                        symbol: "PLP".to_string(),
+                        decimals: 6,
+                        total_supply: Uint128::new(2_000),
+                    })
+                    .unwrap(),
+                ))
+            }
+            WasmQuery::Smart { .. } => {
+                SystemResult::Err(cosmwasm_std::SystemError::InvalidRequest {
+                    request: Default::default(),
+                    error: "boom".to_string(),
+                })
+            }
+            _ => panic!("unexpected query"),
+        });
+        let config = vault_config(Some("liquidity"), Some("registry"), Some("collector"));
+        let (charge, messages) = charge_fee(
+            &mut deps.as_mut(),
+            &config,
+            Uint128::new(1_000),
+            Uint128::new(10_000),
+        )
+        .unwrap();
+        let ChargeFee::Applied(fee) = charge else {
+            panic!("registry failure must not bypass the fee");
+        };
+        assert_eq!(fee.fee_bps, UNDISCOUNTED_FEE_BPS);
+        assert_eq!(fee.tier, None);
+        assert_eq!(fee.source, "lowest");
+        assert_eq!(messages.len(), 1);
+    }
+
+    #[test]
+    fn charge_fee_respects_successful_zero_rate() {
         // Zero rate returned by the registry for the user => skip.
         let mut deps = mock_dependencies();
         install_pool_mock(&mut deps, &[], &[("admin", 0)]);
         let config = vault_config(Some("liquidity"), Some("registry"), Some("collector"));
         assert!(matches!(
-            charge_fee(&mut deps.as_mut(), &config, Uint128::new(5_000))
-                .unwrap()
-                .0,
+            charge_fee(
+                &mut deps.as_mut(),
+                &config,
+                Uint128::new(5_000),
+                Uint128::new(10_000),
+            )
+            .unwrap()
+            .0,
             ChargeFee::None
         ));
     }

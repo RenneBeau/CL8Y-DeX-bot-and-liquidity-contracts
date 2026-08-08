@@ -1,3 +1,5 @@
+#![cfg(not(feature = "mainnet"))]
+
 //! cw-multi-test integration tests for the CL8Y grid vault (swap-only).
 //!
 //! The real CL8Y pair contract is not linked here; we drive the vault against
@@ -17,9 +19,9 @@ use cw_storage_plus::Item;
 
 use cl8y_grid_vault_swap::contract;
 use cl8y_grid_vault_swap::msg::{
-    Asset, AssetInfo, ExecuteMsg as VaultExecuteMsg, HybridSimulationResponse, HybridSwapParams,
-    InstantiateMsg, ObserveResponse, PairCw20HookMsg, PairInfo, PairQueryMsg, PoolResponse,
-    QueryMsg, ReceiveMsg, SharesResponse, SwapProxyHookMsg,
+    Asset, AssetInfo, ExecuteMsg as VaultExecuteMsg, FactoryQueryMsg, HybridSimulationResponse,
+    HybridSwapParams, InstantiateMsg, ObserveResponse, PairCw20HookMsg, PairInfo, PairQueryMsg,
+    PairResponse, PoolResponse, QueryMsg, ReceiveMsg, SharesResponse, SwapProxyHookMsg,
 };
 
 // ---------------------------------------------------------------------------
@@ -214,8 +216,40 @@ fn mock_pair_code() -> Box<dyn Contract<Empty, Empty>> {
                 }
             }
         },
+    )
+    .with_migrate(
+        |_deps, _env, _msg: Empty| -> StdResult<cosmwasm_std::Response> {
+            Ok(cosmwasm_std::Response::new())
+        },
     );
     Box::new(contract)
+}
+
+#[cw_serde]
+struct MockFactoryInstantiateMsg {
+    pair: PairInfo,
+}
+
+const FACTORY_PAIR: Item<PairInfo> = Item::new("factory_pair");
+
+fn mock_factory_code() -> Box<dyn Contract<Empty, Empty>> {
+    Box::new(ContractWrapper::new(
+        |_deps, _env, _info, _msg: Empty| -> StdResult<cosmwasm_std::Response> {
+            Ok(cosmwasm_std::Response::new())
+        },
+        |deps, _env, _info, msg: MockFactoryInstantiateMsg| -> StdResult<cosmwasm_std::Response> {
+            FACTORY_PAIR.save(deps.storage, &msg.pair)?;
+            Ok(cosmwasm_std::Response::new())
+        },
+        |deps, _env, msg: FactoryQueryMsg| -> StdResult<Binary> {
+            let FactoryQueryMsg::Pair { asset_infos } = msg;
+            let pair = FACTORY_PAIR.load(deps.storage)?;
+            if pair.asset_infos != asset_infos {
+                return Err(StdError::generic_err("pair not registered"));
+            }
+            to_json_binary(&PairResponse { pair })
+        },
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -340,7 +374,7 @@ fn mock_fee_registry_code() -> Box<dyn Contract<Empty, Empty>> {
         },
         |_deps, _env, _msg: MockFeeRegistryQueryMsg| -> StdResult<Binary> {
             let response = MockFeeRegistryEffectiveFeeResponse {
-                fee_bps: 1_800,
+                fee_bps: 180,
                 discount_bps: 0,
                 tier_id: None,
                 holding: Some(Uint128::new(1)),
@@ -353,8 +387,8 @@ fn mock_fee_registry_code() -> Box<dyn Contract<Empty, Empty>> {
 }
 
 /// A tiered fee-registry whose `EffectiveFee` depends deterministically on the
-/// trader: a trader whose first address byte is even gets a LOW fee (200 bps,
-/// "high tier"), otherwise the full base fee (1 800 bps, "low tier"). This lets
+/// trader: a trader whose first address byte is even gets a LOW fee (20 bps,
+/// "high tier"), otherwise the full base fee (180 bps, "low tier"). This lets
 /// a test prove per-LP tiering (higher tier loses less LP) without a real CL8Y
 /// fixture -- the test derives each holder's tier from the same first-byte rule.
 fn mock_fee_registry_code_tiered() -> Box<dyn Contract<Empty, Empty>> {
@@ -374,7 +408,7 @@ fn mock_fee_registry_code_tiered() -> Box<dyn Contract<Empty, Empty>> {
                 .last()
                 .map(|b| *b % 2 == 0)
                 .unwrap_or(false);
-            let fee_bps = if even_byte { 200 } else { 1_800 };
+            let fee_bps = if even_byte { 20 } else { 180 };
             let response = MockFeeRegistryEffectiveFeeResponse {
                 fee_bps,
                 discount_bps: 0,
@@ -438,6 +472,7 @@ struct Harness {
     depositor: Addr,
     admin: Addr,
     pair: Addr,
+    factory: Addr,
     collector: Addr,
     treasury: Addr,
     proxy: Option<Addr>,
@@ -469,6 +504,7 @@ fn setup_core(enable_fees: bool, registry_kind: TieredRegistry, use_proxy: bool)
 
     let cw20_code = app.store_code(mock_cw20_code());
     let pair_code = app.store_code(mock_pair_code());
+    let factory_code = app.store_code(mock_factory_code());
     let vault_code = app.store_code(mock_vault_code());
 
     let proxy = if use_proxy {
@@ -513,7 +549,7 @@ fn setup_core(enable_fees: bool, registry_kind: TieredRegistry, use_proxy: bool)
                 symbol: "TKA".to_string(),
                 decimals: 6,
                 initial_balances: vec![cw20::Cw20Coin {
-                    address: depositor.to_string(),
+                    address: admin.to_string(),
                     amount: Uint128::new(100_000_000_000),
                 }],
                 mint: Some(cw20::MinterResponse {
@@ -537,7 +573,7 @@ fn setup_core(enable_fees: bool, registry_kind: TieredRegistry, use_proxy: bool)
                 symbol: "TKB".to_string(),
                 decimals: 6,
                 initial_balances: vec![cw20::Cw20Coin {
-                    address: depositor.to_string(),
+                    address: admin.to_string(),
                     amount: Uint128::new(100_000_000_000),
                 }],
                 mint: Some(cw20::MinterResponse {
@@ -566,6 +602,29 @@ fn setup_core(enable_fees: bool, registry_kind: TieredRegistry, use_proxy: bool)
             },
             &[],
             "pair",
+            Some(admin.to_string()),
+        )
+        .unwrap();
+    let factory = app
+        .instantiate_contract(
+            factory_code,
+            admin.clone(),
+            &MockFactoryInstantiateMsg {
+                pair: PairInfo {
+                    asset_infos: [
+                        AssetInfo::Token {
+                            contract_addr: token0.to_string(),
+                        },
+                        AssetInfo::Token {
+                            contract_addr: token1.to_string(),
+                        },
+                    ],
+                    contract_addr: pair.to_string(),
+                    liquidity_token: "lp".to_string(),
+                },
+            },
+            &[],
+            "factory",
             None,
         )
         .unwrap();
@@ -593,7 +652,9 @@ fn setup_core(enable_fees: bool, registry_kind: TieredRegistry, use_proxy: bool)
             admin.clone(),
             &InstantiateMsg {
                 admin: admin.to_string(),
+                factory: factory.to_string(),
                 pair: pair.to_string(),
+                pair_code_id: pair_code,
                 twap_window_seconds: 300,
                 grid_count: 4,
                 lower_price: Decimal::from_str("1.0").unwrap(),
@@ -627,6 +688,7 @@ fn setup_core(enable_fees: bool, registry_kind: TieredRegistry, use_proxy: bool)
         depositor,
         admin,
         pair,
+        factory,
         collector,
         treasury,
         proxy,
@@ -644,6 +706,7 @@ fn setup_with_real_fee_registry(use_proxy: bool, cl8y_balance: Uint128) -> Harne
 
     let cw20_code = app.store_code(mock_cw20_code());
     let pair_code = app.store_code(mock_pair_code());
+    let factory_code = app.store_code(mock_factory_code());
     let vault_code = app.store_code(mock_vault_code());
     let collector = app.api().addr_make("collector");
     let treasury = app.api().addr_make("treasury");
@@ -709,7 +772,7 @@ fn setup_with_real_fee_registry(use_proxy: bool, cl8y_balance: Uint128) -> Harne
                 symbol: "TKA".to_string(),
                 decimals: 6,
                 initial_balances: vec![cw20::Cw20Coin {
-                    address: depositor.to_string(),
+                    address: admin.to_string(),
                     amount: Uint128::new(100_000_000_000),
                 }],
                 mint: Some(cw20::MinterResponse {
@@ -733,7 +796,7 @@ fn setup_with_real_fee_registry(use_proxy: bool, cl8y_balance: Uint128) -> Harne
                 symbol: "TKB".to_string(),
                 decimals: 6,
                 initial_balances: vec![cw20::Cw20Coin {
-                    address: depositor.to_string(),
+                    address: admin.to_string(),
                     amount: Uint128::new(100_000_000_000),
                 }],
                 mint: Some(cw20::MinterResponse {
@@ -762,6 +825,29 @@ fn setup_with_real_fee_registry(use_proxy: bool, cl8y_balance: Uint128) -> Harne
             },
             &[],
             "pair",
+            Some(admin.to_string()),
+        )
+        .unwrap();
+    let factory = app
+        .instantiate_contract(
+            factory_code,
+            admin.clone(),
+            &MockFactoryInstantiateMsg {
+                pair: PairInfo {
+                    asset_infos: [
+                        AssetInfo::Token {
+                            contract_addr: token0.to_string(),
+                        },
+                        AssetInfo::Token {
+                            contract_addr: token1.to_string(),
+                        },
+                    ],
+                    contract_addr: pair.to_string(),
+                    liquidity_token: "lp".to_string(),
+                },
+            },
+            &[],
+            "factory",
             None,
         )
         .unwrap();
@@ -788,7 +874,9 @@ fn setup_with_real_fee_registry(use_proxy: bool, cl8y_balance: Uint128) -> Harne
             admin.clone(),
             &InstantiateMsg {
                 admin: admin.to_string(),
+                factory: factory.to_string(),
                 pair: pair.to_string(),
+                pair_code_id: pair_code,
                 twap_window_seconds: 300,
                 grid_count: 4,
                 lower_price: Decimal::from_str("1.0").unwrap(),
@@ -818,6 +906,7 @@ fn setup_with_real_fee_registry(use_proxy: bool, cl8y_balance: Uint128) -> Harne
         depositor,
         admin,
         pair,
+        factory,
         collector,
         treasury,
         proxy,
@@ -829,7 +918,7 @@ fn setup() -> Harness {
 }
 
 fn deposit(h: &mut Harness, token: &Addr, amount: Uint128) {
-    deposit_as(h, &h.depositor.clone(), token, amount);
+    deposit_as(h, &h.admin.clone(), token, amount);
 }
 
 fn deposit_as(h: &mut Harness, user: &Addr, token: &Addr, amount: Uint128) {
@@ -850,7 +939,7 @@ fn deposit_as(h: &mut Harness, user: &Addr, token: &Addr, amount: Uint128) {
 fn withdraw(h: &mut Harness, shares: Uint128) {
     h.app
         .execute_contract(
-            h.depositor.clone(),
+            h.admin.clone(),
             h.vault.clone(),
             &VaultExecuteMsg::Withdraw {
                 shares,
@@ -911,7 +1000,7 @@ fn deposit_mints_shares_from_twap() {
     deposit(&mut h, &token0, Uint128::new(50_000_000_000));
     deposit(&mut h, &token1, Uint128::new(75_000_000_000));
     // token0 deposits mint 1:1; token1 deposits mint amount/price (1.5).
-    assert_eq!(shares_of(&h, &h.depositor), Uint128::new(100_000_000_000));
+    assert_eq!(shares_of(&h, &h.admin), Uint128::new(100_000_000_000));
     assert_eq!(
         balance_of(&h.app, &h.token0, &h.vault),
         Uint128::new(50_000_000_000)
@@ -920,6 +1009,46 @@ fn deposit_mints_shares_from_twap() {
         balance_of(&h.app, &h.token1, &h.vault),
         Uint128::new(75_000_000_000)
     );
+}
+
+#[test]
+fn pair_provenance_is_exposed_and_code_id_is_rechecked() {
+    let mut h = setup();
+    let config: cl8y_grid_vault_swap::msg::ConfigResponse = h
+        .app
+        .wrap()
+        .query_wasm_smart(&h.vault, &QueryMsg::Config {})
+        .unwrap();
+    assert_eq!(config.factory, h.factory.to_string());
+    assert_eq!(config.pair, h.pair.to_string());
+    let replacement_code = h.app.store_code(mock_pair_code());
+    assert_ne!(config.pair_code_id, replacement_code);
+    h.app
+        .migrate_contract(h.admin.clone(), h.pair.clone(), &Empty {}, replacement_code)
+        .unwrap();
+
+    let query_error = h
+        .app
+        .wrap()
+        .query_wasm_smart::<cl8y_grid_vault_swap::msg::GridStatusResponse>(
+            &h.vault,
+            &QueryMsg::GridStatus {},
+        )
+        .unwrap_err();
+    assert!(query_error.to_string().contains("pair code id mismatch"));
+    let execute_error = h
+        .app
+        .execute_contract(
+            h.depositor.clone(),
+            h.vault.clone(),
+            &VaultExecuteMsg::Rebalance { deadline: u64::MAX },
+            &[],
+        )
+        .unwrap_err();
+    assert!(execute_error
+        .root_cause()
+        .to_string()
+        .contains("pair code id mismatch"));
 }
 
 #[test]
@@ -1019,20 +1148,20 @@ fn withdraw_burns_shares_pro_rata() {
     let (token0, token1) = (h.token0.clone(), h.token1.clone());
     deposit(&mut h, &token0, Uint128::new(60_000_000_000));
     deposit(&mut h, &token1, Uint128::new(90_000_000_000));
-    let before = shares_of(&h, &h.depositor);
+    let before = shares_of(&h, &h.admin);
     let half = before / Uint128::new(2);
     withdraw(&mut h, half);
-    assert_eq!(shares_of(&h, &h.depositor), before - half);
+    assert_eq!(shares_of(&h, &h.admin), before - half);
 }
 
 #[test]
-fn deposit_prices_against_vault_nav() {
+fn deposits_are_admin_only_and_price_against_vault_nav() {
     let mut h = setup();
     let (token0, token1) = (h.token0.clone(), h.token1.clone());
     // Balanced seed at TWAP 1.5: 60 t0 + 90 t1 -> 120 shares at NAV 1.0.
     deposit(&mut h, &token0, Uint128::new(60_000_000_000));
     deposit(&mut h, &token1, Uint128::new(90_000_000_000));
-    assert_eq!(shares_of(&h, &h.depositor), Uint128::new(120_000_000_000));
+    assert_eq!(shares_of(&h, &h.admin), Uint128::new(120_000_000_000));
 
     // Price drops to 1.0 (cell 1): holdings 60 t0 + 90 t1 are now worth
     // 150 t0, so a share is worth 1.25 t0 (~NAV 1.25). Under the old fixed
@@ -1040,21 +1169,22 @@ fn deposit_prices_against_vault_nav() {
     // withdraw ~70 t0 after depositing 60 t0 (16.7% risk-free extraction).
     set_twap(&mut h, "1.0");
 
-    let attacker = h.app.api().addr_make("attacker");
+    let outsider = h.app.api().addr_make("outsider");
     h.app
         .execute_contract(
             h.admin.clone(),
             token0.clone(),
             &cw20::Cw20ExecuteMsg::Mint {
-                recipient: attacker.to_string(),
+                recipient: outsider.to_string(),
                 amount: Uint128::new(60_000_000_000),
             },
             &[],
         )
         .unwrap();
-    h.app
+    let err = h
+        .app
         .execute_contract(
-            attacker.clone(),
+            outsider.clone(),
             token0.clone(),
             &cw20::Cw20ExecuteMsg::Send {
                 contract: h.vault.to_string(),
@@ -1063,29 +1193,29 @@ fn deposit_prices_against_vault_nav() {
             },
             &[],
         )
-        .unwrap();
-    // NAV-based mint: 60 t0 * 120e9 / 150e9 == 48e9 shares (not 60e9).
-    let got_shares = shares_of(&h, &attacker);
-    assert_eq!(got_shares, Uint128::new(48_000_000_000));
+        .unwrap_err();
+    assert!(
+        err.root_cause().to_string().contains("unauthorized"),
+        "{err}"
+    );
+
     h.app
         .execute_contract(
-            attacker.clone(),
-            h.vault.clone(),
-            &VaultExecuteMsg::Withdraw {
-                shares: got_shares,
-                recipient: None,
+            h.admin.clone(),
+            token0.clone(),
+            &cw20::Cw20ExecuteMsg::Mint {
+                recipient: h.admin.to_string(),
+                amount: Uint128::new(60_000_000_000),
             },
             &[],
         )
         .unwrap();
-    // At price 1.0 the pair is 1:1, so attacker value == t0 + t1.
-    let value = balance_of(&h.app, &token0, &attacker)
-        .checked_add(balance_of(&h.app, &token1, &attacker))
-        .unwrap();
-    // Must break even; the old fixed-basis bug would have returned ~70 t0.
-    assert!(
-        value <= Uint128::new(60_000_000_000) && value >= Uint128::new(59_900_000_000),
-        "attacker must not extract value (got {value})"
+    deposit(&mut h, &token0, Uint128::new(60_000_000_000));
+    // NAV-based mint: 60 t0 * 120e9 / 150e9 == 48e9 shares (not 60e9).
+    assert_eq!(
+        shares_of(&h, &h.admin),
+        Uint128::new(168_000_000_000),
+        "admin receives 48e9 NAV-priced shares"
     );
 }
 
@@ -1118,6 +1248,25 @@ fn admin_can_pause_and_resume() {
             &[],
         )
         .unwrap();
+}
+
+#[test]
+fn pause_blocks_rebalance_but_allows_pro_rata_withdrawal() {
+    let mut h = setup();
+    let token0 = h.token0.clone();
+    deposit(&mut h, &token0, Uint128::new(10_000_000));
+    let shares = shares_of(&h, &h.admin);
+    h.app
+        .execute_contract(
+            h.admin.clone(),
+            h.vault.clone(),
+            &VaultExecuteMsg::Pause {},
+            &[],
+        )
+        .unwrap();
+
+    withdraw(&mut h, shares / Uint128::new(2));
+    assert_eq!(shares_of(&h, &h.admin), shares / Uint128::new(2));
 }
 
 #[test]
@@ -1241,7 +1390,7 @@ fn rebalance_mints_fee_lp_to_collector_and_can_redistribute_to_treasury() {
         "no user LP is minted on a fill (single-user NAV growth)"
     );
 
-    // The reported rate is the single user's exact tier (flat base 1 800 bps).
+    // The reported rate is the single user's exact tier (flat base 180 bps).
     let fee_bps_val: u128 = response
         .events
         .iter()
@@ -1252,7 +1401,7 @@ fn rebalance_mints_fee_lp_to_collector_and_can_redistribute_to_treasury() {
         .parse()
         .unwrap();
     assert_eq!(
-        fee_bps_val, 1_800,
+        fee_bps_val, 180,
         "single user reports their exact tier, got {fee_bps_val}"
     );
 
@@ -1365,6 +1514,7 @@ fn tier9_rebalance_through_zero_fee_proxy_collector_gets_exact_9bps() {
     deposit(&mut h, &token0, Uint128::new(10_000_000_000));
     deposit(&mut h, &token1, Uint128::new(10_000_000_000));
     set_twap(&mut h, "1.75");
+    let token1_before = balance_of(&h.app, &token1, &h.vault);
 
     let response = h
         .app
@@ -1416,8 +1566,7 @@ fn tier9_rebalance_through_zero_fee_proxy_collector_gets_exact_9bps() {
         "tier-9 resolution must come from the live registry"
     );
 
-    // `fee_shares` is the LP minted straight to the collector, equal to
-    // floor(value_in_token0 × 9 / 10_000). The collector owns exactly it.
+    // `fee_shares` is the NAV-priced LP minted straight to the collector.
     let collector_shares = shares_of(&h, &h.collector);
     assert_eq!(
         collector_shares.u128(),
@@ -1428,6 +1577,32 @@ fn tier9_rebalance_through_zero_fee_proxy_collector_gets_exact_9bps() {
         collector_shares > Uint128::zero(),
         "collector must receive a non-zero tier-9 fee"
     );
+    let proceeds_token1 = balance_of(&h.app, &token1, &h.vault) - token1_before;
+    let proceeds_token0 = proceeds_token1.multiply_ratio(100u128, 175u128);
+    let desired_fee = proceeds_token0.multiply_ratio(9u16, 10_000u16);
+    assert_ne!(
+        collector_shares, desired_fee,
+        "non-unit NAV must convert economic value into shares"
+    );
+
+    let treasury = h.treasury.clone();
+    h.app
+        .execute_contract(
+            h.collector.clone(),
+            h.vault.clone(),
+            &VaultExecuteMsg::RedeemShares {
+                bot_id: 0,
+                recipient: Some(treasury.to_string()),
+            },
+            &[],
+        )
+        .unwrap();
+    let redeemed_value = balance_of(&h.app, &token0, &treasury)
+        + balance_of(&h.app, &token1, &treasury).multiply_ratio(100u128, 175u128);
+    assert!(
+        redeemed_value <= desired_fee,
+        "collector claim {redeemed_value} exceeds desired fee {desired_fee}"
+    );
     println!(
         "rebalance value_in_token0 => collector fee_shares {} (tier {} @ {} bps, source {})",
         collector_shares, fee_tier, fee_bps, fee_source
@@ -1435,11 +1610,31 @@ fn tier9_rebalance_through_zero_fee_proxy_collector_gets_exact_9bps() {
 }
 
 #[test]
-fn rebalance_is_non_blocking_when_fee_registry_is_unreachable() {
+fn registry_failure_for_new_subject_charges_undiscounted_fee() {
     let mut h = setup_with_fee(true);
     let (token0, token1) = (h.token0.clone(), h.token1.clone());
     deposit(&mut h, &token0, Uint128::new(60_000_000_000));
     deposit(&mut h, &token1, Uint128::new(60_000_000_000));
+    let new_admin = h.app.api().addr_make("new-admin");
+    h.app
+        .execute_contract(
+            h.admin.clone(),
+            h.vault.clone(),
+            &VaultExecuteMsg::TransferAdmin {
+                admin: new_admin.to_string(),
+            },
+            &[],
+        )
+        .unwrap();
+    h.app
+        .execute_contract(
+            new_admin.clone(),
+            h.vault.clone(),
+            &VaultExecuteMsg::AcceptAdmin {},
+            &[],
+        )
+        .unwrap();
+    h.admin = new_admin;
     set_twap(&mut h, "1.75");
 
     // Re-point the vault at a valid address that hosts no fee-registry contract.
@@ -1467,7 +1662,6 @@ fn rebalance_is_non_blocking_when_fee_registry_is_unreachable() {
         )
         .unwrap();
 
-    // The rebalance must complete; the fee is skipped via `fee_skipped`.
     let response = h
         .app
         .execute_contract(
@@ -1477,23 +1671,100 @@ fn rebalance_is_non_blocking_when_fee_registry_is_unreachable() {
             &[],
         )
         .unwrap();
+    let attr = |key: &str| {
+        response
+            .events
+            .iter()
+            .flat_map(|event| &event.attributes)
+            .find(|attribute| attribute.key == key)
+            .map(|attribute| attribute.value.clone())
+    };
+    assert_eq!(attr("fee_bps").as_deref(), Some("180"));
+    assert_eq!(attr("fee_source").as_deref(), Some("lowest"));
+    assert!(
+        attr("fee_shares")
+            .expect("fallback fee shares")
+            .parse::<u128>()
+            .unwrap()
+            > 0,
+        "registry failure must never create a zero-fee bypass"
+    );
     let fee_skipped = response
         .events
         .iter()
         .flat_map(|e| &e.attributes)
         .filter(|a| a.key == "fee_skipped")
         .count();
-    assert_eq!(fee_skipped, 1, "rebalance must skip the fee, not revert");
-    let fee_shares = response
+    assert_eq!(fee_skipped, 0, "registry failure must not skip the fee");
+}
+
+#[test]
+fn successful_fee_resolution_is_cached_for_later_registry_failure() {
+    let mut h = setup_proxy_tier9();
+    let (token0, token1) = (h.token0.clone(), h.token1.clone());
+    deposit(&mut h, &token0, Uint128::new(60_000_000_000));
+    deposit(&mut h, &token1, Uint128::new(60_000_000_000));
+    set_twap(&mut h, "1.75");
+    let first = h
+        .app
+        .execute_contract(
+            h.depositor.clone(),
+            h.vault.clone(),
+            &VaultExecuteMsg::Rebalance { deadline: u64::MAX },
+            &[],
+        )
+        .unwrap();
+    assert!(first
         .events
         .iter()
-        .flat_map(|e| &e.attributes)
-        .filter(|a| a.key == "fee_shares")
-        .count();
-    assert_eq!(
-        fee_shares, 0,
-        "no fee may be minted against an unreachable registry"
-    );
+        .flat_map(|event| &event.attributes)
+        .any(|attribute| attribute.key == "fee_source" && attribute.value == "live"));
+
+    let dead_registry = h.app.api().addr_make("dead-fee-registry");
+    h.app
+        .execute_contract(
+            h.admin.clone(),
+            h.vault.clone(),
+            &VaultExecuteMsg::UpdateConfig {
+                grid_count: None,
+                lower_price: None,
+                upper_price: None,
+                allocation_tolerance_bps: None,
+                max_trade_bps: None,
+                max_execution_deviation_bps: None,
+                quote_slippage_bps: None,
+                max_spot_twap_deviation_bps: None,
+                max_trade_pool_bps: None,
+                max_spread: None,
+                fee_registry: Some(dead_registry.to_string()),
+                fee_collector: None,
+                proxy: None,
+            },
+            &[],
+        )
+        .unwrap();
+    set_twap(&mut h, "1.25");
+    let second = h
+        .app
+        .execute_contract(
+            h.depositor.clone(),
+            h.vault.clone(),
+            &VaultExecuteMsg::Rebalance { deadline: u64::MAX },
+            &[],
+        )
+        .unwrap();
+    let attr = |key: &str| {
+        second
+            .events
+            .iter()
+            .flat_map(|event| &event.attributes)
+            .find(|attribute| attribute.key == key)
+            .map(|attribute| attribute.value.clone())
+    };
+    assert_eq!(attr("fee_bps").as_deref(), Some("9"));
+    assert_eq!(attr("fee_tier").as_deref(), Some("9"));
+    assert_eq!(attr("fee_source").as_deref(), Some("vault_cached"));
+    assert!(attr("fee_shares").unwrap().parse::<u128>().unwrap() > 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -1517,7 +1788,7 @@ const CL8Y_LADDER: [(u8, u128, u16); 9] = [
 ];
 
 const ONE_CL8Y: u128 = 1_000_000_000_000_000_000;
-const BASE_FEE_BPS: u16 = 1_800;
+const BASE_FEE_BPS: u16 = 180;
 
 /// Response shape of the real fee-registry `EffectiveFee` query.
 #[cw_serde]

@@ -9,6 +9,11 @@ User=grid-operator
 Group=grid-operator
 WorkingDirectory=/opt/grid-operator
 EnvironmentFile=/etc/grid-operator.env
+# The signer command reads its own private credential from %d/signer-key. The
+# operator passes only strict JSON on stdin and never exposes key material.
+LoadCredential=signer-key:/etc/grid-operator/signer-key
+Environment='GRID_TERRAD_HOME=/var/lib/grid-operator/terra'
+Environment='GRID_SIGNER_COMMAND_JSON=["/usr/local/libexec/grid-external-signer"]'
 ExecStart=/opt/grid-operator/venv/bin/grid-operator run
 Restart=on-failure
 RestartSec=5

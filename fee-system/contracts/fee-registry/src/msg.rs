@@ -13,9 +13,9 @@ pub struct InstantiateMsg {
 #[cw_serde]
 pub enum ExecuteMsg {
     /// Re-read the live CL8Y balance of `trader` and persist it as the saved
-    /// holding. Permissionless (only ever reads an on-chain balance), but the
-    /// vaults/keeper should call it so `EffectiveFee` always has a value to
-    /// read back. On a CL8Y read failure the previous holding is kept.
+    /// holding for historical observability. Permissionless (only ever reads an
+    /// on-chain balance). On a CL8Y read failure the previous holding is kept,
+    /// but saved holdings are never used by `EffectiveFee` pricing.
     RefreshHolding {
         trader: String,
     },
@@ -43,8 +43,8 @@ pub enum ExecuteMsg {
     },
 }
 
-/// Where an effective fee came from: the live CL8Y balance, the saved holding
-/// (live query failed), or the lowest tier (no data at all).
+/// Where an effective fee came from. A failed live query always uses `Lowest`;
+/// `Cached` remains in the response schema but is not emitted for pricing.
 #[cw_serde]
 pub enum TierSource {
     Live,

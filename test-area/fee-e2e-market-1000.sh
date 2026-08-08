@@ -76,7 +76,10 @@ jq -e --arg collector "$FEE_COLLECTOR" '.data.fee_collector == $collector and .d
 log "registry=$FEE_REGISTRY collector=$FEE_COLLECTOR treasury=$FEE_TREASURY base_fee_bps=180"
 
 MG_CODE_ID=$(store_contract "$PROJECT_ROOT/market-grid-system/target/wasm32-unknown-unknown/release/cl8y_grid_vault_swap.wasm")
-log "market-grid code: $MG_CODE_ID"
+PROXY_CODE_ID=$(store_contract "$PROJECT_ROOT/rebalancer-system/target/wasm32-unknown-unknown/release/cl8y_swap_proxy.wasm")
+PROXY_INIT=$(jq -nc --arg admin "$TEST_ADDRESS" '{admin:$admin}')
+FEE_PROXY=$(instantiate_contract "$PROXY_CODE_ID" "$PROXY_INIT" cl8y-1000-fee-swap-proxy)
+log "market-grid code: $MG_CODE_ID proxy=$FEE_PROXY"
 
 POOL=$(query_smart "$PAIR_ADDRESS" '{"pool":{}}')
 RESERVE_0=$(jq -r '.data.assets[0].amount' <<<"$POOL")
@@ -94,16 +97,24 @@ print(render(price * 85 // 100), render(price * 115 // 100))
 log "grid bounds: lower=$LOWER_PRICE upper=$UPPER_PRICE"
 
 log "-- instantiate market-grid; fund exactly 1000 EMBER (1000e6 raw) --"
+PAIR_CODE_ID=$(terrad_query wasm contract "$PAIR_ADDRESS" | jq -er '.contract_info.code_id')
 MG_INIT=$(jq -nc --arg admin "$TEST_ADDRESS" --arg pair "$PAIR_ADDRESS" --argjson twap 60 \
     --argjson grid_count 5 --arg lower "$LOWER_PRICE" --arg upper "$UPPER_PRICE" \
-    --arg registry "$FEE_REGISTRY" --arg collector "$FEE_COLLECTOR" \
-    '{admin:$admin,pair:$pair,twap_window_seconds:$twap,grid_count:$grid_count,
+    --arg factory "$FACTORY_ADDRESS" --argjson pair_code_id "$PAIR_CODE_ID" \
+    --arg registry "$FEE_REGISTRY" --arg collector "$FEE_COLLECTOR" --arg proxy "$FEE_PROXY" \
+    '{admin:$admin,pair:$pair,factory:$factory,pair_code_id:$pair_code_id,
+      twap_window_seconds:$twap,grid_count:$grid_count,
       lower_price:$lower,upper_price:$upper,allocation_tolerance_bps:600,
       max_spread:"0.1",max_execution_deviation_bps:1000,quote_slippage_bps:500,
       max_spot_twap_deviation_bps:1000,
-      fee_registry:$registry,fee_collector:$collector}')
+      fee_registry:$registry,fee_collector:$collector,proxy:$proxy}')
 MG_VAULT=$(instantiate_contract "$MG_CODE_ID" "$MG_INIT" cl8y-1000-ember-market-grid)
 log "market-grid vault: $MG_VAULT"
+
+REGISTER=$(jq -nc --arg vault "$MG_VAULT" --arg pair "$PAIR_ADDRESS" \
+    '{register_vault:{vault:$vault,pair:$pair}}')
+execute_from "$TEST_ADDRESS" "$FEE_PROXY" "$REGISTER" >/dev/null
+log "market-grid route registered on fee proxy"
 
 hook=$(printf '{"deposit":{}}' | base64 -w0)
 msg=$(jq -nc --arg vault "$MG_VAULT" --arg amount 1000000000 --arg hook "$hook" \
@@ -125,16 +136,22 @@ MG_SHARES=$(tx_event_value "$MG_RES" fee_shares)
 MG_DEV=$(tx_event_value "$MG_RES" allocation_deviation_bps)
 log "market-grid fee: fee_bps=$MG_BPS fee_tier=$MG_TIER fee_source=$MG_SRC fee_shares=$MG_SHARES"
 
-if [ -z "${MG_BPS:-}" ]; then
-    log "!! no fee charged (registry unset or rate zero)"
-else
-    VALUE=$(( MG_SHARES * 10000 / MG_BPS ))
-    log "=> executed swap value ~ $VALUE raw token0 (0.${MG_BPS}% of it = $MG_SHARES)"
-fi
+test -n "$MG_BPS"
+test -n "$MG_TIER"
+test -n "$MG_SRC"
+test -n "$MG_SHARES"
+test -n "$MG_DEV"
+test "$MG_BPS" = 90
+test "$MG_TIER" = 5
+test "$MG_SRC" = live
+test "$MG_SHARES" -gt 0
+VALUE=$(( MG_SHARES * 10000 / MG_BPS ))
+log "=> executed swap value ~ $VALUE raw token0 (90 bps of it = $MG_SHARES)"
 
 MG_COLLECTOR_SHARES=$(query_smart "$MG_VAULT" \
     "{\"shares\":{\"bot_id\":0,\"address\":\"$FEE_COLLECTOR\"}}" | jq -r '.data.shares')
 log "collector LP in market vault: $MG_COLLECTOR_SHARES"
+test "$MG_COLLECTOR_SHARES" = "$MG_SHARES"
 
 log "-- collector collect -> single shared treasury --"
 T_0_BEFORE=$(cw20_balance_of "$EMBER_ADDRESS" "$FEE_TREASURY")
@@ -146,5 +163,8 @@ T_1_AFTER=$(cw20_balance_of "$CORAL_ADDRESS" "$FEE_TREASURY")
 MG_COLLECTOR_SHARES_ZERO=$(query_smart "$MG_VAULT" \
     "{\"shares\":{\"bot_id\":0,\"address\":\"$FEE_COLLECTOR\"}}" | jq -r '.data.shares')
 log "treasury received EMBER +$((T_0_AFTER - T_0_BEFORE)) CORAL +$((T_1_AFTER - T_1_BEFORE)); collector shares now $MG_COLLECTOR_SHARES_ZERO"
+test "$T_0_AFTER" -gt "$T_0_BEFORE"
+test "$T_1_AFTER" -gt "$T_1_BEFORE"
+test "$MG_COLLECTOR_SHARES_ZERO" = 0
 
 log "DONE: 1000-EMBER market-grid fee realized via the single shared collector"

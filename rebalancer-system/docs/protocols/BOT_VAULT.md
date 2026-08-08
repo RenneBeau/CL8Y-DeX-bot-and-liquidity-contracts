@@ -21,9 +21,11 @@ and sends proportional assets to users through its liquidity contract.
 
 ## Initialization
 
-The vault queries pair metadata and both CW20 token records. It rejects native
-assets, duplicate assets, mismatched token decimals, a zero TWAP window, and
-invalid threshold or risk-control values. Initial liquidity-controller binding
+The vault requires a CL8Y factory and nonzero approved pair runtime code ID. It
+queries pair metadata, verifies factory registration and current code ID, and
+queries both CW20 token records. It rejects native assets, duplicate assets,
+mismatched token decimals, a zero TWAP window, and invalid threshold or
+risk-control values. Initial liquidity-controller binding
 requires a deployed contract whose configured vault and ordered assets match the
 vault and whose code ID equals `liquidity_code_id` approved at vault instantiation.
 
@@ -81,6 +83,7 @@ updates the reference to the captured TWAP.
   current admin can cancel before acceptance.
 - Pause blocks deposits, swaps and keeper maintenance while preserving exact
   authorized transfer settlement for pro-rata exits.
+- Rebalance and proxy execution recheck the pair's pinned runtime code ID.
 
 ## Trust Assumptions
 
@@ -89,6 +92,8 @@ updates the reference to the captured TWAP.
 - The keeper supplies only a deadline; all economic parameters are on-chain.
 - The initially selected bot-liquidity implementation and its Wasm migration admin
   remain trusted. A code-ID change halts calls but cannot prove initial code safety.
+- Version 0.2.0 requires redeployment from bot-vault 0.1.x; migration of that
+  incompatible legacy state is rejected.
 
 Deployment and configuration examples are in
 [`docs/DEPLOYMENT.md`](../DEPLOYMENT.md) and

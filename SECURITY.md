@@ -13,7 +13,9 @@ Key deployment requirements:
 - Use separate, constrained keeper keys.
 - Configure and benchmark a nonzero TWAP window appropriate to the strategy;
   shorter reaction windows require stronger liquidity and manipulation checks.
-- Verify CL8Y pair code and fee-registry addresses before registration.
+- Verify the canonical fee-registry, fee-collector, and swap-proxy addresses.
+- Require factory lookup and the approved runtime pair code ID for every
+  market-grid/rebalancer vault, and recheck pair code before execution.
 - Test every new pair and token implementation independently.
 - Do not use fee-on-transfer or rebasing CW20 tokens.
 - Treat the experimental grid operator as optional automation, not an accounting
@@ -24,6 +26,10 @@ Key deployment requirements:
 - Use a dedicated grid keeper key separate from rebalance keeper keys.
 - Support for unrelated grid depositors requires live NAV share accounting.
 - Independently audit the experimental grid manager before economic deployment.
+- Redeploy market-grid and bot-vault 0.1.x. Replace any routed swap-proxy 0.1.x
+  with a fresh 0.2.0 proxy and re-register routes; migrate only empty compatible
+  proxy state. Never migrate bot-liquidity 0.1.x because no trusted admin can be
+  derived. Limit grid-vault 0.1.0 to 0.1.1 remains supported.
 
 Dependency scanning ignores `RUSTSEC-2024-0344` only for the pinned CosmWasm
 1.5 host dependency. `curve25519-dalek` is absent from the

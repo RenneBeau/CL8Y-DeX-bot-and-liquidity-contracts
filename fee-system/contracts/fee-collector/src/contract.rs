@@ -1,7 +1,7 @@
 use cosmwasm_schema::cw_serde;
 use cosmwasm_std::{
-    entry_point, to_json_binary, Binary, Deps, DepsMut, Env, MessageInfo, Response, StdResult,
-    Uint128, WasmMsg,
+    entry_point, to_json_binary, Binary, Deps, DepsMut, Env, MessageInfo, Response, StdError,
+    StdResult, Uint128, WasmMsg,
 };
 use cw2::set_contract_version;
 
@@ -157,7 +157,10 @@ fn execute_collect(
         deps.storage,
         (&vault_addr, bot_id),
         |existing: Option<u128>| -> StdResult<u128> {
-            Ok(existing.unwrap_or_default() + shares.shares.u128())
+            existing
+                .unwrap_or_default()
+                .checked_add(shares.shares.u128())
+                .ok_or_else(|| StdError::generic_err("cumulative collected shares overflow"))
         },
     )?;
 

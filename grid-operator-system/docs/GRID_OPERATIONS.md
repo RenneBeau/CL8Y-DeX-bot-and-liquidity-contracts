@@ -5,13 +5,15 @@
 1. Build and upload both `cl8y_grid_vault.wasm` and
    `cl8y_grid_manager.wasm`.
 2. Instantiate the manager with the uploaded vault code ID, CL8Y factory, reviewed
-   operator addresses, bounded limits, and a nonzero `order_timeout_seconds`.
+   operator addresses, bounded limits, a nonzero `order_timeout_seconds`, and
+   paired fee addresses.
 3. Users call `{"create_vault":{"label":null}}`; query the returned vault ID or
    manager owner index for the dedicated address.
 4. The designated owner calls `create_bot` on that vault and attaches at least
    `minimum_gas_reserve + keeper_reward` in the configured gas denom.
-5. The swap-proxy is whitelisted on the CL8Y DEX, so vault swaps it routes pay
-   zero DEX fees; no CL8Y fee-tier registration is required.
+5. Limit-grid has no swap-proxy and interacts directly with the CL8Y pair. The
+   manager propagates `fee_registry` and `fee_collector` to each new vault; there
+   is no later vault fee-config update message.
 
 Manager example:
 
@@ -27,7 +29,9 @@ Manager example:
   "order_timeout_seconds":604800,
   "max_grid_count":20,
   "max_orders_per_reconcile":20,
-  "max_active_orders_per_vault":100
+  "max_active_orders_per_vault":100,
+  "fee_registry":"<FEE_REGISTRY>",
+  "fee_collector":"<FEE_COLLECTOR>"
 }
 ```
 
@@ -36,6 +40,14 @@ that configured address receives reimbursement. Hard ranges are
 `max_grid_count: 2..=100`, `max_orders_per_reconcile: 1..=100`, and
 `max_active_orders_per_vault: max_grid_count..=500`. Keeper reward and order
 timeout must be nonzero.
+
+The manager rejects a partial fee pair and requires both values in `mainnet`.
+Mainnet artifacts also compile-time pin both registry and collector; missing
+registry input fails compilation. Limit-grid has no proxy requirement.
+Admin updates to manager fee configuration affect future vaults only. Existing
+fee-disabled vaults require reviewed migration or redeployment; direct vault
+instantiation requires the exact fields documented in
+`../../docs/DEPLOY_FEE_SYSTEM.md`.
 
 ## Maintenance
 
@@ -84,9 +96,15 @@ expiry, but CL8Y may require a matching/cleanup walk before an expired row is
 parked and claimable. If the pair is paused or queries fail, retain the vault and
 retry after pair health is restored.
 
+`emergency_withdraw` transfers only the owner's pro-rata assets and preserves
+collector backing and remaining total shares. After active orders reach zero,
+the fee collector may redeem its shares while the vault remains in Exit.
+
 ## Monitoring
 
-- Vault creation and fee-tier registration.
+- Vault creation and exact instantiate-time fee wiring.
+- Fee source changes among registry `Live`/`Lowest` and vault
+  `vault_cached`/`lowest`; alert on registry outages and prolonged local cache use.
 - Oldest active order versus configured timeout.
 - Pair pause, blacklist, and code migration state.
 - `solvency` per vault after reconciliation: `expected` versus `actual`

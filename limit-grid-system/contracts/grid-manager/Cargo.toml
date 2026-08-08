@@ -9,6 +9,7 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 library = []
+mainnet = []
 
 [dependencies]
 cosmwasm-schema.workspace = true

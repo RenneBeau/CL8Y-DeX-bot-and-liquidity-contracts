@@ -12,7 +12,9 @@ from grid_operator.swap_keeper import (
     plan_fingerprint,
     poll_pending,
     run_once,
+    parse_args,
 )
+from grid_operator.reliability import ProcessLock, StateIdentityError, StateLockError
 
 
 def grid_status(**overrides):
@@ -75,6 +77,25 @@ class SwapTxTrackerTests(unittest.TestCase):
         self.assertEqual(state["pending_hash"], "xyz")
         self.assertTrue(state["broadcasting"])
 
+    def test_changed_runtime_identity_is_refused(self):
+        first = {"chain_id": "chain1", "vault": "vault1", "signer": "os:key1",
+                 "protocol_kind": "grid-swap"}
+        SwapTxTracker(self.path, first).save()
+        for changed in (
+            {**first, "chain_id": "chain2"},
+            {**first, "vault": "vault2"},
+            {**first, "signer": "os:key2"},
+        ):
+            with self.assertRaises(StateIdentityError):
+                SwapTxTracker(self.path, changed)
+
+    def test_process_lock_refuses_contention_and_releases_safely(self):
+        first = ProcessLock(self.path)
+        with self.assertRaises(StateLockError):
+            ProcessLock(self.path)
+        first.close()
+        ProcessLock(self.path).close()
+
 
 class BuildRebalanceTests(unittest.TestCase):
     def test_returns_rebalance_when_required_and_no_pending_swap(self):
@@ -94,6 +115,22 @@ class TransientErrorTests(unittest.TestCase):
         self.assertTrue(is_transient_error("context deadline exceeded"))
         self.assertFalse(is_transient_error("unauthorized"))
         self.assertFalse(is_transient_error("insufficient funds"))
+
+
+class ParseArgsTests(unittest.TestCase):
+    def test_rejects_zero_main_loop_poll(self):
+        with self.assertRaises(SystemExit):
+            parse_args(["--vault", "vault1", "--poll-seconds", "0"])
+
+    def test_rejects_negative_confirmation_depth(self):
+        with self.assertRaises(SystemExit):
+            parse_args(["--vault", "vault1", "--confirmation-blocks", "-1"])
+
+    def test_rejects_nonfinite_transaction_timing(self):
+        for option, value in (("--tx-poll-seconds", "nan"),
+                              ("--tx-timeout-seconds", "inf")):
+            with self.assertRaises(SystemExit):
+                parse_args(["--vault", "vault1", option, value])
 
 
 class FingerprintTests(unittest.TestCase):
@@ -186,6 +223,35 @@ class RunOnceTests(unittest.TestCase):
         terrad.broadcast.assert_called_once()
         self.assertEqual(tracker.pending_hash, "0xtx")
         mock_poll.assert_called_once()
+
+    def test_accepted_but_client_error_stays_unknown_after_restart(self):
+        terrad = MagicMock()
+        terrad.smart_query.return_value = grid_status()
+        terrad.broadcast.side_effect = RpcError("connection reset after node accepted tx")
+        tracker = SwapTxTracker(self.path)
+        with self.assertRaises(RpcError):
+            run_once(self.args(broadcast=True), terrad, tracker)
+        restarted = SwapTxTracker(self.path)
+        self.assertTrue(restarted.broadcasting)
+        self.assertIsNone(restarted.pending_hash)
+        run_once(self.args(broadcast=True), terrad, restarted)
+        self.assertEqual(terrad.broadcast.call_count, 1)
+
+    def test_missing_poll_fields_preserve_pending_state(self):
+        tracker = SwapTxTracker(self.path)
+        tracker.pending_hash = "ABC"
+        tracker.pending_plan = "plan"
+        terrad = MagicMock()
+        terrad.query_tx.return_value = {"code": 0, "height": "10"}
+        now = [0]
+        args = self.args(tx_timeout_seconds=1, tx_poll_seconds=1)
+        self.assertFalse(poll_pending(
+            args, tracker, terrad,
+            sleep=lambda seconds: now.__setitem__(0, now[0] + seconds),
+            clock=lambda: now[0],
+        ))
+        self.assertEqual(tracker.pending_hash, "ABC")
+        self.assertEqual(tracker.pending_plan, "plan")
 
 
 if __name__ == "__main__":

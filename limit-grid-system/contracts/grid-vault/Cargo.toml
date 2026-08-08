@@ -12,9 +12,9 @@ library = []
 # Production-lock feature (off by default). When enabled, the vault's
 # `fee_collector` is verified against the canonical mainnet address in
 # `src/mainnet.rs`: instantiate REJECTS non-canonical values. (This vault has
-# no proxy field; the protocol fee goes straight to the fee-collector.) The
-# canonical constant is `None` until the fee-collector is deployed to mainnet.
-mainnet = []
+# no proxy field; the protocol fee goes straight to the fee-collector.) Builds
+# require CL8Y_CANONICAL_FEE_COLLECTOR.
+mainnet = ["cl8y-grid-manager/mainnet"]
 
 [dependencies]
 cosmwasm-schema.workspace = true
@@ -32,3 +32,4 @@ cl8y-grid-manager = { path = "../grid-manager", version = "0.1.0", features = ["
 cw-multi-test = "1.2.0"
 cw20-base = "1.1.2"
 cl8y-fee-registry = { path = "../../../fee-system/contracts/fee-registry" }
+proptest = { version = "=1.5.0", default-features = false, features = ["std"] }

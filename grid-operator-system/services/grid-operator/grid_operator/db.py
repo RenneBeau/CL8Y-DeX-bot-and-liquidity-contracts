@@ -1,7 +1,10 @@
 import sqlite3
 import time
+import json
 from contextlib import contextmanager
 from pathlib import Path
+
+from .reliability import StateIdentityError
 
 
 SCHEMA = """
@@ -67,7 +70,14 @@ CREATE TABLE IF NOT EXISTS discovered_vaults (
   discovered_height INTEGER NOT NULL,
   enabled INTEGER NOT NULL DEFAULT 1, last_error TEXT
 );
-PRAGMA user_version = 3;
+CREATE TABLE IF NOT EXISTS operator_metadata (
+  key TEXT PRIMARY KEY, value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS operator_audit (
+  id INTEGER PRIMARY KEY, created_at INTEGER NOT NULL, action TEXT NOT NULL,
+  subject TEXT NOT NULL, detail_json TEXT NOT NULL
+);
+PRAGMA user_version = 5;
 """
 
 
@@ -82,12 +92,12 @@ class Database:
 
     def migrate(self) -> None:
         version = self.conn.execute("PRAGMA user_version").fetchone()[0]
-        if version > 3:
+        if version > 5:
             raise RuntimeError(f"database schema {version} is newer than this operator")
         if version == 0:
             self.conn.executescript(SCHEMA)
             return
-        if version <= 2:
+        if version <= 4:
             with self.transaction(immediate=True) as conn:
                 if version == 1:
                     conn.execute("ALTER TABLE batches ADD COLUMN failure_count INTEGER NOT NULL DEFAULT 0")
@@ -96,7 +106,35 @@ class Database:
                   address TEXT PRIMARY KEY, kind TEXT NOT NULL,
                   discovered_height INTEGER NOT NULL,
                   enabled INTEGER NOT NULL DEFAULT 1, last_error TEXT)""")
-                conn.execute("PRAGMA user_version = 3")
+                conn.execute("CREATE TABLE IF NOT EXISTS operator_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+                conn.execute("""CREATE TABLE IF NOT EXISTS operator_audit (
+                  id INTEGER PRIMARY KEY, created_at INTEGER NOT NULL, action TEXT NOT NULL,
+                  subject TEXT NOT NULL, detail_json TEXT NOT NULL)""")
+                conn.execute("PRAGMA user_version = 5")
+
+    def validate_identity(self, identity: dict) -> None:
+        import json
+
+        encoded = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+        row = self.conn.execute(
+            "SELECT value FROM operator_metadata WHERE key='identity'"
+        ).fetchone()
+        if row is None:
+            state_tables = (
+                "blocks", "vaults", "orders", "raw_events", "aggregates", "batches",
+                "batch_items", "batch_events", "tx_attempts", "cursors", "discovered_vaults",
+            )
+            has_state = any(self.conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()
+                            for table in state_tables)
+            if has_state:
+                raise StateIdentityError(
+                    "legacy database contains state without identity; explicit migration is required"
+                )
+            self.conn.execute("INSERT INTO operator_metadata(key,value) VALUES('identity',?)", (encoded,))
+        elif row[0] != encoded:
+            raise StateIdentityError(
+                f"database identity mismatch: stored={row[0]}, configured={encoded}"
+            )
 
     @contextmanager
     def transaction(self, immediate: bool = False):
@@ -127,7 +165,7 @@ class Database:
             "SELECT pair_address,order_id,vault_address,bot_id,input_amount,output_amount,height "
             "FROM raw_events WHERE reconciled_batch_id IS NULL ORDER BY id"
         )
-        totals = {}
+        totals: dict[tuple[str, int], list] = {}
         for row in rows:
             key = (row["pair_address"], row["order_id"])
             item = totals.setdefault(key, [row["vault_address"], row["bot_id"], 0, 0, 0, row["height"], row["height"]])
@@ -139,3 +177,37 @@ class Database:
             "INSERT INTO aggregates VALUES(?,?,?,?,?,?,?,?,?)",
             [(pair, oid, *values[:2], str(values[2]), str(values[3]), *values[4:]) for (pair, oid), values in totals.items()],
         )
+
+    def audit(self, action: str, subject: str, detail: dict, conn=None) -> None:
+        (conn or self.conn).execute(
+            "INSERT INTO operator_audit(created_at,action,subject,detail_json) VALUES(?,?,?,?)",
+            (int(time.time()), action, subject,
+             json.dumps(detail, sort_keys=True, separators=(",", ":"))),
+        )
+
+    def diagnose(self) -> dict:
+        integrity = [row[0] for row in self.conn.execute("PRAGMA integrity_check(100)")]
+        foreign_keys = [dict(row) for row in self.conn.execute("PRAGMA foreign_key_check")]
+        result = {
+            "path": self.path,
+            "integrity": integrity,
+            "foreign_key_errors": foreign_keys,
+            "healthy": integrity == ["ok"] and not foreign_keys,
+            "unresolved": [dict(row) for row in self.conn.execute(
+                "SELECT b.id,b.vault_address,b.state,b.tx_hash,b.error,b.failure_count,"
+                "t.id attempt_id,t.state attempt_state,t.tx_hash attempt_hash,t.check_code,t.deliver_code "
+                "FROM batches b LEFT JOIN tx_attempts t ON t.id=(SELECT MAX(id) FROM tx_attempts WHERE batch_id=b.id) "
+                "WHERE b.state IN ('unknown','intervention','timeout','broadcasting') ORDER BY b.id"
+            )],
+        }
+        self.audit("diagnose", "database", result)
+        return result
+
+    def backup(self, destination: Path | str) -> str:
+        destination = str(destination)
+        target = sqlite3.connect(destination)
+        try:
+            self.conn.backup(target)
+        finally:
+            target.close()
+        return destination

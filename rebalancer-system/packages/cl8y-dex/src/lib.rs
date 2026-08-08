@@ -21,6 +21,16 @@ pub struct PairInfo {
 }
 
 #[cw_serde]
+pub enum FactoryQueryMsg {
+    Pair { asset_infos: [AssetInfo; 2] },
+}
+
+#[cw_serde]
+pub struct PairResponse {
+    pub pair: PairInfo,
+}
+
+#[cw_serde]
 pub struct PoolResponse {
     pub assets: [Asset; 2],
     pub total_share: Uint128,

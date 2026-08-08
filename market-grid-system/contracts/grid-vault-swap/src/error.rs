@@ -58,4 +58,8 @@ pub enum ContractError {
         field: &'static str,
         expected: &'static str,
     },
+    #[error("invalid migration source: {reason}")]
+    InvalidMigration { reason: String },
+    #[error("legacy vault schema lacks required pair provenance; redeploy the vault")]
+    LegacySchemaRequiresRedeploy,
 }

@@ -4,13 +4,23 @@
 > It does not establish that the contracts are secure, production-ready, free of
 > vulnerabilities, or suitable for economic deployment. A qualified third-party
 > audit remains required.
+>
+> **Historical and superseded:** this review is scoped to the 2026-08-01
+> rebalancer revisions listed below. It predates the current fee implementation,
+> fee-system workspace, collector/proxy production locks, and current release
+> gap. It is preserved as historical evidence and must not be used as a current
+> baseline or production-readiness approval. Current fee behavior and blockers
+> are in `../../docs/FEE_TIER_PROTOCOL.md`,
+> `../../docs/DEPLOY_FEE_SYSTEM.md`, and `../../RELEASE.md`.
 
 ## Review Metadata
 
 - Original baseline examined: rebalancer commit `518a167`
 - Later E2E baseline referenced by the old notes: `48c2bbc`
-- Current repository baseline: `b1e943de8da888330d6c0c825b8d702ad03e8d48`
-- Current security corrections: uncommitted working-tree changes after that baseline
+- Last baseline discussed by this historical review:
+  `b1e943de8da888330d6c0c825b8d702ad03e8d48`
+- Repository HEAD at the 2026-08-08 documentation audit:
+  `921859b7bcfa9e6e80ffb78672474874332dd03d`
 - Review date: 2026-08-01
 - Scope: `bot-vault`, `bot-liquidity`, `swap-proxy`, shared types, keeper
 - Validation type: internal source review and local tests only
@@ -27,7 +37,7 @@ claims, and later fixes. This replacement records only resolved conclusions.
 | Keeper | Triggers typed on-chain rebalance actions; cannot supply amount or minimum return |
 | Bot-liquidity | Custodial component for vault transfers; its reciprocal binding and runtime code ID are checked |
 | Bot-liquidity Wasm admin | Trusted not to migrate the component maliciously; a changed code ID halts privileged calls |
-| Swap proxy admin | Controls registered routes and accumulated CL8Y withdrawals |
+| Swap proxy admin | Controls registered routes; the current proxy has no CL8Y config or withdrawal path |
 | CL8Y pair | Trusted external execution and oracle dependency; no third-party report is bundled here |
 | CW20 contracts | Expected to implement standard balance and transfer semantics |
 
@@ -48,8 +58,9 @@ not prove that the initially pinned implementation is correct.
 | ISR-007 | Low | TWAP window was immutable | Fixed, verified locally |
 | ISR-008 | Info | One vault per pair per proxy | Accepted design constraint |
 
-Summary: 3 High, 2 Medium, 2 Low, 1 Informational. Open: ISR-005. No item is marked
-externally verified or CI-verified for the current tree.
+Historical summary: 3 High, 2 Medium, 2 Low, 1 Informational. ISR-005 was open in
+this review. No item is marked externally verified. Later code and tests do not
+retroactively expand this review's scope.
 
 ### ISR-001: Withdrawal Share Loss
 

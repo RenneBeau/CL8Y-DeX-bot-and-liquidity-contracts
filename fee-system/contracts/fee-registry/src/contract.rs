@@ -171,9 +171,9 @@ fn assert_governance(deps: &Deps, info: &MessageInfo) -> Result<(), ContractErro
     Ok(())
 }
 
-/// Permissionless: re-read the live CL8Y balance of `trader` and persist it as
-/// the saved holding so `EffectiveFee` always has a value to read back. On a
-/// read failure the previous holding is kept unchanged (never cleared).
+/// Permissionless: re-read the live CL8Y balance of `trader` and persist it for
+/// historical observability. On a read failure the previous holding is kept
+/// unchanged (never cleared), but it is never used for fee pricing.
 fn execute_refresh_holding(
     deps: DepsMut,
     env: Env,
@@ -448,10 +448,8 @@ fn query_effective_fee(deps: Deps, _env: Env, trader: String) -> StdResult<Effec
     let trader = deps.api.addr_validate(&trader)?;
     let config = CONFIG.load(deps.storage)?;
 
-    // Live-first: a fee must reflect the holder's current balance, never a stale
-    // snapshot. The persisted holding (written via `RefreshHolding`) is only a
-    // fallback for a transient live-read failure, and the lowest tier (full base
-    // fee) is used when neither is available, so a holder is never under-fee.
+    // A discount requires a successful live balance query. Persisted holdings
+    // are historical observations and must never make a failed query under-fee.
     let (discount_bps, tier_id, holding, source) = match deps.querier.query_wasm_smart(
         &config.cl8y,
         &Cw20QueryMsg::Balance {
@@ -462,13 +460,7 @@ fn query_effective_fee(deps: Deps, _env: Env, trader: String) -> StdResult<Effec
             let (discount, tier) = resolve_discount(deps, balance)?;
             (discount, tier, Some(balance), TierSource::Live)
         }
-        Err(_) => match HOLDINGS.may_load(deps.storage, &trader)? {
-            Some(saved) => {
-                let (discount, tier) = resolve_discount(deps, saved.amount)?;
-                (discount, tier, Some(saved.amount), TierSource::Cached)
-            }
-            None => (0, None, None, TierSource::Lowest),
-        },
+        Err(_) => (0, None, None, TierSource::Lowest),
     };
 
     let fee_bps = effective_fee(config.base_fee_bps, discount_bps);

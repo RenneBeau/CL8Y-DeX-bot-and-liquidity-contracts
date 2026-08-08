@@ -8,6 +8,7 @@ DEX_DIR="${CL8Y_DEX_DIR:-$PROJECT_ROOT/test-area/.cache/cl8y-dex-terraclassic}"
 LOCAL_ENV="$PROJECT_ROOT/test-area/.env"
 COMPOSE_OVERRIDE="$PROJECT_ROOT/test-area/docker-compose.override.yml"
 CHAIN_ID="localterra"
+# shellcheck disable=SC2034 # Exported to scripts that source this library.
 TEST_ADDRESS="terra1x46rqay4d3cssq8gxxvqz8xt6nwlz4td20k38v"
 
 ensure_dex_repo() {
@@ -57,11 +58,11 @@ terrad_tx() {
 terrad_tx_from() {
     local signer="$1"
     shift
-    local container attempt output err rc
+    local container output err rc code tx_hash diagnostic
     container=$(localterra_container)
-    for attempt in $(seq 1 10); do
+    for _ in $(seq 1 10); do
         err=$(mktemp)
-        output=$(docker exec "$container" terrad tx "$@" \
+        if output=$(docker exec "$container" terrad tx "$@" \
             --from "$signer" \
             --keyring-backend test \
             --chain-id "$CHAIN_ID" \
@@ -71,23 +72,45 @@ terrad_tx_from() {
             --node http://127.0.0.1:26657 \
             --broadcast-mode sync \
             --yes \
-            --output json 2>"$err")
-        rc=$?
-        if [ "$rc" -ne 0 ]; then
-            if ! grep -q "account sequence mismatch" "$err"; then
-                cat "$err" >&2
-                rm -f "$err"
-                return "$rc"
-            fi
+            --output json 2>"$err"); then
+            rc=0
+        else
+            rc=$?
+        fi
+        diagnostic=$(jq -r '.raw_log // .log // empty' <<<"$output" 2>/dev/null || true)
+        if [[ "$diagnostic" == *"account sequence mismatch"* ]] \
+            || grep -q "account sequence mismatch" "$err"; then
             rm -f "$err"
             sleep 1
             continue
+        fi
+        if [ "$rc" -ne 0 ]; then
+            cat "$err" >&2
+            rm -f "$err"
+            return "$rc"
+        fi
+        if ! jq -e 'type == "object"' <<<"$output" >/dev/null 2>&1; then
+            echo "ERROR: sync broadcast returned invalid JSON" >&2
+            rm -f "$err"
+            return 1
+        fi
+        code=$(jq -r '.code // 0' <<<"$output")
+        tx_hash=$(jq -r '.txhash // empty' <<<"$output")
+        if [ "$code" != "0" ]; then
+            echo "ERROR: sync broadcast rejected transaction (code $code): ${diagnostic:-unknown error}" >&2
+            rm -f "$err"
+            return 1
+        fi
+        if [ -z "$tx_hash" ] || [ "$tx_hash" = null ]; then
+            echo "ERROR: sync broadcast returned no transaction hash" >&2
+            rm -f "$err"
+            return 1
         fi
         rm -f "$err"
         printf '%s\n' "$output"
         return 0
     done
-    cat "$err" >&2
+    echo "ERROR: account sequence mismatch persisted after 10 attempts" >&2
     return 1
 }
 

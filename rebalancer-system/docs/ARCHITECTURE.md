@@ -1,8 +1,9 @@
 # Protocol Architecture
 
 The protocol separates fee access, asset custody, and user ownership into
-three contracts. There is one shared swap proxy, one vault per trading pair,
-and one bot-liquidity CW20 contract per vault.
+three contracts. There is one shared swap proxy, one vault per strategy, and one
+bot-liquidity CW20 contract per vault. Multiple approved vaults may use the same
+pair route.
 
 ```text
 User
@@ -26,11 +27,14 @@ Bot Vault
 ## Asset Boundaries
 
 - The vault stores and accounts for user token A and token B.
-- The proxy is whitelisted on the CL8Y DEX (zero DEX fees) and routes vault
-  swaps; it does not need to hold CL8Y for a fee tier.
+- The proxy routes vault swaps and does not hold CL8Y. Production requires a
+  deployed, pinned, DEX-whitelisted proxy for zero DEX fees; that is not yet a
+  confirmed mainnet fact.
 - The liquidity contract manages deposits, withdrawals, and bot LP shares.
 - Every pair has a distinct vault and a distinct fungible bot LP token.
 - CL8Y pools provide swap execution and market pricing for each bot.
+- Vaults store the canonical factory and approved pair runtime code ID. Factory
+  registration is checked at creation, and code ID is rechecked before swaps.
 
 ## Deposit Settlement
 
@@ -99,8 +103,20 @@ checks and independent oracle validation.
 
 ## CL8Y DEX Fees
 
-The swap-proxy is whitelisted on the CL8Y DEX, so the swaps it routes pay no
-DEX fees — the proxy does not need to hold CL8Y and no fee tier is
-registered. The separate protocol fee (fee-registry + fee-collector) resolves
-each LP holder's CL8Y tier at fill time instead; see
-`docs/FEE_TIER_PROTOCOL.md` §2.
+The intended production proxy must be whitelisted so routed swaps pay no DEX
+fee. It is not deployed or pinned yet, so zero DEX fee is a prerequisite rather
+than established mainnet state. The separate protocol fee resolves
+`config.admin`, not each LP holder. It first computes economic value
+`F = floor(V*bps/10000)`, then mints NAV-priced collector shares
+`x = floor(F*S/(A-F))` against post-settlement value `A` and pre-mint supply
+`S`. Flooring keeps the collector's immediate claim no greater than `F`. See
+`../../docs/FEE_TIER_PROTOCOL.md`.
+
+The vault caches the last successful effective bps/tier for `config.admin`.
+Registry unavailability uses that exact result (`vault_cached`) or 180 bps
+(`lowest`) without history. The registry never prices from historical CL8Y
+holding when its live token query fails.
+
+The provenance schema is 0.2.0. Existing 0.1.x vaults and bot-liquidity contracts
+must be redeployed. A 0.1.x proxy with routes must be replaced and its routes
+re-registered; only empty compatible proxy state may migrate.

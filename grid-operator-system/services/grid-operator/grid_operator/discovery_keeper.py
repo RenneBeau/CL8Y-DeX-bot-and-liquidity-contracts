@@ -17,6 +17,7 @@ rebroadcast. Dry-run is the default; pass ``--broadcast`` to sign and submit.
 """
 
 import argparse
+import math
 import os
 import time
 from pathlib import Path
@@ -25,19 +26,33 @@ from .db import Database
 from .indexer import Indexer
 from .protocol import PROTOCOLS
 from .rpc import TendermintRPC, Terrad
+from .reliability import ProcessLock, StateIdentityError, StateLockError
 from .swap_keeper import SwapTxTracker, keep_vault
 
 
 class DiscoveryKeeper:
-    def __init__(self, db: Database, terrad: Terrad, args):
+    def __init__(self, db: Database, terrad: Terrad, args, signer_identity=None):
         self.db = db
         self.terrad = terrad
         self.args = args
+        self.signer_identity = signer_identity or f"{args.keyring_backend}:{args.key}"
         self.state_dir = Path(args.state_dir)
 
     def tracker_for(self, vault: str) -> SwapTxTracker:
         safe = vault.strip().lower()
-        return SwapTxTracker(str(self.state_dir / f"{safe}.json"))
+        kind = self.db.conn.execute(
+            "SELECT kind FROM discovered_vaults WHERE address=?", (vault,)
+        ).fetchone()[0]
+        identity = {
+            "chain_id": self.args.chain_id,
+            "vault": safe,
+            "signer": self.signer_identity,
+            "protocol_kind": kind,
+        }
+        tracker = SwapTxTracker(str(self.state_dir / f"{safe}.json"), identity)
+        if not os.path.exists(tracker.path):
+            tracker.save()
+        return tracker
 
     def discovered_vaults(self) -> list[tuple[str, str]]:
         rows = self.db.conn.execute(
@@ -105,8 +120,11 @@ def parse_args(argv=None):
         parser.error("--chain-id or GRID_CHAIN_ID is required")
     if not args.code_id and not args.rebalance_code_id:
         parser.error("--code-id or --rebalance-code-id is required")
-    if args.deadline_seconds <= 0 or args.tx_poll_seconds <= 0 or args.tx_timeout_seconds <= 0 \
-            or args.confirmation_blocks < 0:
+    if args.deadline_seconds <= 0 or not math.isfinite(args.tx_poll_seconds) \
+            or not math.isfinite(args.tx_timeout_seconds) or args.tx_poll_seconds <= 0 \
+            or args.tx_timeout_seconds <= 0 \
+            or args.poll_seconds <= 0 or args.confirmation_blocks < 0 \
+            or args.finality_depth < 0 or args.deployment_height <= 0:
         parser.error("deadline and transaction polling values must be positive")
     return args
 
@@ -118,22 +136,35 @@ def main(argv=None) -> int:
         code_ids["grid"] = args.code_id
     if args.rebalance_code_id:
         code_ids["rebalance"] = args.rebalance_code_id
-    db = Database(args.db)
-    db.migrate()
-    rpc = TendermintRPC(args.rpc)
-    terrad = Terrad(args.terrad, args.rpc, args.chain_id, args.key, args.keyring_backend,
-                    args.gas_adjustment, args.fees)
-    indexer = Indexer(db, rpc, args.chain_id, args.deployment_height, (),
-                      args.finality_depth, code_ids=code_ids)
-    keeper = DiscoveryKeeper(db, terrad, args)
-    while True:
-        try:
-            indexer.scan()
-            keeper.run_once()
-        except Exception as error:
-            print(f"discovery keeper error: {error}")
-            if args.once:
-                return 1
-        if args.once:
-            return 0
-        time.sleep(args.poll_seconds)
+    try:
+        with ProcessLock(args.db):
+            db = Database(args.db)
+            db.migrate()
+            terrad = Terrad(args.terrad, args.rpc, args.chain_id, args.key, args.keyring_backend,
+                            args.gas_adjustment, args.fees)
+            signer_identity = f"{args.keyring_backend}:{args.key}:{terrad.key_address()}"
+            db.validate_identity({
+                "schema_version": 1,
+                "chain_id": args.chain_id,
+                "vaults": [],
+                "signer": signer_identity,
+                "protocol_kind": "discovery",
+            })
+            rpc = TendermintRPC(args.rpc)
+            indexer = Indexer(db, rpc, args.chain_id, args.deployment_height, (),
+                              args.finality_depth, code_ids=code_ids)
+            keeper = DiscoveryKeeper(db, terrad, args, signer_identity)
+            while True:
+                try:
+                    indexer.scan()
+                    keeper.run_once()
+                except Exception as error:
+                    print(f"discovery keeper error: {error}")
+                    if args.once:
+                        return 1
+                if args.once:
+                    return 0
+                time.sleep(args.poll_seconds)
+    except (StateIdentityError, StateLockError) as error:
+        print(f"discovery keeper startup refused: {error}")
+        return 2

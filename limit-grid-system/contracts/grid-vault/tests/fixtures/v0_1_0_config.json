@@ -1,0 +1,1 @@
+{"admin":"admin","owner":"owner","pending_admin":null,"keeper":"keeper","factory":"factory","gas_denom":"uluna","keeper_reward":"1000","minimum_gas_reserve":"5000","order_timeout_seconds":600,"max_grid_count":20,"max_orders_per_reconcile":10,"max_active_orders_per_bot":30,"fee_registry":"registry","fee_collector":"collector"}

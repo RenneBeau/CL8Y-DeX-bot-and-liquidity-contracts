@@ -11,8 +11,6 @@ pub enum ContractError {
     InvalidRoute,
     #[error("vault is not registered")]
     UnregisteredVault,
-    #[error("pair already has a vault")]
-    PairAlreadyRegistered,
     #[error("unsupported offer token")]
     UnsupportedToken,
     #[error("amount must be greater than zero")]

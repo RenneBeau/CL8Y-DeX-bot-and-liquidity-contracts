@@ -1,288 +1,176 @@
-# Protocol Fee-Tier & Treasury Design
+# Protocol Fee-Tier Behavior
 
-Cross-system design (limit-grid, market-grid, rebalancer). **Design only — no code.**
-Status: for review.
+Limit-grid implements this protocol for PoC coverage only. It is abandoned as a
+production venue and remains in the repository and release artifacts solely for
+research and reproducibility.
 
-## 0. Deploy constants (Terra Classic)
+Status: current implementation and specification for limit-grid, market-grid,
+rebalancer, `fee-registry`, and `fee-collector`.
 
-- `cl8y` — CL8Y (`cl8y-cb`) CW20 token:
+## Canonical Mainnet Inputs
+
+- CL8Y (`cl8y-cb`, 18 decimals):
   `terra16wtml2q66g82fdkx66tap0qjkahqwp4lwq3ngtygacg5q0kzycgqvhpax3`
-- `treasury` — CMM treasury:
+- CMM treasury:
   `terra16j5u6ey7a84g40sr3gd94nzg5w5fm45046k9s2347qhfpwm5fr6sem3lr2`
+- Undiscounted user rate (user-facing **tier 0**): **180 bps (1.8%)**
 
-These are the `cl8y` and `treasury` addresses the `fee-registry` and
-`fee-collector` are configured with (see §8).
+The `mainnet` fee-registry artifact pins CL8Y and treasury. The `mainnet`
+fee-collector artifact pins treasury. Every vault `mainnet` build requires
+nonempty compile-time `CL8Y_CANONICAL_FEE_REGISTRY` and
+`CL8Y_CANONICAL_FEE_COLLECTOR`; market-grid and rebalancer also require
+`CL8Y_CANONICAL_SWAP_PROXY`. Limit-grid has no proxy. Missing registry input was
+explicitly verified to fail compilation. Vault configuration cannot substitute
+another registry, collector, or applicable proxy in a mainnet artifact.
 
-## 1. Rationale
+## Canonical Ladder
 
-The CL8Y **swap-proxy** is **whitelisted** by the CL8Y DEX governance, so its
-DEX swaps are **0-fee** with no tier qualification and no contract holds CL8Y.
-Vaults route their rebalance swaps through this whitelisted proxy, which pays no
-on-chain DEX fee. The DEX's revenue therefore comes from the **protocol fee**
-this system collects: the bots are the DEX's own bots, so the fee they charge
-their users is DEX revenue, collected by the fee-collector and forwarded to the
-CMM treasury.
+The registry seeds the CL8Y discount ladder below. **User-facing tier 0** means
+no CL8Y holder tier is eligible and pays the undiscounted 180 bps rate. The
+current query response encodes this as `tier_id: null` (`None`), not numeric ID
+`0`.
 
-The systems must collect their own protocol tax, **differentiated by each user's
-CL8Y (`cl8y-cb`) holding**, charged **per fill**, denominated in **vault LP**,
-realized by a **fee-collector**, and forwarded to the **CMM treasury**.
+Separately, storage IDs `0` and `255` are reserved governance-only entries. ID
+`0` currently carries a 100% discount and ID `255` carries no discount, but the
+current implementation has no address-assignment mechanism for either. These
+internal reserved IDs must not be confused with user-facing tier 0.
 
-## 2. Two fee planes
-
-| Plane | Who collects | Basis | Destination | Status |
-|---|---|---|---|---|
-| DEX (infrastructure) | the whitelisted swap-proxy | its routed swaps | DEX fees | 0 — superseded by the protocol plane |
-| Protocol (user tax) | each vault on its users | **CL8Y held by the user** | fee-collector → CMM treasury | **this design — the DEX's revenue path** |
-
-The DEX plane (the proxy) is free; the protocol plane replaces it as the DEX's
-revenue source. No contract holds CL8Y; the user's own CL8Y balance drives the
-protocol tax.
-
-## 3. CL8Y fee-tier ladder (canonical)
-
-The canonical CL8Y DEX `fee-discount` registry defines a **discount** ladder
-(`docs/reference/fee-discount-tiers.md`, aligned on
-`STANDARD_PRODUCTION_TIERS`). CL8Y uses **18 decimals** (`1 CL8Y = 10^18`).
-Higher tiers mean more CL8Y held → bigger discount → lower fee.
-
-| Tier ID | CL8Y held (min) | `min_cl8y_balance` (wei) | Discount (bps) | Discount % |
-|---|---|---|---|---|
-| 0 | 0 (gov-assigned, market makers) | 0 | 10000 | 100% |
-| 1 | 1 | 1,000,000,000,000,000,000 | 250 | 2.5% |
-| 2 | 5 | 5,000,000,000,000,000,000 | 1000 | 10% |
-| 3 | 20 | 20,000,000,000,000,000,000 | 2000 | 20% |
-| 4 | 75 | 75,000,000,000,000,000,000 | 3500 | 35% |
-| 5 | 200 | 200,000,000,000,000,000,000 | 5000 | 50% |
-| 6 | 500 | 500,000,000,000,000,000,000 | 6000 | 60% |
-| 7 | 1,500 | 1,500,000,000,000,000,000,000 | 7500 | 75% |
-| 8 | 3,500 | 3,500,000,000,000,000,000,000 | 8500 | 85% |
-| 9 | 7,500 | 7,500,000,000,000,000,000,000 | 9500 | 95% |
-| 255 | 0 (gov-assigned, blacklist) | 0 | 0 | 0% |
-
-### From discount to protocol fee
-
-We reuse this ladder as-is and resolve a user's discount live (highest tier whose
-`min_cl8y_balance ≤` the user's current CL8Y balance; no eligible tier ⇒ 0
-discount ⇒ full base fee). This mirrors the DEX's own invariants:
-
-- **I4 (effective fee):** `fee_bps × (10000 − discount_bps) / 10000` with integer
-  division.
-- **I5 (insufficient balance):** a holder whose on-chain balance is below the
-  tier minimum pays `discount_bps = 0` ⇒ full base fee.
-- **I10 (registry query failure):** the DEX fail-closes to the full pair fee.
-  Our protocol is *more lenient* by design: it falls back to the saved holding
-  (§6) instead of the full fee.
-
-**Base fee:** the CL8Y mainnet deploy sets `default_fee_bps = 180` (1.8%) on the
-factory. We use the same figure as `base_fee_bps` unless CMM chooses otherwise:
-
-```
-effective_fee_bps = base_fee_bps × (10000 − discount_bps) / 10000   (integer div)
+```text
+effective_fee_bps = floor(base_fee_bps * (10000 - discount_bps) / 10000)
 ```
 
-| User CL8Y held | Tier | Discount | Effective fee (base 180) |
-|---|---|---|---|
-| 0 (or first-ever query KO) | lowest | 0% | 180 bps (1.8%) |
-| 1 | 1 | 2.5% | 175 bps |
-| 5 | 2 | 10% | 162 bps |
-| 200 | 5 | 50% | 90 bps |
-| 7,500 | 9 | 95% | 9 bps |
+| Tier | Minimum CL8Y | Discount | Effective fee at base 180 |
+|---|---:|---:|---:|
+| User tier 0 (`tier_id: null`) | below 1 | 0 bps | 180 bps |
+| 1 | 1 | 250 bps | 175 bps |
+| 2 | 5 | 1,000 bps | 162 bps |
+| 3 | 20 | 2,000 bps | 144 bps |
+| 4 | 75 | 3,500 bps | 117 bps |
+| 5 | 200 | 5,000 bps | 90 bps |
+| 6 | 500 | 6,000 bps | 72 bps |
+| 7 | 1,500 | 7,500 bps | 45 bps |
+| 8 | 3,500 | 8,500 bps | 27 bps |
+| 9 | 7,500 | 9,500 bps | 9 bps |
 
-Source: `RenneBeau/cl8y-dex-terraclassic`
-[`docs/reference/fee-discount-tiers.md`](https://github.com/RenneBeau/cl8y-dex-terraclassic/blob/main/docs/reference/fee-discount-tiers.md)
-and the mainnet deploy trace (`default_fee_bps=180`).
+A balance below 1 CL8Y is user-facing tier 0, receives no discount, and pays
+180 bps. All calculations use integer floor division, which favors the payer by
+discarding fractions.
 
-## 4. Architecture
+## Fee Subject
 
-A small shared, per-network deployable core referenced by every vault:
+Each fee-enabled execution queries one address:
 
+| Venue | Fee-triggering execution | Registry `trader` |
+|---|---|---|
+| limit-grid | reconciled fill proceeds | `bot.owner` |
+| market-grid | completed rebalance swap | `config.admin` |
+| rebalancer | completed rebalance swap | `config.admin` |
+
+Public depositors and other LP holders are not queried or individually tiered.
+The subject is an operating identity, not each economic LP beneficiary.
+
+## NAV-Priced LP Mint
+
+For token-0-normalized executed value `V`, effective rate `bps`, post-settlement
+asset value `A`, and total LP supply `S` before the collector mint, each venue
+computes:
+
+```text
+F = floor(V * min(effective_fee_bps, 10000) / 10000)
+x = floor(F * S / (A - F))
 ```
-                 fee-registry                fee-collector
-   (governance)  cl8y addr, ladder,     (governance) registry,
-                 base_fee_bps,            treasury, keeper
-                 treasury ref                |
-┌────────────┐  GetEffectiveFee(trader)        │ collect (keeper only)
-│ grid/market│               │                 │  redeem collected LP
-│ /rebal vault├──────────────┘   mints LP ──────►  forward assets
-│            │  on each fill                     │  → CMM treasury
-└────────────┘                                   ▼
-```
 
-- **`fee-registry`** — source of truth: `cl8y` (cl8y-cb) token address, the tier
-  ladder, `base_fee_bps`, treasury address. Governance-updatable without a code
-  release. Vaults query `GetEffectiveFee { trader }` at fill time.
-- **`fee-collector`** — accumulates the LP it is credited in each vault, redeems
-  it, and forwards proceeds to the CMM treasury. `collect` is **keeper-only**.
-- **Vaults** — on each fill, determine the fee, mint LP to the fee-collector
-  (see §5), and book the change.
+`F` is the economic fee value and `x` is the NAV-priced LP amount minted only to
+the configured collector. No user LP is minted or burned by this fee step. Zero
+fee/value/supply results mint nothing; an invalid `F >= A` condition is rejected
+or skipped by the venue's guarded fee path. Because `x` is floored, the
+collector's immediate post-mint claim `floor(x * A / (S + x))` cannot exceed
+`F`. Events named `fee_shares` report `x`, not `F`.
 
-## 5. Charging the fee (per fill, single user, fee-only mint)
+Token normalization is venue-specific:
 
-The three venues share **one** mechanic (model B, single user per bot/vault). On a
-fill that credits `V` of token-0-normalized value, the vault:
+- limit-grid converts credited token 1 using the bot reference price and adds
+  credited token 0;
+- market-grid and rebalancer normalize the executed ask amount to token 0 using
+  the captured execution price path.
 
-1. resolves the **single operating user's** effective fee via the fee-registry;
-2. `fee = V × effective_fee_bps / 10 000`;
-3. **mints only `fee`** of LP to the fee-collector — it does **not** mint LP to
-   the user.
+Deposits and withdrawals have no direct protocol fee. A fee-enabled fill or
+rebalance can nevertheless dilute existing LP through the collector mint.
 
-The user's deposited position already exists; each fill drops the `V` assets into
-the pool so their existing shares appreciate via NAV (no dilution, no burn). Only
-the protocol fee is realized as fresh LP, credited to the fee-collector. No other
-holder is minted or burned.
+## Resolution And Failure Behavior
 
-- **Limit-grid:** the single user is the bot owner (`bot.owner`); LP is the grid's
-  internal `SHARES (bot_id, addr)` ledger.
-- **Market-grid:** the single user is the vault operator (`config.admin`); LP is
-  the vault's internal `SHARES` ledger (token-0 normalized).
-- **Rebalancer:** the single user is the vault operator (`config.admin`); LP is the
-  pooled external `bot-liquidity` CW20 token, minted through bot-liquidity
-  `MintTo` (vault-gated).
+Registry `EffectiveFee { trader }` is live-first:
 
-### Design rationale: single user everywhere
+1. Query the trader's current CL8Y CW20 balance.
+2. If successful, use the highest eligible non-governance tier. Source is
+   `Live`.
+3. If the live CL8Y token query fails, return the full configurable base rate
+   (180 bps in production), `tier_id: null`, and source `Lowest`.
 
-Every CL8Y venue is modelled as **one operator per bot/vault** (limit-grid: bot
-`owner`; market-grid and rebalancer: `admin`). The protocol tax is therefore a
-single tier resolution per fill — cheap, uniform, and identical across all three
-systems. Fees are never a negative incentive: the effective fee is capped at
-`10 000` bps (100%) so `fee ≤ V`, and the collector only ever receives the LP it was
-credited.
+Registry `RefreshHolding` history is observability only. It is never used to
+price `EffectiveFee`, so a stale token holding cannot retain a discount.
 
-Mechanics (v1): on a fill landing value `V` in the vault, `fee = V ×
-effective_fee_bps / 10 000`. The vault mints `fee` to the fee-collector only
-(single-user NAV growth — the user's existing shares appreciate by `V − fee`);
-supply grows by `fee`. A transient fee-registry failure is non-blocking: the fill
-completes and the fee is skipped, never a revert.
+Each vault separately caches the last successful complete effective result
+(`fee_bps` and `tier_id`) keyed by its fee subject: market-grid/rebalancer
+`config.admin`, limit-grid `bot.owner`. If the registry contract is unreachable,
+the vault charges that exact local result with source `vault_cached`. With no
+local history it charges 180 bps, `tier_id: null`, source `lowest`. Registry
+outage therefore never bypasses the protocol fee.
 
-### Rebalancer optionality (pooled → single-user)
+The locally cached tier intentionally remains valid for the duration of a
+registry outage. This is the explicit availability/revenue policy, not an
+accidental registry holding cache: it may differ from the subject's current
+unknown tier until a successful registry response refreshes it. By contrast, a
+reachable registry whose live CL8Y token query fails grants no discount and
+returns `Lowest` immediately.
 
-An earlier design treated the rebalancer as a **pooled, gas-minimal** venue that
-taxed every LP holder of the shared `bot-liquidity` token at their own tier
-(uncapped enumeration). This is **superseded**: the rebalancer now uses the same
-single-user model as the grids (`config.admin`), so there is no enumeration and no
-pooled-tier breakout. A rebalance execution serves one operator; the venue's
-gas-profile is uniform with the grids.
+## Collector Behavior
 
-## 6. Tier resolution — live-first, saved holding as fallback
+`Collect { vault, bot_id }` is keeper-only. It:
 
-The fee-registry resolves a user's tier by comparing their CL8Y holding against
-the **historised** CL8Y DEX tier table. Because a CosmWasm query is read-only it
-cannot persist, so persistence is a separate, permissionless `RefreshHolding`
-message: it reads the CL8Y balance live and stores the last-known-good holding
-per user, so a transient query failure never stalls the fee.
+1. queries the collector's current shares from the target vault;
+2. rejects zero entitlement;
+3. records the observed amount in `VAULT_SHARES`;
+4. queries vault config for `liquidity_contract`;
+5. instructs the vault or `bot-liquidity` contract to pay the configured
+   treasury directly.
 
-Resolution on each fill (`GetEffectiveFee { trader }`):
-1. The registry queries the CL8Y balance of `trader` **live**.
-2. On **success** (never a keeper-submitted amount — the registry is the sole
-   reader of the CL8Y balance): compute the discount from the historised ladder
-   (highest tier with `min_cl8y_balance ≤ amount`). Source = `Live`.
-3. On **failure** (single read miss): fall back to the saved `holding[trader]`
-   (`RefreshHolding`) and compute the discount from it. Source = `Cached` —
-   possibly stale, never a hard error.
-4. If **no saved holding exists and the live query failed**: fall back to the
-   **lowest tier** (a holder is never under-fee), i.e. an effective fee of
-   `base_fee_bps` with no discount. Source = `Lowest`.
+For grids, the collector sends `RedeemShares { bot_id, recipient: treasury }` to
+the vault. For rebalancer, it sends `Withdraw` to `bot-liquidity` with the
+treasury as recipient and zero minimum assets.
 
-The vault never submits an amount; the registry is the sole reader of the CL8Y
-balance, so keeper/indexer input cannot change a tier. Comparing to the saved
-holding also removes any dependence on periodic registration state.
+In limit-grid Exit, owner emergency withdrawal leaves collector shares and their
+pro-rata backing intact. Once active orders are zero, collector redemption is
+permitted while the vault remains in Exit.
 
-- **Historised table:** the tier ladder is versioned on-chain (see §8) so a
-  tier change by governance is auditable over time and a saved holding maps to a
-  consistent ladder version.
-- **Gameability (accepted for v1):** a user can top up CL8Y for the block of a
-  fill. The saved-holding fallback *reduces* gaming (a top-up is only honoured
-  while it actually persists on-chain), and a snapshot/epoch capture can be
-  layered on later — the registry already models `registration_epoch`.
-- **Cost:** one live token query per fill plus one registry read; kept
-  non-blocking (see §9 `UnverifiableOrder`).
+There is no anti-dust threshold. `Collect` does not consult the collector's
+`registry` field. `VAULT_SHARES` is cumulative historical bookkeeping; it does
+not control current entitlement or redemption. Cumulative updates use checked
+addition and fail rather than wrapping on overflow.
 
-## 7. Fee-collector (keeper-only realization)
+## DEX Fee And Proxy Scope
 
-`fee-collector` is venue-agnostic but liquidity-aware: for a target vault/bot it
-reads the collector's entitlement via `VaultQueryMsg::Shares`, books it, and
-realizes it (keeper-only trigger). What realization yields depends on the vault's
-`Config.liquidity_contract`:
+A DEX-whitelisted shared swap proxy, producing zero DEX fee for routed swaps, is
+an intended production prerequisite. It is not a confirmed current-mainnet fact:
+the proxy has not been deployed or pinned. Rebalancer requires the proxy;
+market-grid can route through an optional proxy. Limit-grid has no proxy field
+and places/cancels orders directly against the CL8Y pair.
 
-- **Grids (limit-grid, market-grid)** — no `liquidity_contract`: sends
-  `VaultExecuteMsg::RedeemShares` to the vault, which burns the collector's LP in
-  its internal `SHARES` ledger and pays the underlying assets.
-- **Rebalancer** — `liquidity_contract` set: the collector owns the fee as
-  external `bot-liquidity` LP (minted via `MintTo`), so the collector calls
-  `bot-liquidity` `Withdraw` (pro-rata) to route the underlying assets through.
+Protocol fee and DEX fee are separate. The intended zero DEX fee does not remove
+the protocol collector mint.
 
-`collect` (keeper only) then routes the proceeds to the CMM treasury.
+## Current Production Gate
 
-- **Trigger:** keeper-only (per decision).
-- **Gas:** funded from the collector (or the protocol gas reserve); never from
-  user funds.
-- **Anti-dust:** a minimum realized value threshold before a transfer fires;
-  below it the LP accrues in the collector.
+Production deployment is **BLOCKED** because approved registry/collector/proxy
+addresses are not yet available, so required mainnet build environment values
+cannot be approved; and the proxy is not deployed or independently
+verified/whitelisted. The release
+definitions now cover all four workspaces, mainnet artifacts, and manifests,
+but complete current-SHA reproducible and canonical fee E2E evidence is not
+recorded in this working tree. Market-grid and bot-vault 0.1.x require
+redeployment; routed swap-proxy 0.1.x and bot-liquidity 0.1.x must not be
+migrated. Only empty compatible proxy state, limit grid-vault 0.1.0 to 0.1.1,
+and the tested fee-system paths are migration candidates.
 
-## 8. Draft state & messages
-
-`fee-registry`
-- State: `Config { governance, cl8y, treasury, fee_collector, base_fee_bps }`,
-  `Tiers: Map<u8, Tier{ min_cl8y_balance, discount_bps, governance_only }>`,
-  `Holdings: Map<Addr, HoldingSnapshot{ amount, at_height }>`, and a
-  monotonically increasing `ladder_version` so the historised ladder (and the
-  saved holding it is compared against) is auditable over time.
-- `ExecuteMsg`: `AddTier`, `UpdateTier`, `RemoveTier`, `UpdateConfig` (all gov),
-  `RefreshHolding { trader }` (permissionless — persists the live CL8Y balance).
-- `QueryMsg`: `EffectiveFee { trader } → { fee_bps, discount_bps, tier_id,
-  holding, source (Live|Cached|Lowest) }`, `Holding { trader }`, `Tiers`,
-  `Tier { tier_id }`, `Config`.
-
-`fee-collector`
-- State: `Config { governance, registry, keeper, treasury }`,
-  `VaultShares: Map<(Addr, u64), Uint128>`.
-- `ExecuteMsg`: `Collect { vault, bot_id }` (keeper), `UpdateConfig` (gov).
-- `QueryMsg`: `Shares { vault, bot_id }`, `Config`.
-
-Vaults (grid / market-grid / rebalancer)
-- Add to `InstantiateMsg`/config: `fee_registry`, `fee_collector`.
-- On fill, per §5: resolve the **single user's** tier; mint `V − fee` LP to the
-  user and `fee` LP to the fee-collector. Grids mint their internal `SHARES`
-  ledger; the rebalancer mints through the pooled `bot-liquidity` `MintTo`.
-- Event attrs: `fee_tier`, `fee_bps`, `fee_shares`.
-
-## 9. Security invariants
-
-1. The user keeps exactly `V − fee` and the collector receives exactly `fee`
-   (both as fresh LP), so the pool grows by `V` per fill — the supply is never
-   diluted by more than the credited value and never burned. Priced on the traded
-   token.
-2. A user's fee tier is resolved from their own balance, never from keeper input.
-3. The collector withdraws only the LP it was credited; it cannot touch user free
-   balances or escrow beyond its share.
-4. `collect` is keeper-only; the treasury is a fixed governance address.
-5. Cross-token valuation: v1 prices the collector's LP against the traded token
-   only (the token that grew on the fill). Review required where a fill's escrow
-   and free balances are large relative to the other token; a future version may
-   use a CL8Y/USTC-based valuation.
-6. Fee computation must be monotonic-safe and never underflow the fill output
-   (skip the fee if `fee = 0` or dust; cap `fee_bps ≤ 10 000`).
-7. Only the fee-registry reads the CL8Y balance. A saved `Holdings` value is
-   written only from a *successful* registry query — never from keeper/sender
-   input — and is used only as a fallback when a live query fails.
-8. A fill whose live query and saved holding are both absent falls back to the
-   **lowest tier** (effective fee = `base_fee_bps`, no discount), never an
-   under-fee. The saved holding is refreshed by `RefreshHolding`; the fee is
-   never under-fee because a live read that succeeds always wins over a saved
-   value.
-
-## 10. Rollout
-
-1. Deploy the shared core (`fee-registry` + `fee-collector`).
-2. Integrate the three venues on the **uniform single-user mint** model: limit-grid
-   (bot `owner`), market-grid (vault `admin` internal `SHARES`), rebalancer
-   (vault `admin` + external `bot-liquidity` LP via `MintTo`). One mechanic, one
-   tier resolution per fill across all systems.
-
-## 11. Open items (confirm before implementation)
-
-- `base_fee_bps`: proposed **180** (the CL8Y mainnet `default_fee_bps`); confirm
-  whether one global value or per-strategy/per-pair.
-- `fee-collector`: whether to add a timelock on treasury transfers.
-- v1 pricing (per-token) acceptance vs. requiring a cross-token valuation.
-- Whether maker grid fees use the same ladder as taker swap fees.
+Use [`DEPLOY_FEE_SYSTEM.md`](DEPLOY_FEE_SYSTEM.md) only after its unblock
+conditions are satisfied.

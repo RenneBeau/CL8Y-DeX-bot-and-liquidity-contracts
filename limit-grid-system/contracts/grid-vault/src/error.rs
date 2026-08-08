@@ -11,6 +11,8 @@ pub enum ContractError {
     Unauthorized,
     #[error("invalid grid parameters")]
     InvalidGrid,
+    #[error("fee registry and fee collector must be configured together")]
+    InvalidFeeConfig,
     #[error("invalid CL8Y pair")]
     InvalidPair,
     #[error("CL8Y pair implementation no longer matches the pinned code id")]

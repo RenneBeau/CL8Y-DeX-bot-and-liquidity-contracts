@@ -70,10 +70,20 @@ owner keeps their shares — a failed swap can never strand a position.
 - A single-token withdrawal swaps only that owner's proportional claim.
 - Shares are burned only after a single-token swap succeeds; a failed swap
   refunds the pending operation and keeps the owner's shares.
-- The current test implementation uses a zero protocol charge for share minting
-  and redemption.
+- Deposits and withdrawals have no direct protocol fee. A fee-enabled
+  `bot-vault` rebalance can call vault-gated `MintTo` to mint NAV-priced fee LP
+  to the collector. For economic fee `F`, post-settlement assets `A`, and
+  pre-mint supply `S`, the amount is `floor(F*S/(A-F))`; the floor prevents an
+  immediate collector claim above `F`.
 
 ## Supported Assets
 
 The first release requires the pair's two CW20 assets to use equal decimals.
 Supported assets use exact-transfer, fixed-balance CW20 semantics.
+
+## Upgrade Policy
+
+Version 0.2.0 requires a trusted admin in state. Version 0.1.x cannot provide a
+trusted value to derive during migration, so migration is rejected and the
+liquidity contract must be redeployed. Never bypass this boundary by inventing
+an admin during migration.

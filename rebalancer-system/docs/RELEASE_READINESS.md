@@ -3,6 +3,10 @@
 This is an operational gate, not a claim of security. Every item must identify
 the exact release commit and retained evidence before funds are accepted.
 
+Current status: **BLOCKED**. Approved real registry/collector/proxy addresses do
+not exist, canonical fee E2E is unrun, and the `0.2.0` redeployment described
+below has not been executed.
+
 ## Required Roles
 
 | Role | Minimum policy | Scope |
@@ -22,10 +26,12 @@ in the private deployment record. Never commit signer identities or secrets here
   E2E GitHub Actions checks.
 - Optimized Wasm hashes match retained CI artifacts.
 - An independent reviewer approved the complete diff from the prior release.
-- Migration was rehearsed from a fixture of every deployed source version.
+- The contract-specific 0.2.0 cutover was rehearsed: bot-vault and bot-liquidity
+  0.1.x were redeployed, any routed 0.1.x proxy was replaced, and routes were
+  re-registered. Only an empty compatible proxy may use migration.
 - Internal and Wasm admin addresses were independently verified by two operators.
-- `liquidity_code_id`, pair, proxy, assets, decimals and keeper match the signed
-  deployment manifest.
+- `liquidity_code_id`, factory, pair, `pair_code_id`, proxy, fee registry,
+  collector, assets, decimals, and keeper match the signed deployment manifest.
 - Vault `paused` is queried and understood before funding.
 - Monitoring and incident contacts are active.
 
@@ -92,17 +98,22 @@ Alert and pause on:
 Retain transaction hashes, block heights, queried configuration, balances and
 alert acknowledgements. Logs without commit and chain ID are not release evidence.
 
-## Migration Order
+## `0.2.0` Redeployment Order
 
 1. Pause the old vault and stop keeper broadcasting.
 2. Confirm no pending rebalance or liquidity settlement exists.
-3. Migrate bot-vault with the approved new `liquidity_code_id`; it remains paused
-   and clears the legacy liquidity binding.
-4. Migrate bot-liquidity and swap-proxy from explicitly supported fixtures.
-5. Rebind bot-liquidity and verify reciprocal vault/assets and runtime code ID.
+3. Withdraw or otherwise complete the separately reviewed 0.1.x vault and
+   liquidity wind-down; do not migrate either state into 0.2.0.
+4. Deploy the reviewed `0.2.0` proxy/vault/liquidity artifact set with canonical
+   registry/collector/proxy values, factory, and approved `pair_code_id`.
+5. Bind bot-liquidity, verify reciprocal vault/assets/runtime code IDs, and
+   register the new vault route on the proxy.
 6. Execute low-value deposit, pro-rata withdrawal, single-token withdrawal and
    keeper rebalance checks.
 7. Resume only after two operators compare state with the deployment manifest.
+
+If the old proxy has any routes, do not migrate it: deploy a fresh 0.2.0 proxy.
+Only frozen-fixture-tested empty compatible proxy state may migrate.
 
 Abort rather than clear an unexpected pending state. Internal admin transfer and
 chain Wasm-admin transfer are separate procedures.

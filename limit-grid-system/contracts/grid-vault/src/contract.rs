@@ -23,9 +23,10 @@ use crate::msg::{
     SolvencyResponse, TokenPolicyResponse, VaultModeResponse,
 };
 use crate::state::{
-    Bot, CancelledOrder, Config, GridOrder, PageKind, PendingPage, PendingPageEntry, PlacementPlan,
-    Rung, VaultMode, ALLOWED_TOKENS, BOTS, CANCELLED_ORDERS, CONFIG, NEXT_BOT_ID, NEXT_REPLY_ID,
-    ORDERS, PENDING_PAGES, PLACEMENTS, QUARANTINE, RUNGS, SHARES, TOKEN_POLICY_ENABLED, VAULT_MODE,
+    Bot, CachedEffectiveFee, CancelledOrder, Config, GridOrder, PageKind, PendingPage,
+    PendingPageEntry, PlacementPlan, Rung, VaultMode, ALLOWED_TOKENS, BOTS, CANCELLED_ORDERS,
+    CONFIG, EFFECTIVE_FEE_CACHE, NEXT_BOT_ID, NEXT_REPLY_ID, ORDERS, PENDING_PAGES, PLACEMENTS,
+    QUARANTINE, RUNGS, SHARES, TOKEN_POLICY_ENABLED, VAULT_MODE,
 };
 
 const CONTRACT_NAME: &str = "crates.io:cl8y-grid-vault";
@@ -88,8 +89,18 @@ pub fn instantiate(
         .fee_collector
         .map(|s| deps.api.addr_validate(&s))
         .transpose()?;
+    if fee_registry.is_some() != fee_collector.is_some() {
+        return Err(ContractError::InvalidFeeConfig);
+    }
     #[cfg(feature = "mainnet")]
-    crate::mainnet::assert_fee_collector_canonical_mainnet(fee_collector.as_ref())?;
+    if fee_registry.is_none() {
+        return Err(ContractError::InvalidFeeConfig);
+    }
+    #[cfg(feature = "mainnet")]
+    {
+        crate::mainnet::assert_fee_registry_canonical_mainnet(fee_registry.as_ref())?;
+        crate::mainnet::assert_fee_collector_canonical_mainnet(fee_collector.as_ref())?;
+    }
     CONFIG.save(
         deps.storage,
         &Config {
@@ -699,11 +710,6 @@ fn execute_reconcile(
                 )
                 .add_attribute("fee_source", fee.source);
         }
-        // Non-blocking: the reconcile completes even if the fee-registry is
-        // unreachable; the fill is processed without a fee.
-        ChargeFee::Unavailable(reason) => {
-            response = response.add_attribute("fee_skipped", reason);
-        }
         ChargeFee::None => {}
     }
     BOTS.save(deps.storage, bot_id, &bot)?;
@@ -960,9 +966,6 @@ fn execute_redeem_shares(
     recipient: Option<String>,
 ) -> Result<Response, ContractError> {
     assert_no_funds(&info)?;
-    if VAULT_MODE.load(deps.storage)? == VaultMode::Exit {
-        return Err(ContractError::InvalidMode);
-    }
     let config = CONFIG.load(deps.storage)?;
     let collector = config.fee_collector.ok_or(ContractError::Unauthorized)?;
     if info.sender != collector {
@@ -1239,33 +1242,43 @@ fn execute_emergency_withdraw(
     {
         return Err(ContractError::ExitOrdersRemain);
     }
+    let owner_shares = SHARES
+        .may_load(deps.storage, (bot_id, &bot.owner))?
+        .unwrap_or_default();
+    if owner_shares.is_zero() || owner_shares > bot.total_shares {
+        return Err(ContractError::InsufficientShares);
+    }
     let recipient = deps
         .api
         .addr_validate(recipient.as_deref().unwrap_or(info.sender.as_str()))?;
     let mut response = Response::new()
         .add_attribute("action", "emergency_withdraw_grid")
-        .add_attribute("bot_id", bot_id.to_string());
-    for token in &bot.asset_tokens {
+        .add_attribute("bot_id", bot_id.to_string())
+        .add_attribute("burned_shares", owner_shares);
+    for (index, token) in bot.asset_tokens.iter().enumerate() {
         let balance: BalanceResponse = deps.querier.query_wasm_smart(
             token,
             &Cw20QueryMsg::Balance {
                 address: env.contract.address.to_string(),
             },
         )?;
-        if !balance.balance.is_zero() {
+        let amount = balance
+            .balance
+            .multiply_ratio(owner_shares, bot.total_shares);
+        bot.free_balances[index] = balance.balance.checked_sub(amount)?;
+        if !amount.is_zero() {
             response = response.add_message(WasmMsg::Execute {
                 contract_addr: token.to_string(),
                 msg: to_json_binary(&Cw20ExecuteMsg::Transfer {
                     recipient: recipient.to_string(),
-                    amount: balance.balance,
+                    amount,
                 })?,
                 funds: vec![],
             });
         }
     }
-    SHARES.remove(deps.storage, (bot_id, &bot.owner));
-    bot.free_balances = [Uint128::zero(), Uint128::zero()];
-    bot.total_shares = Uint128::zero();
+    SHARES.save(deps.storage, (bot_id, &bot.owner), &Uint128::zero())?;
+    bot.total_shares = bot.total_shares.checked_sub(owner_shares)?;
     bot.active_orders = 0;
     BOTS.save(deps.storage, bot_id, &bot)?;
     Ok(response)
@@ -1781,6 +1794,60 @@ fn checked_ratio(
         .map_err(|_| ContractError::ArithmeticOutOfRange)
 }
 
+/// Computes the fee share mint with all divisions rounded down. `assets` is the
+/// post-settlement, pre-fee NAV in token-0 units and `supply` is pre-mint LP.
+fn fee_share_mint(
+    credited_value: Uint128,
+    fee_bps: u16,
+    assets: Uint128,
+    supply: Uint128,
+) -> Result<(Uint128, Uint128), ContractError> {
+    let fee: Uint128 = (Uint256::from(credited_value)
+        .checked_mul(Uint256::from(fee_bps))
+        .map_err(|_| ContractError::ArithmeticOutOfRange)?
+        / Uint256::from(10_000u16))
+    .try_into()
+    .map_err(|_| ContractError::ArithmeticOutOfRange)?;
+    if fee.is_zero() || supply.is_zero() || fee >= assets {
+        return Ok((fee, Uint128::zero()));
+    }
+    let shares = Uint256::from(fee)
+        .checked_mul(Uint256::from(supply))
+        .map_err(|_| ContractError::ArithmeticOutOfRange)?
+        / Uint256::from(assets.checked_sub(fee)?);
+    let shares = shares
+        .try_into()
+        .map_err(|_| ContractError::ArithmeticOutOfRange)?;
+    Ok((fee, shares))
+}
+
+/// Token-0-normalized accounting NAV, including both free and order-escrowed
+/// assets. Token-1 conversion rounds down at the bot's reference price.
+fn bot_asset_value(deps: Deps, bot_id: u64, bot: &Bot) -> Result<Uint128, ContractError> {
+    if bot.reference_price.is_zero() {
+        return Err(ContractError::InvalidPair);
+    }
+    let mut token_0 = bot.free_balances[0];
+    let mut token_1 = bot.free_balances[1];
+    for item in ORDERS
+        .prefix(bot_id)
+        .range(deps.storage, None, None, Order::Ascending)
+    {
+        let (_, order) = item?;
+        match order.side {
+            LimitOrderSide::Ask => token_0 = token_0.checked_add(order.remaining)?,
+            LimitOrderSide::Bid => token_1 = token_1.checked_add(order.remaining)?,
+        }
+    }
+    token_0
+        .checked_add(checked_ratio(
+            token_1,
+            Decimal::one().atomics(),
+            bot.reference_price.atomics(),
+        )?)
+        .map_err(Into::into)
+}
+
 struct FeeApplied {
     fee_bps: u16,
     shares: Uint128,
@@ -1788,25 +1855,19 @@ struct FeeApplied {
     source: String,
 }
 
-/// Outcome of a protocol-fee charge attempt. Keeping it an enum rather than
-/// `Option` lets reconcile distinguish "no fee configured/applicable" from a
-/// fee that could not be charged because the fee-registry is unreachable.
 enum ChargeFee {
     None,
     Applied(FeeApplied),
-    /// Fee-registry read failed. The reconcile must NOT revert -- the bot's
-    /// fill is processed anyway and the fee is skipped for this fill.
-    Unavailable(String),
 }
 
 /// Protocol fee per fill (v1, value-based): on a reconcile that credited fill
-/// proceeds, the fee-registry resolves the **single user's** effective fee bps
-/// (`FEE_TIER_PROTOCOL.md` §5, model A): the user (bot owner) keeps `value − fee`
-/// as a fresh share mint and `fee` is minted to the configured fee-collector, so
-/// total shares grow by the credited value (correct dilution, no burn). No fee is
-/// charged when the vault has no fee configured or the resolved fee is zero. A
-/// transient fee-registry failure is non-blocking: the reconcile proceeds and the
-/// fee is skipped rather than reverting the trader's fill.
+/// proceeds, the fee-registry resolves the single user's effective fee bps.
+/// The desired economic fee is `F=floor(V*bps/10_000)`. Given post-settlement,
+/// pre-fee assets `A` and pre-mint supply `S`, the collector receives
+/// `x=floor(F*S/(A-F))` shares, so its immediate pro-rata claim cannot exceed F.
+/// No fee is charged when the vault has no fee configured or the resolved fee is zero.
+/// Registry failures use the owner's last successful fee, or the canonical
+/// undiscounted fee when no local cache exists.
 fn charge_fee(
     deps: &mut DepsMut,
     config: &Config,
@@ -1817,21 +1878,31 @@ fn charge_fee(
     let (Some(registry), Some(collector)) = (&config.fee_registry, &config.fee_collector) else {
         return Ok(ChargeFee::None);
     };
-    let fee: FeeRegistryEffectiveFeeResponse = match deps.querier.query_wasm_smart(
-        registry,
-        &FeeRegistryQueryMsg::EffectiveFee {
-            trader: bot.owner.to_string(),
-        },
-    ) {
-        Ok(fee) => fee,
-        Err(err) => {
-            // Non-blocking: record why and carry on with the reconcile.
-            return Ok(ChargeFee::Unavailable(err.to_string()));
+    let (fee_bps, tier, source) = match deps
+        .querier
+        .query_wasm_smart::<FeeRegistryEffectiveFeeResponse>(
+            registry,
+            &FeeRegistryQueryMsg::EffectiveFee {
+                trader: bot.owner.to_string(),
+            },
+        ) {
+        Ok(fee) => {
+            let fee_bps = fee.fee_bps.min(10_000);
+            EFFECTIVE_FEE_CACHE.save(
+                deps.storage,
+                &bot.owner,
+                &CachedEffectiveFee {
+                    fee_bps,
+                    tier_id: fee.tier_id,
+                },
+            )?;
+            (fee_bps, fee.tier_id, format!("{:?}", fee.source))
         }
+        Err(_) => match EFFECTIVE_FEE_CACHE.may_load(deps.storage, &bot.owner)? {
+            Some(fee) => (fee.fee_bps, fee.tier_id, "vault_cached".to_string()),
+            None => (180, None, "lowest".to_string()),
+        },
     };
-    // Defensive bound: cap the effective fee at 100% (10_000 bps) so a corrupt
-    // registry response can never dilute holders beyond the credited value.
-    let fee_bps = fee.fee_bps.min(10_000);
     if fee_bps == 0 {
         return Ok(ChargeFee::None);
     }
@@ -1849,8 +1920,10 @@ fn charge_fee(
         )?;
         value_in_token0 = value_in_token0.checked_add(token1_as_token0)?;
     }
-    let fee_lp = value_in_token0.multiply_ratio(fee_bps, 10_000u16);
-    if fee_lp.is_zero() {
+    let assets = bot_asset_value(deps.as_ref(), bot_id, bot)?;
+    let (_economic_fee, fee_shares) =
+        fee_share_mint(value_in_token0, fee_bps, assets, bot.total_shares)?;
+    if fee_shares.is_zero() {
         return Ok(ChargeFee::None);
     }
 
@@ -1863,16 +1936,16 @@ fn charge_fee(
         |current: Option<Uint128>| -> StdResult<Uint128> {
             current
                 .unwrap_or_default()
-                .checked_add(fee_lp)
+                .checked_add(fee_shares)
                 .map_err(StdError::overflow)
         },
     )?;
-    bot.total_shares = bot.total_shares.checked_add(fee_lp)?;
+    bot.total_shares = bot.total_shares.checked_add(fee_shares)?;
     Ok(ChargeFee::Applied(FeeApplied {
         fee_bps,
-        shares: fee_lp,
-        tier: fee.tier_id,
-        source: format!("{:?}", fee.source),
+        shares: fee_shares,
+        tier,
+        source,
     }))
 }
 
@@ -2145,6 +2218,121 @@ mod tests {
         coin, from_json, ContractInfoResponse, ContractResult, Reply, ReplyOn, SubMsgResponse,
         SubMsgResult, SystemResult, WasmQuery,
     };
+    use proptest::prelude::*;
+    use proptest::test_runner::Config as ProptestConfig;
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 128,
+            ..ProptestConfig::default()
+        })]
+
+        #[test]
+        fn fee_mint_matches_uint256_model_without_panics(
+            credited in any::<u128>(),
+            fee_bps in 0u16..=10_000,
+            assets in any::<u128>(),
+            supply in any::<u128>(),
+        ) {
+            let result = fee_share_mint(
+                Uint128::new(credited), fee_bps, Uint128::new(assets), Uint128::new(supply));
+            let fee256 = Uint256::from(credited) * Uint256::from(fee_bps) / Uint256::from(10_000u16);
+            let fee: Uint128 = fee256.try_into().unwrap();
+            if fee.is_zero() || supply == 0 || fee.u128() >= assets {
+                prop_assert_eq!(result.unwrap(), (fee, Uint128::zero()));
+            } else {
+                let expected = fee256 * Uint256::from(supply) / Uint256::from(assets - fee.u128());
+                if expected > Uint256::from(u128::MAX) {
+                    prop_assert!(result.is_err());
+                } else {
+                    let (_, shares) = result.unwrap();
+                    prop_assert_eq!(Uint256::from(shares), expected);
+                    let claim = Uint256::from(assets) * Uint256::from(shares)
+                        / (Uint256::from(supply) + Uint256::from(shares));
+                    prop_assert!(claim <= fee256);
+                }
+            }
+        }
+
+        #[test]
+        fn fixed_nav_repeated_mints_bound_aggregate_collector_claim(
+            assets in 2u128..=u64::MAX as u128,
+            initial_supply in 1u128..=u64::MAX as u128,
+            fees in prop::collection::vec(1u16..=2_000u16, 1..16),
+        ) {
+            // Aggregate fee bounds are valid here because every mint and the final
+            // redemption use the same NAV; only supply changes between steps.
+            let mut supply = Uint128::new(initial_supply);
+            let mut collector = Uint128::zero();
+            let mut desired = Uint256::zero();
+            for fee_bps in fees {
+                let credited = Uint128::new(assets / 4);
+                let (fee, minted) = fee_share_mint(credited, fee_bps, Uint128::new(assets), supply).unwrap();
+                supply = supply.checked_add(minted).unwrap();
+                collector = collector.checked_add(minted).unwrap();
+                desired += Uint256::from(fee);
+            }
+            let claim = Uint256::from(assets) * Uint256::from(collector) / Uint256::from(supply);
+            prop_assert!(claim <= desired);
+            prop_assert_eq!(supply, Uint128::new(initial_supply).checked_add(collector).unwrap());
+        }
+
+        #[test]
+        fn changing_nav_model_bounds_each_new_tranche_not_false_aggregate(
+            initial_supply in 1u128..=u64::MAX as u128,
+            steps in prop::collection::vec((2u64..=u64::MAX, 1u16..=2_000u16), 1..16),
+        ) {
+            // With changing NAV, old collector shares may gain or lose value. Only
+            // each newly minted tranche is bounded at that step's NAV.
+            let mut supply = Uint128::new(initial_supply);
+            for (assets, fee_bps) in steps {
+                let assets = Uint128::new(assets as u128);
+                let (fee, minted) = fee_share_mint(assets / Uint128::new(4), fee_bps, assets, supply).unwrap();
+                let next_supply = supply.checked_add(minted).unwrap();
+                let immediate_claim = Uint256::from(assets) * Uint256::from(minted)
+                    / Uint256::from(next_supply);
+                prop_assert!(immediate_claim <= Uint256::from(fee));
+                supply = next_supply;
+            }
+        }
+
+        #[test]
+        fn emergency_owner_then_collector_exit_conserves_both_tokens_and_supply(
+            balances in (any::<u128>(), any::<u128>()),
+            owner_shares in 1u128..=u128::MAX,
+            collector_shares in any::<u128>(),
+        ) {
+            let collector_shares = collector_shares.min(u128::MAX - owner_shares);
+            let total = owner_shares + collector_shares;
+            for balance in [balances.0, balances.1] {
+                let owner_amount = Uint256::from(balance) * Uint256::from(owner_shares) / Uint256::from(total);
+                let reserved = Uint256::from(balance) - owner_amount;
+                let collector_amount = if collector_shares == 0 { Uint256::zero() } else { reserved };
+                prop_assert_eq!(owner_amount + collector_amount, Uint256::from(balance));
+            }
+            prop_assert_eq!(owner_shares + collector_shares, total);
+            prop_assert_eq!(total - owner_shares - collector_shares, 0);
+        }
+    }
+
+    #[test]
+    fn emergency_exit_model_covers_zero_and_max_boundaries() {
+        for balance in [0u128, 1, u128::MAX - 1, u128::MAX] {
+            for (owner, collector) in [(1u128, 0u128), (1, u128::MAX - 1), (u128::MAX, 0)] {
+                let total = owner + collector;
+                let owner_amount =
+                    Uint256::from(balance) * Uint256::from(owner) / Uint256::from(total);
+                let reserved = Uint256::from(balance) - owner_amount;
+                let collector_amount = if collector == 0 {
+                    Uint256::zero()
+                } else {
+                    reserved
+                };
+                assert_eq!(owner_amount + collector_amount, Uint256::from(balance));
+                assert_eq!(owner + collector, total);
+            }
+        }
+    }
 
     fn contract_info(code_id: u64) -> ContractInfoResponse {
         let mut response = ContractInfoResponse::default();
@@ -2174,6 +2362,13 @@ mod tests {
     }
 
     fn instantiate_default(deps: DepsMut) {
+        #[cfg(feature = "mainnet")]
+        let fees = (
+            Some(crate::mainnet::CANONICAL_FEE_REGISTRY.to_string()),
+            Some(crate::mainnet::CANONICAL_FEE_COLLECTOR.to_string()),
+        );
+        #[cfg(not(feature = "mainnet"))]
+        let fees = (None, None);
         instantiate(
             deps,
             mock_env(),
@@ -2190,11 +2385,55 @@ mod tests {
                 max_grid_count: 20,
                 max_orders_per_reconcile: 10,
                 max_active_orders_per_bot: 40,
-                fee_registry: None,
-                fee_collector: None,
+                fee_registry: fees.0,
+                fee_collector: fees.1,
             },
         )
         .unwrap();
+    }
+
+    #[test]
+    fn fee_share_mint_is_exact_across_navs_and_never_overclaims() {
+        let supply = Uint128::new(1_000);
+        for assets in [500u128, 1_000, 2_000, 1_337] {
+            let assets = Uint128::new(assets);
+            let (fee, shares) = fee_share_mint(Uint128::new(500), 200, assets, supply).unwrap();
+            assert_eq!(fee, Uint128::new(10));
+            assert_eq!(
+                shares,
+                fee.multiply_ratio(supply, assets.checked_sub(fee).unwrap())
+            );
+            let collector_claim = assets.multiply_ratio(shares, supply + shares);
+            assert!(collector_claim <= fee);
+        }
+    }
+
+    #[test]
+    fn fee_share_mint_handles_zero_and_fee_at_or_above_assets() {
+        assert_eq!(
+            fee_share_mint(
+                Uint128::new(500),
+                0,
+                Uint128::new(1_000),
+                Uint128::new(1_000)
+            )
+            .unwrap(),
+            (Uint128::zero(), Uint128::zero())
+        );
+        assert_eq!(
+            fee_share_mint(
+                Uint128::new(100),
+                10_000,
+                Uint128::new(100),
+                Uint128::new(1_000)
+            )
+            .unwrap(),
+            (Uint128::new(100), Uint128::zero())
+        );
+        assert_eq!(
+            fee_share_mint(Uint128::new(100), 100, Uint128::new(1_000), Uint128::zero()).unwrap(),
+            (Uint128::new(1), Uint128::zero())
+        );
     }
 
     fn install_pair_querier(

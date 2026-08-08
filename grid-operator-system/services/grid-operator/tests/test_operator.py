@@ -1,17 +1,18 @@
 import base64
 import copy
 import json
-import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
 from grid_operator.db import Database
+from grid_operator.config import Config
 from grid_operator.indexer import Indexer, ReorgError
 from grid_operator.keeper import Keeper
-from grid_operator.rpc import RpcError
+from grid_operator.rpc import RpcError, Terrad
+from grid_operator.reliability import StateIdentityError
+from grid_operator.cli import resolve_intervention
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -29,6 +30,47 @@ def fill(pair="pairA", order_id=7, side="ask", amount0=10, amount1=20, maker="va
     return attrs(_contract_address=pair, action="limit_order_fill", maker=maker,
                  order_id=order_id, side=side, token0_amount=amount0, token1_amount=amount1)
 
+
+class ConfigTests(unittest.TestCase):
+    def valid_environment(self):
+        return {"GRID_RPC_URL": "http://rpc", "GRID_CHAIN_ID": "chain"}
+
+    def test_rejects_zero_poll_timeout_and_loop_values(self):
+        for name in ("GRID_TX_POLL_SECONDS", "GRID_TX_TIMEOUT_SECONDS", "GRID_LOOP_SECONDS"):
+            with patch.dict("os.environ", {**self.valid_environment(), name: "0"}, clear=True):
+                with self.assertRaises(ValueError, msg=name):
+                    Config.from_env()
+
+    def test_external_signer_protocol_uses_argv_and_strict_json(self):
+        unsigned = {"body": {}, "auth_info": {}, "signatures": []}
+        signed = base64.b64encode(json.dumps(unsigned).encode()).decode()
+        responses = [
+            MagicResult(b'{"address":"terra1keeper"}'),
+            MagicResult(b'{"address":"terra1keeper"}'),
+            MagicResult(json.dumps(unsigned).encode()),
+            MagicResult(json.dumps({"signed_tx": signed}).encode()),
+        ]
+        terrad = Terrad("terrad", "rpc", "chain", "key", "os",
+                        signer_command=("/signer", "--profile", "grid"))
+        with patch("grid_operator.rpc.subprocess.run", side_effect=responses) as run:
+            self.assertEqual(terrad.key_address(), "terra1keeper")
+            terrad.sign_execute("vault", {"reconcile": {}})
+        signer_calls = [call for call in run.call_args_list if call.args[0][0] == "/signer"]
+        self.assertTrue(signer_calls)
+        self.assertTrue(all(call.args[0] == ["/signer", "--profile", "grid"] for call in signer_calls))
+        request = json.loads(signer_calls[-1].kwargs["input"])
+        self.assertEqual(set(request), {"version", "action", "chain_id", "signer", "unsigned_tx"})
+
+    def test_rejects_invalid_deployment_and_negative_finality(self):
+        for name, value in (("GRID_DEPLOYMENT_HEIGHT", "0"), ("GRID_FINALITY_DEPTH", "-1")):
+            with patch.dict("os.environ", {**self.valid_environment(), name: value}, clear=True):
+                with self.assertRaises(ValueError, msg=name):
+                    Config.from_env()
+
+
+class MagicResult:
+    def __init__(self, stdout, returncode=0):
+        self.stdout, self.stderr, self.returncode = stdout, b"", returncode
 
 class FakeRPC:
     def __init__(self, blocks, results, latest=None):
@@ -179,7 +221,8 @@ class IndexerTests(unittest.TestCase):
             row[1] for row in self.db.conn.execute("PRAGMA table_info(batches)")
         }
         self.assertTrue({"failure_count", "next_retry_at"}.issubset(batch_columns))
-        self.assertEqual(self.db.conn.execute("PRAGMA user_version").fetchone()[0], 3)
+        self.assertIn("operator_audit", tables)
+        self.assertEqual(self.db.conn.execute("PRAGMA user_version").fetchone()[0], 5)
 
     def test_schema_one_database_migrates_retry_columns(self):
         legacy_path = Path(self.temp.name) / "legacy.sqlite"
@@ -193,7 +236,7 @@ class IndexerTests(unittest.TestCase):
         legacy.migrate()
         columns = {row[1] for row in legacy.conn.execute("PRAGMA table_info(batches)")}
         self.assertTrue({"failure_count", "next_retry_at"}.issubset(columns))
-        self.assertEqual(legacy.conn.execute("PRAGMA user_version").fetchone()[0], 3)
+        self.assertEqual(legacy.conn.execute("PRAGMA user_version").fetchone()[0], 5)
         tables = {row[0] for row in legacy.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         self.assertIn("discovered_vaults", tables)
         legacy.conn.close()
@@ -236,8 +279,21 @@ class IndexerTests(unittest.TestCase):
         legacy.migrate()
         tables = {row[0] for row in legacy.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         self.assertIn("discovered_vaults", tables)
-        self.assertEqual(legacy.conn.execute("PRAGMA user_version").fetchone()[0], 3)
+        self.assertEqual(legacy.conn.execute("PRAGMA user_version").fetchone()[0], 5)
         legacy.conn.close()
+
+    def test_database_identity_refuses_changed_chain_vault_or_signer(self):
+        identity = {"schema_version": 1, "chain_id": "chain", "vaults": ["vault1"],
+                    "signer": "os:key1", "protocol_kind": "limit-grid"}
+        empty = Database(Path(self.temp.name) / "identity.sqlite")
+        empty.migrate()
+        empty.validate_identity(identity)
+        for changed in ({**identity, "chain_id": "other"},
+                        {**identity, "vaults": ["vault2"]},
+                        {**identity, "signer": "os:key2"}):
+            with self.assertRaises(StateIdentityError):
+                empty.validate_identity(changed)
+        empty.conn.close()
 
 
 class FakeTerrad:
@@ -330,7 +386,7 @@ class KeeperTests(unittest.TestCase):
         self.assertEqual(tuple(row), ("intervention", 3, None))
 
     def test_delivertx_failure_does_not_advance_checkpoint(self):
-        terrad = FakeTerrad(queries=[{"code": 9, "height": "20", "raw_log": "reverted"}])
+        terrad = FakeTerrad(queries=[{"code": 9, "height": "20", "txhash": "ABC", "raw_log": "reverted"}])
         keeper = Keeper(self.db, terrad)
         result = keeper.process_batch(keeper.freeze_batch("vault1"))
         self.assertEqual(result, "deliver_failed")
@@ -340,6 +396,7 @@ class KeeperTests(unittest.TestCase):
         transaction = {
             "code": 0,
             "height": "20",
+            "txhash": "ABC",
             "logs": [{"events": [attrs(action="reverted_grid_page", bot_id=1)]}],
         }
         keeper = Keeper(self.db, FakeTerrad(queries=[transaction]))
@@ -400,6 +457,25 @@ class KeeperTests(unittest.TestCase):
         self.assertEqual(restarted_terrad.broadcasts, 0)
         restarted.db.conn.close()
 
+    def test_missing_broadcast_code_is_unknown_and_not_retried(self):
+        terrad = FakeTerrad(broadcast={"txhash": "ABC"})
+        keeper = Keeper(self.db, terrad)
+        batch = keeper.freeze_batch("vault1")
+        self.assertEqual(keeper.process_batch(batch), "unknown")
+        self.assertEqual(keeper.process_batch(batch), "unknown")
+        self.assertEqual(terrad.broadcasts, 1)
+
+    def test_mismatched_polled_hash_preserves_pending_batch(self):
+        now = [0]
+        terrad = FakeTerrad(queries=[{"code": 0, "height": "20", "txhash": "OTHER"}])
+        keeper = Keeper(
+            self.db, terrad, poll_seconds=1, timeout_seconds=1,
+            clock=lambda: now[0], sleep=lambda seconds: now.__setitem__(0, now[0] + seconds),
+        )
+        batch = keeper.freeze_batch("vault1")
+        self.assertEqual(keeper.process_batch(batch), "timeout")
+        self.assertIsNone(self.db.conn.execute("SELECT reconciled_batch_id FROM raw_events").fetchone()[0])
+
     def test_restart_in_broadcasting_crash_window_becomes_unknown(self):
         keeper = Keeper(self.db, FakeTerrad())
         batch = keeper.freeze_batch("vault1")
@@ -432,6 +508,80 @@ class KeeperTests(unittest.TestCase):
         self.assertEqual(result["vault1"], "confirmed")
         self.assertEqual(called, ["vault1"])
         self.assertEqual(self.db.conn.execute("SELECT COUNT(*) FROM aggregates").fetchone()[0], 0)
+
+    def test_late_fill_before_confirm_is_consumed_exactly_once(self):
+        terrad = FakeTerrad(queries=[{"code": 0, "height": "20", "txhash": "ABC"}])
+        keeper = Keeper(self.db, terrad)
+        batch = keeper.freeze_batch("vault1")
+        self.add_event(2, 19, "pairA", 7, "7", "11")
+
+        self.assertEqual(keeper.process_batch(batch), "confirmed")
+        rows = self.db.conn.execute(
+            "SELECT id,reconciled_batch_id FROM raw_events ORDER BY id"
+        ).fetchall()
+        self.assertEqual([(row["id"], row["reconciled_batch_id"]) for row in rows],
+                         [(1, batch), (2, batch)])
+        self.assertIsNone(keeper.freeze_batch("vault1"))
+
+    def test_confirm_preserves_fill_after_execution_height(self):
+        keeper = Keeper(self.db, FakeTerrad(queries=[{"code": 0, "height": "20", "txhash": "ABC"}]))
+        batch = keeper.freeze_batch("vault1")
+        self.add_event(2, 21, "pairA", 7, "7", "11")
+
+        self.assertEqual(keeper.process_batch(batch), "confirmed")
+        self.assertIsNotNone(keeper.freeze_batch("vault1"))
+        self.assertIsNone(self.db.conn.execute(
+            "SELECT reconciled_batch_id FROM raw_events WHERE id=2"
+        ).fetchone()[0])
+
+    def test_reason_specific_intervention_resolve_is_audited_and_backed_up(self):
+        keeper = Keeper(self.db, FakeTerrad(broadcast={"code": 12, "txhash": "BAD"}),
+                        wall_clock=lambda: 1000)
+        batch = keeper.freeze_batch("vault1")
+        for delay in (0, 60, 180):
+            keeper.wall_clock = lambda delay=delay: 1000 + delay
+            keeper.process_batch(batch)
+
+        terrad = FakeTerrad()
+        terrad.smart_query = lambda _vault, message: {"pair": "pairA"} if "bot" in message else []
+        terrad.account_state = lambda: {"address": "keeper", "account_number": "1", "sequence": "9"}
+        result = resolve_intervention(self.db, terrad, batch, "check_failed")
+        self.assertTrue(Path(result["backup"]).exists())
+        self.assertEqual(self.db.conn.execute("SELECT state FROM batches WHERE id=?", (batch,)).fetchone()[0],
+                         "ready")
+        self.assertEqual(self.db.conn.execute(
+            "SELECT action FROM operator_audit ORDER BY id DESC LIMIT 1").fetchone()[0],
+            "clear-intervention")
+
+    def test_unknown_broadcast_cannot_use_intervention_resolve(self):
+        batch = Keeper(self.db, FakeTerrad(broadcast_error=RpcError("reset"))).freeze_batch("vault1")
+        Keeper(self.db, FakeTerrad(broadcast_error=RpcError("reset"))).process_batch(batch)
+        with self.assertRaises(ValueError):
+            resolve_intervention(self.db, FakeTerrad(), batch, "check_failed")
+
+    def test_late_fill_is_not_marked_on_failure_or_unknown(self):
+        for mode in ("failure", "unknown"):
+            with self.subTest(mode=mode):
+                path = Path(self.temp.name) / f"{mode}.sqlite"
+                db = Database(path)
+                db.migrate()
+                db.conn.execute("INSERT INTO vaults(address,bot_id,pair_address) VALUES('vault1',1,'pairA')")
+                db.conn.execute(
+                    "INSERT INTO raw_events(id,chain_id,height,block_hash,tx_hash,tx_index,event_index,pair_address,order_id,"
+                    "vault_address,bot_id,side,input_amount,output_amount,raw_json) "
+                    "VALUES(1,'chain',10,'h','one',0,0,'pairA',7,'vault1',1,'ask','1','2','{}')")
+                terrad = (FakeTerrad(broadcast={"code": 12, "txhash": "BAD"}) if mode == "failure"
+                          else FakeTerrad(broadcast_error=RpcError("reset")))
+                keeper = Keeper(db, terrad)
+                batch = keeper.freeze_batch("vault1")
+                db.conn.execute(
+                    "INSERT INTO raw_events(id,chain_id,height,block_hash,tx_hash,tx_index,event_index,pair_address,order_id,"
+                    "vault_address,bot_id,side,input_amount,output_amount,raw_json) "
+                    "VALUES(2,'chain',11,'h','two',0,0,'pairA',7,'vault1',1,'ask','3','4','{}')")
+                keeper.process_batch(batch)
+                self.assertEqual(db.conn.execute(
+                    "SELECT COUNT(*) FROM raw_events WHERE reconciled_batch_id IS NOT NULL").fetchone()[0], 0)
+                db.conn.close()
 
 
 if __name__ == "__main__":

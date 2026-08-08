@@ -1,30 +1,74 @@
 # Release Engineering
 
-Releases are generated only from annotated `v*` tags whose cryptographic
-signature GitHub verifies. Lightweight or unsigned tags fail before a build.
-The release workflow builds both Cargo workspaces twice, compares every Wasm
-digest, generates an SPDX JSON SBOM, creates a GitHub Sigstore provenance
-attestation, and publishes all evidence with `SHA256SUMS`.
+## Current Status
+
+**Production release is blocked operationally, not by the former workspace or
+feature omissions.** The repository has four Cargo workspaces:
+`rebalancer-system`, `market-grid-system`, `limit-grid-system`, and `fee-system`.
+Current CI, security, Wasm, reproducible-build, and release definitions cover all
+four, produce default and `mainnet` artifact sets, and emit per-workspace
+manifests. Release checks include tag ancestry and the dedicated canonical fee
+E2E job.
+
+Limit-grid remains in the artifact set as an abandoned **PoC** for reproducibility
+and research. Its artifacts are not approved production candidates and must not
+be deployed with economic funds.
+
+`mainnet` compilation requires nonempty `CL8Y_CANONICAL_FEE_REGISTRY`,
+`CL8Y_CANONICAL_FEE_COLLECTOR`, and `CL8Y_CANONICAL_SWAP_PROXY` values for the
+vaults that use them. Limit-grid requires registry and collector but has no
+proxy. Missing registry input was explicitly verified to fail compilation.
+Approved production values are not yet available, so no production artifact set
+can be approved or deployed. See
+[`docs/DEPLOY_FEE_SYSTEM.md`](docs/DEPLOY_FEE_SYSTEM.md) for the complete gate.
+Do not publish or deploy a production candidate until approved addresses,
+deployment/pinning decisions, E2E evidence, and the remaining audit gates are
+verified.
+
+## Intended Release Properties
+
+Releases are triggered only by annotated `v*` tags whose cryptographic signature
+GitHub verifies. The workflow checks required jobs for the tagged SHA, performs
+double builds, compares Wasm digests, creates an SPDX JSON SBOM and GitHub
+Sigstore provenance, and publishes `SHA256SUMS`.
+
+The current working-tree workflow is intended to:
+
+1. Build all four Cargo workspaces.
+2. Publish `cl8y_fee_registry.wasm` and `cl8y_fee_collector.wasm` with the
+   `mainnet` feature.
+3. Build every fee-aware vault with the `mainnet` feature, with limit-grid
+   explicitly classified as PoC-only.
+4. Ensure optimizer/reproducible builds use those features rather than default
+   workspace features.
+5. Double-build and compare every production Wasm.
+6. Run and retain mainnet-lock tests and artifact checks for the exact tag SHA.
+7. Attest and checksum the complete artifact set.
+8. Include fee-system source-quality and dependency-policy checks in required
+   release evidence.
+9. Record factory address and runtime pair code ID for every market-grid and
+   rebalancer deployment and re-register every `0.2.0` proxy route.
+
+The definitions implement these properties, but workflow presence is not run
+evidence. Package-version-to-tag consistency and narrowing/expiry of the
+`RUSTSEC-2024-0344` exception remain open release-policy items.
 
 ## Pinned Inputs
 
 - Rust is pinned by `rust-toolchain.toml` to `1.81.0`, including `rustfmt`,
   `clippy`, and `wasm32-unknown-unknown`.
-- Actions are referenced by immutable commit SHA. The adjacent version comment
-  is for Dependabot and human review only.
+- GitHub Actions are referenced by immutable commit SHA.
 - Wasm optimization uses
   `cosmwasm/workspace-optimizer:0.16.1@sha256:b9c92b2900b7ebaab3499203615c1b8589592bc557355ed3432e48851ffde69e`.
-  Update the tag and digest together in `Makefile`, the workflows, and the
-  LocalTerra deploy helper after verifying the registry manifest.
-- Security-tool source revisions are pinned in
-  `.github/scripts/install-security-tools.sh` and `security.yml`. They use the
-  runner's current stable compiler so they can parse current advisory formats;
-  project compilation remains pinned to Rust 1.81.0.
+- Security-tool revisions are pinned in
+  `.github/scripts/install-security-tools.sh` and `security.yml`.
+
+Update a tool tag and digest together only after verifying the registry
+manifest.
 
 ## Candidate Validation
 
-Run the local counterparts of the required source, security, and Wasm checks
-before tagging:
+The existing local commands remain useful source checks:
 
 ```sh
 make ci
@@ -32,48 +76,44 @@ make security
 make reproducible
 ```
 
-`make security` installs the pinned scanner revisions if needed and requires
-network access. `make reproducible` requires Docker and writes optimized Wasm
-and build evidence to `artifacts/release/`.
+`make test` and `make clippy` passed in this working tree across all four
+workspaces and their configured `mainnet` gates. The reproducible target now
+double-builds default and mainnet artifact sets for all four workspaces and emits
+manifests, but the primary validation did not run that target. Selected double
+builds reported elsewhere are not a claim that the complete release set was
+reproduced here.
 
-LocalTerra E2E is scheduled and manually dispatchable because it clones a
-pinned upstream revision, starts privileged external services, and can be
-network-sensitive. Its logs are retained as workflow artifacts. A successful
-E2E run must pass on the exact release-candidate commit, but it is intentionally
-not triggered by every pull request.
+Canonical fee-disabled and fee-enabled LocalTerra workflows are
+scheduled/manually dispatchable and must pass on the exact candidate SHA. The
+dedicated fee target/workflow was added but was not run locally in this working
+tree, so it is not current evidence.
 
-The grid system deploys strictly against the pinned CL8Y pair contract as
-shipped; no pair modification, fork, or upstream dependency is permitted. The
-two vault designs are split into two independent Cargo workspaces:
-`limit-grid-system` and `market-grid-system`:
+Market-grid `grid-vault-swap`, rebalancer `bot-vault`, `swap-proxy`, and
+`bot-liquidity` are version `0.2.0`. Pair provenance fields are required.
+Market-grid and bot-vault 0.1.x require redeployment. A swap-proxy 0.1.x with any
+routes rejects migration and requires a fresh 0.2.0 proxy plus route
+re-registration; only empty compatible proxy state may migrate. Bot-liquidity
+0.1.x rejects migration because no trusted admin can be derived. Limit
+grid-vault 0.1.0 to 0.1.1 is supported, and fee-system initial fixtures remain
+queryable after migration. No 0.2.0 redeployment or artifact rollout has been
+executed.
 
-- `limit-grid-system` (`grid-vault`/`grid-manager`, the limit-order maker design)
-  reconciles against the shipped CL8Y DEX pair using only its shipped queries.
-  The vault
-  records its own cancels locally and classifies any order that vanished without
-  a recorded cancel as fully executed, so it needs no pair queries beyond
-  `LimitOrder` and `ExpiredLimitRefund`, and no fork or upstream PR.
-- `market-grid-system` (`grid-vault-swap`) is the swap-only design. It
-  holds CW20 balances in the vault, reads the pool price, and executes classic
-  `Swap` calls when the price crosses a grid level. No limit orders, no pair
-  custody, no reconciliation state. It uses the exact pair API as shipped
-  (`Pool`, `Observe`, `Swap` via CW20 hook) and requires no upstream merge.
+## Publishing After Unblock
 
-The shared `grid-operator` and protocol documentation remain under
-`grid-operator-system`.
+1. Supply approved registry, collector, and proxy environment values and verify the pipeline
+   builds all four workspaces and all expected mainnet-feature Wasms on the
+   candidate SHA.
+2. Run canonical E2E and an explicit fee-enabled deployment rehearsal on that
+   SHA; retain logs, hashes, feature flags, and code IDs.
+3. Confirm compiled production values match approved deployments and lock tests
+   reject missing or alternate registry/collector/proxy addresses.
+4. Execute the contract-specific `0.2.0` redeployment plan, re-register routes,
+   and retain factory/pair/code-ID evidence. Never migrate incompatible 0.1.x
+   state; only the explicitly supported empty-proxy, limit 0.1.0-to-0.1.1, and
+   fee-system paths may use migration.
+5. Create and push an annotated signed tag matching the release package version.
+6. Review the complete `Signed release` evidence before publishing/deploying.
+7. Verify `SHA256SUMS` and provenance with `gh attestation verify`.
 
-## Publishing
-
-1. Manually dispatch LocalTerra E2E for the exact candidate commit and confirm
-   all required workflows pass on that same SHA.
-2. Create and push an annotated signed tag, for example
-   `git tag -s v0.1.0 -m 'v0.1.0' && git push origin v0.1.0`.
-3. Review the `Signed release` run and its retained evidence.
-4. Verify downloaded assets with `sha256sum -c SHA256SUMS` from the directory
-   containing the release tree, and verify provenance with `gh attestation
-   verify <artifact> --repo RenneBeau/CL8Y-DeX-bot-and-liquidity-contracts`.
-
-GitHub environment protection and branch protection are repository settings
-and cannot be represented fully in this tree. The repository currently requires
-source, security, and Wasm checks on `main`, and owner approval through the
-`release` environment. Verify those live settings before each release.
+Repository environment and branch protections are live GitHub settings. Verify
+them independently for each release; this tree cannot prove their current state.

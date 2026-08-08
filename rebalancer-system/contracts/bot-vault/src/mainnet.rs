@@ -1,73 +1,56 @@
-//! Canonical mainnet addresses for the `mainnet` production-lock feature.
-//!
-//! The fee-collector and the shared swap-proxy are not yet deployed on mainnet,
-//! so these are `None`. Once they are live, put their addresses here: with the
-//! `mainnet` feature enabled, `instantiate` rejects any other `fee_collector` /
-//! `proxy` and the update messages refuse to re-point them, so a deploying or
-//! admin key cannot wire the vault to a personal collector or callback proxy.
+//! Canonical addresses embedded in `mainnet` production-lock builds.
 
 use cosmwasm_std::Addr;
 
 use crate::error::ContractError;
 
-/// Canonical fee-collector address on Terra Classic mainnet.
-#[cfg(feature = "mainnet")]
-pub const CANONICAL_FEE_COLLECTOR: Option<&str> = None;
-/// Canonical shared swap-proxy address on Terra Classic mainnet.
-#[cfg(feature = "mainnet")]
-pub const CANONICAL_SWAP_PROXY: Option<&str> = None;
+const fn require_populated(value: &'static str) -> &'static str {
+    if value.as_bytes().is_empty() {
+        panic!("canonical mainnet address environment variable is empty");
+    }
+    value
+}
 
-/// Verify `collector` against a pinned canonical address.
-///
-/// The pin is active only when `canonical` is `Some`: a differing address or a
-/// missing collector (`None`, which would stop the vault charging any protocol
-/// fee) is rejected. While `canonical` is `None` (contract not yet deployed)
-/// any value is accepted, so local/E2E dummy-address deployments keep working
-/// without the feature.
-fn assert_fee_collector_canonical(
-    canonical: Option<&'static str>,
-    collector: Option<&Addr>,
-) -> Result<(), ContractError> {
-    match (canonical, collector) {
-        (Some(expected), Some(collector)) if collector.as_str() == expected => Ok(()),
-        (Some(expected), _) => Err(ContractError::NonCanonicalAddress {
-            field: "fee_collector",
-            expected,
+/// Canonical fee-collector address supplied to the production build.
+pub const CANONICAL_FEE_COLLECTOR: &str = require_populated(env!("CL8Y_CANONICAL_FEE_COLLECTOR"));
+/// Canonical fee-registry address supplied to the production build.
+pub const CANONICAL_FEE_REGISTRY: &str = require_populated(env!("CL8Y_CANONICAL_FEE_REGISTRY"));
+/// Canonical shared swap-proxy address supplied to the production build.
+pub const CANONICAL_SWAP_PROXY: &str = require_populated(env!("CL8Y_CANONICAL_SWAP_PROXY"));
+
+pub fn assert_fee_registry_canonical_mainnet(registry: Option<&Addr>) -> Result<(), ContractError> {
+    match registry {
+        Some(registry) if registry.as_str() == CANONICAL_FEE_REGISTRY => Ok(()),
+        _ => Err(ContractError::NonCanonicalAddress {
+            field: "fee_registry",
+            expected: CANONICAL_FEE_REGISTRY,
         }),
-        (None, _) => Ok(()),
     }
 }
 
-/// The public entrypoint for the fee-collector pin.
-#[cfg(feature = "mainnet")]
 pub fn assert_fee_collector_canonical_mainnet(
     collector: Option<&Addr>,
 ) -> Result<(), ContractError> {
-    assert_fee_collector_canonical(CANONICAL_FEE_COLLECTOR, collector)
-}
-
-/// Verify `proxy` against a pinned canonical address.
-fn assert_proxy_canonical(
-    canonical: Option<&'static str>,
-    proxy: &Addr,
-) -> Result<(), ContractError> {
-    match (canonical, proxy.as_str()) {
-        (Some(expected), actual) if actual == expected => Ok(()),
-        (Some(expected), _) => Err(ContractError::NonCanonicalAddress {
-            field: "proxy",
-            expected,
+    match collector {
+        Some(collector) if collector.as_str() == CANONICAL_FEE_COLLECTOR => Ok(()),
+        _ => Err(ContractError::NonCanonicalAddress {
+            field: "fee_collector",
+            expected: CANONICAL_FEE_COLLECTOR,
         }),
-        (None, _) => Ok(()),
     }
 }
 
-/// The public entrypoint for the swap-proxy pin.
-#[cfg(feature = "mainnet")]
 pub fn assert_proxy_canonical_mainnet(proxy: &Addr) -> Result<(), ContractError> {
-    assert_proxy_canonical(CANONICAL_SWAP_PROXY, proxy)
+    if proxy.as_str() == CANONICAL_SWAP_PROXY {
+        Ok(())
+    } else {
+        Err(ContractError::NonCanonicalAddress {
+            field: "proxy",
+            expected: CANONICAL_SWAP_PROXY,
+        })
+    }
 }
 
-#[cfg(feature = "mainnet")]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -78,35 +61,23 @@ mod tests {
 
     #[test]
     fn collector_pin_rejects_non_canonical_and_none() {
-        let canonical = Some("terra1collector");
-        assert!(assert_fee_collector_canonical(canonical, Some(&addr("terra1collector"))).is_ok());
-        assert!(assert_fee_collector_canonical(canonical, Some(&addr("terra1fake"))).is_err());
-        assert!(assert_fee_collector_canonical(canonical, None).is_err());
-    }
-
-    #[test]
-    fn collector_pin_is_inert_while_unset() {
-        assert!(assert_fee_collector_canonical(None, Some(&addr("terra1whatever"))).is_ok());
-        assert!(assert_fee_collector_canonical(None, None).is_ok());
-    }
-
-    #[test]
-    fn proxy_pin_rejects_non_canonical_and_is_inert_while_unset() {
-        let canonical = Some("terra1proxy");
-        assert!(assert_proxy_canonical(canonical, &addr("terra1proxy")).is_ok());
-        assert!(assert_proxy_canonical(canonical, &addr("terra1fake")).is_err());
-        assert!(assert_proxy_canonical(None, &addr("terra1whatever")).is_ok());
-    }
-
-    #[test]
-    fn public_endpoints_use_the_config_constants() {
-        assert_eq!(
-            assert_fee_collector_canonical_mainnet(Some(&addr("anything"))).is_ok(),
-            CANONICAL_FEE_COLLECTOR.is_none()
+        assert!(
+            assert_fee_collector_canonical_mainnet(Some(&addr(CANONICAL_FEE_COLLECTOR))).is_ok()
         );
-        assert_eq!(
-            assert_proxy_canonical_mainnet(&addr("anything")).is_ok(),
-            CANONICAL_SWAP_PROXY.is_none()
-        );
+        assert!(assert_fee_collector_canonical_mainnet(Some(&addr("terra1fake"))).is_err());
+        assert!(assert_fee_collector_canonical_mainnet(None).is_err());
+    }
+
+    #[test]
+    fn registry_pin_rejects_non_canonical_and_none() {
+        assert!(assert_fee_registry_canonical_mainnet(Some(&addr(CANONICAL_FEE_REGISTRY))).is_ok());
+        assert!(assert_fee_registry_canonical_mainnet(Some(&addr("terra1fake"))).is_err());
+        assert!(assert_fee_registry_canonical_mainnet(None).is_err());
+    }
+
+    #[test]
+    fn proxy_pin_rejects_non_canonical() {
+        assert!(assert_proxy_canonical_mainnet(&addr(CANONICAL_SWAP_PROXY)).is_ok());
+        assert!(assert_proxy_canonical_mainnet(&addr("terra1fake")).is_err());
     }
 }

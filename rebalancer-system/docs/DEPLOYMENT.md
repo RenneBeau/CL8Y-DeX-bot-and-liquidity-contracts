@@ -6,18 +6,31 @@ change the bot settings later.
 
 ## Upgrade Policy
 
-The contracts expose guarded `migrate` entry points that verify the cw2 contract
-identity and preserve existing storage. Rebalancer vault migration deliberately
-revokes the legacy liquidity binding because older releases did not verify it;
-the admin must bind the deployed bot-liquidity contract again after migration.
-Pending admin proposals are cleared. Internal admin migration does not transfer
-the chain-level Wasm admin. Migrated vaults start paused and require a verified
-liquidity rebind before `resume`. Rehearse the exact source version and funded-state
-fixture before any production upgrade; the current local migration tests are not
-a substitute for a chain rehearsal.
+Migration acceptance is contract-specific and proven with frozen raw-state
+fixtures. Never migrate merely because a guarded entry point exists:
+
+- `bot-vault` 0.1.x must be redeployed as 0.2.0;
+- `swap-proxy` 0.1.x with any routes rejects migration and must be replaced by a
+  fresh 0.2.0 proxy with route re-registration; empty compatible proxy state may
+  migrate;
+- `bot-liquidity` 0.1.x rejects migration because its state cannot provide a
+  trusted admin; redeploy it.
+
+Supported future migrations still verify CW2 identity/version and apply their
+documented state transition. Internal admin migration never transfers the
+chain-level Wasm admin. Rehearse the exact frozen source fixture and funded chain
+state before any production upgrade; local fixture tests are not a chain
+rehearsal.
 
 Release gates, multisig separation, canary caps, pause commands and monitoring
 stop conditions are defined in [`RELEASE_READINESS.md`](RELEASE_READINESS.md).
+
+> **Production blocked:** mainnet artifacts require approved nonempty
+> `CL8Y_CANONICAL_FEE_REGISTRY`, `CL8Y_CANONICAL_FEE_COLLECTOR`, and
+> `CL8Y_CANONICAL_SWAP_PROXY` build inputs,
+> but production addresses are not yet available. Complete
+> [`../../docs/DEPLOY_FEE_SYSTEM.md`](../../docs/DEPLOY_FEE_SYSTEM.md) before
+> using this guide for economic deployment.
 
 ## Contract Instances
 
@@ -27,8 +40,8 @@ Upload each Wasm code once:
 - `cl8y_bot_vault.wasm`: one new instance for every CL8Y pair bot.
 - `cl8y_bot_liquidity.wasm`: one new instance for every vault.
 
-For ten bot pairs, the normal deployment is one proxy, ten vaults, and ten bot
-LP contracts.
+For ten bots, the normal deployment is one proxy, ten vaults, and ten bot LP
+contracts. Multiple vaults may use the same CL8Y pair.
 
 ## Build And Upload
 
@@ -101,10 +114,11 @@ terrad tx wasm instantiate <PROXY_CODE_ID> '<JSON_ABOVE>' \
   --admin <PROXY_ADMIN_MULTISIG> $TX_FLAGS
 ```
 
-Record `PROXY_ADDRESS`. The proxy never holds tokens: Vaults route their pool
-swaps through it, and because the proxy is whitelisted on the CL8Y DEX those
-swaps pay no DEX fee. Protocol fees are pushed directly to the fee-collector by
-the vault itself.
+Record `PROXY_ADDRESS`. The proxy does not retain routed tokens. Production
+requires this exact deployed proxy address to be supplied at mainnet compile
+time, independently verified, and separately whitelisted on
+the CL8Y DEX before zero DEX fee can be claimed. That mainnet state is not yet
+established. Protocol-fee LP is minted by the vault, not by the proxy.
 
 ## Deploy A Bot For A Pair
 
@@ -118,6 +132,9 @@ Repeat these steps for every new pair.
   "keeper": "<KEEPER_WALLET>",
   "proxy": "<PROXY_ADDRESS>",
   "pair": "<PAIR_ADDRESS>",
+  "factory": "<CL8Y_FACTORY_ADDRESS>",
+  "pair_code_id": 456,
+  "liquidity_code_id": 123,
   "twap_window_seconds": 60,
   "rebalance_threshold_bps": 500,
   "allocation_tolerance_bps": 500,
@@ -126,7 +143,9 @@ Repeat these steps for every new pair.
   "quote_slippage_bps": 200,
   "max_spot_twap_deviation_bps": 500,
   "max_trade_pool_bps": 1000,
-  "max_spread": "0.05"
+  "max_spread": "0.05",
+  "fee_registry": "<FEE_REGISTRY_ADDRESS>",
+  "fee_collector": "<FEE_COLLECTOR_ADDRESS>"
 }
 ```
 
@@ -147,8 +166,19 @@ Settings:
   pool reserve, and 10% CL8Y spread.
 - `60` is a short-term starting point, not a universal safe value. Benchmark
   30-300 seconds against the pair's liquidity, block time, and volatility.
+- `liquidity_code_id` is required and must identify the governance-approved
+  `bot-liquidity` upload.
+- `factory` must return `pair` for the ordered assets, and `pair_code_id` must
+  equal the pair's current approved runtime code ID. The vault and proxy recheck
+  that code before swaps.
+- `fee_registry` and `fee_collector` are required for production fee charging.
+  If either is absent, no protocol-fee LP is minted.
 
 Record `VAULT_ADDRESS`.
+
+This is the `0.2.0` schema. A `bot-vault` 0.1.x instance must be redeployed and
+its route registered against the 0.2.0 proxy. Do not migrate it in place. No
+production redeployment plan or artifacts have been executed yet.
 
 ### 2. Instantiate The Bot LP Contract
 
@@ -214,7 +244,8 @@ The proxy admin executes:
 ```
 
 The proxy verifies the pair, ordered token addresses, vault, and proxy before
-saving the route. One vault route can be registered for each CL8Y pair.
+saving the route. Routes are keyed by vault, so multiple approved vaults may
+use one CL8Y pair.
 
 ### 5. Verify Initialization
 
@@ -231,9 +262,11 @@ Bot LP:    {"token_info":{}}
 Registry:  {"effective_fee":{"trader":"<HOLDER_ADDRESS>"}}
 ```
 
-Confirm the pair and token order, keeper, liquidity address, initial zero bot
-LP supply, and that the proxy config exposes only the admin. Protocol fee tiers
-are resolved per LP holder through the fee-registry at fill time.
+Confirm the pair and token order, keeper, liquidity address and code ID, fee
+addresses, initial zero bot LP supply, and that the proxy config exposes only
+the admin. The protocol fee resolves `config.admin`, not each LP holder. Confirm
+the canonical base fee is 180 bps and the collector/proxy addresses match the
+populated mainnet constants.
 
 ## First Deposit
 

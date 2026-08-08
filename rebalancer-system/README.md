@@ -3,8 +3,9 @@
 This Cargo workspace contains the portfolio rebalancing system. Each
 bot keeps one CW20 token pair in an isolated vault and gives depositors
 transferable CW20 LP shares. A shared swap proxy routes approved vaults' swaps
-through their CL8Y pairs; the proxy is whitelisted on the CL8Y DEX, so the
-swaps it routes pay no DEX fees.
+through their CL8Y pairs. Production requires that proxy to be deployed, pinned,
+and whitelisted on the CL8Y DEX so routed swaps pay no DEX fee. That mainnet
+state is not yet established.
 
 ## Components
 
@@ -19,8 +20,11 @@ swaps it routes pay no DEX fees.
 The first liquidity mint permanently locks 1,000 smallest share units. Direct
 token donations are included in pre-deposit balances. Established-vault shares
 use the minimum proportional contribution across both assets, preventing an
-oracle price from diluting incumbents. Deposits, withdrawals, and
-rebalances currently use a zero protocol charge.
+oracle price from diluting incumbents. Deposits and withdrawals have no direct
+protocol fee. When fee configuration is present, a completed rebalance converts
+economic fee value `F` into NAV-priced protocol-fee LP using
+`x = floor(F*S/(A-F))`. Flooring ensures the collector's immediate post-mint
+claim is no greater than `F`.
 
 ## Price And Fee Tier
 
@@ -30,14 +34,27 @@ spot reserves never drive keeper safety. A short-term strategy can start by
 testing a 30-300 second window. The final value must be chosen from pair
 liquidity, block time, volatility, and manipulation-cost measurements.
 
-The deployed swap-proxy is whitelisted on the CL8Y DEX, so the swaps it routes
-pay no DEX fees. The protocol fee (fee-registry + fee-collector) is
-separate and resolves each LP holder's CL8Y tier at fill time (see
-`docs/FEE_TIER_PROTOCOL.md` §2); the proxy does not need to hold CL8Y for a fee
-tier.
+The intended production swap-proxy must be whitelisted on the CL8Y DEX so routed
+swaps pay no DEX fee; it is not yet deployed or pinned. The protocol fee is
+separate and resolves only `config.admin` at rebalance time. Individual LP
+holders are not tiered. See `../docs/FEE_TIER_PROTOCOL.md`.
 
-The contracts are unaudited. Do not deploy them with economic assets before an
-independent contract and oracle review.
+Versions `bot-vault` 0.2.0, `swap-proxy` 0.2.0, and `bot-liquidity` 0.2.0 are the
+current rebalancer set. Bot-vault requires `factory` and `pair_code_id`, verifies factory pair
+registration and runtime code at vault creation, and rechecks code before
+rebalance/proxy swap. Existing 0.1.x vault and liquidity instances require
+redeployment. A 0.1.x proxy with routes must be replaced and routes re-registered;
+only empty compatible proxy state may migrate. The vault caches the last
+successful effective fee for `config.admin`; registry outage uses that exact
+bps/tier (`vault_cached`) or 180 bps (`lowest`) without local history. Registry
+token-query failure itself grants no discount.
+
+The contracts are unaudited and production deployment is blocked pending
+approved registry/collector/proxy compile-time values, deployed proxy provenance
+and whitelisting, canonical fee E2E, the `0.2.0` redeployment, and remaining
+audit findings. Mainnet compilation fails if any required environment value is
+missing or empty. See
+`../docs/DEPLOY_FEE_SYSTEM.md` and `../RELEASE.md`.
 
 ## Verify
 

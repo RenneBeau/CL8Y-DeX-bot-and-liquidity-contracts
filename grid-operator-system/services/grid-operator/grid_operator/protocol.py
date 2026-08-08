@@ -64,7 +64,7 @@ def fingerprint_v2(plan, message, vault, chain_id, config_version):
 
 class VaultProtocol:
     kind = ""
-    query_msg = {}
+    query_msg: dict = {}
     query_label = ""
 
     def plan(self, terrad, vault):
@@ -82,7 +82,7 @@ class VaultProtocol:
 
 class GridSwapProtocol(VaultProtocol):
     kind = "grid"
-    query_msg = {"grid_status": {}}
+    query_msg: dict = {"grid_status": {}}
     query_label = "grid_status"
 
     def build_message(self, plan, deadline):
@@ -106,7 +106,7 @@ class GridSwapProtocol(VaultProtocol):
 
 class RebalanceProtocol(VaultProtocol):
     kind = "rebalance"
-    query_msg = {"rebalance_plan": {}}
+    query_msg: dict = {"rebalance_plan": {}}
     query_label = "rebalance_plan"
 
     def build_message(self, plan, deadline):

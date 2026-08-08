@@ -139,11 +139,14 @@ echo
 log "############ MARKET-GRID (grid-vault-swap) ############"
 echo
 refresh_twap 100000000
+PAIR_CODE_ID=$(terrad_query wasm contract "$PAIR_ADDRESS" | jq -er '.contract_info.code_id')
 MG_INIT=$(jq -nc --arg admin "$TEST_ADDRESS" --arg pair "$PAIR_ADDRESS" --argjson twap 60 \
     --argjson grid_count 5 --arg lower "$LOWER_PRICE" --arg upper "$UPPER_PRICE" \
+    --arg factory "$FACTORY_ADDRESS" --argjson pair_code_id "$PAIR_CODE_ID" \
     --arg registry "$FEE_REGISTRY" --arg collector "$FEE_COLLECTOR" \
     --arg proxy "$SP_PROXY" \
-    '{admin:$admin,pair:$pair,twap_window_seconds:$twap,grid_count:$grid_count,
+    '{admin:$admin,pair:$pair,factory:$factory,pair_code_id:$pair_code_id,
+      twap_window_seconds:$twap,grid_count:$grid_count,
       lower_price:$lower,upper_price:$upper,allocation_tolerance_bps:600,
       max_spread:"0.1",max_execution_deviation_bps:1000,quote_slippage_bps:500,
       max_spot_twap_deviation_bps:1000,
@@ -207,11 +210,14 @@ echo
 log "reusing shared proxy $SP_PROXY (already registered market-grid route)"
 
 refresh_twap 100000000
+SECOND_PAIR_CODE_ID=$(terrad_query wasm contract "$SECOND_PAIR_ADDRESS" | jq -er '.contract_info.code_id')
 BV_INIT=$(jq -nc --arg admin "$TEST_ADDRESS" --arg keeper "$GRID_KEEPER_ADDRESS" \
     --arg proxy "$SP_PROXY" --arg pair "$SECOND_PAIR_ADDRESS" --argjson twap 60 \
+    --arg factory "$FACTORY_ADDRESS" --argjson pair_code_id "$SECOND_PAIR_CODE_ID" \
     --argjson liquidity_code_id "$LIQ_CODE_ID" \
     --arg registry "$FEE_REGISTRY" --arg collector "$FEE_COLLECTOR" \
-    '{admin:$admin,keeper:$keeper,proxy:$proxy,pair:$pair,twap_window_seconds:$twap,
+    '{admin:$admin,keeper:$keeper,proxy:$proxy,pair:$pair,factory:$factory,pair_code_id:$pair_code_id,
+      twap_window_seconds:$twap,
       liquidity_code_id:$liquidity_code_id,allocation_tolerance_bps:600,
       max_trade_bps:5000,rebalance_threshold_bps:2000,max_spread:"0.1",
       max_execution_deviation_bps:1000,quote_slippage_bps:500,

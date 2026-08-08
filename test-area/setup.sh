@@ -19,12 +19,31 @@ set +e
 QA_DEPLOY_SEED=wallet make -C "$DEX_DIR" deploy-local
 DEPLOY_STATUS=$?
 set -e
+
+validate_core_deployment() {
+    local env_file="$DEX_DIR/frontend-dapp/.env.local" name address
+    local required=(VITE_TOKEN_EMBER_ADDRESS VITE_TOKEN_CORAL_ADDRESS VITE_CL8Y_TOKEN_ADDRESS
+        VITE_LUNC_C_TOKEN_ADDRESS VITE_FEE_DISCOUNT_ADDRESS VITE_FACTORY_ADDRESS)
+    [ -f "$env_file" ] || return 1
+    set -a
+    # shellcheck source=/dev/null
+    source "$env_file"
+    set +a
+    for name in "${required[@]}"; do
+        address=${!name:-}
+        if [ -z "$address" ] || ! terrad_query wasm contract "$address" >/dev/null 2>&1; then
+            echo "ERROR: CL8Y deployment has no live contract for $name." >&2
+            return 1
+        fi
+    done
+}
+
+if ! validate_core_deployment; then
+    echo "ERROR: CL8Y deploy-local did not produce a complete, live deployment." >&2
+    exit 1
+fi
 if [ "$DEPLOY_STATUS" -ne 0 ]; then
-    if [ ! -f "$DEX_DIR/frontend-dapp/.env.local" ]; then
-        echo "ERROR: CL8Y deployment failed before producing contract addresses." >&2
-        exit "$DEPLOY_STATUS"
-    fi
-    echo "CL8Y core deployment completed; ignoring its optional indexer bootstrap failure."
+    echo "CL8Y core contracts validated; deploy-local failed only after core deployment."
 fi
 
 "$SCRIPT_DIR/deploy-system.sh"

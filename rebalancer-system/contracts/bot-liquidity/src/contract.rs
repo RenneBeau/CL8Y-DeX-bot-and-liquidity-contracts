@@ -11,6 +11,7 @@ use cw2::{get_contract_version, set_contract_version};
 use cw20::{Cw20ExecuteMsg, Cw20QueryMsg, MinterResponse};
 use cw20_base::msg::{ExecuteMsg as BaseExecuteMsg, InstantiateMsg as BaseInstantiateMsg};
 use cw20_base::state::{BALANCES, TOKEN_INFO};
+use semver::Version;
 
 use crate::error::ContractError;
 use crate::msg::{ConfigResponse, ExecuteMsg, InstantiateMsg, MigrateMsg, QueryMsg};
@@ -83,6 +84,16 @@ pub fn migrate(deps: DepsMut, _env: Env, _msg: MigrateMsg) -> Result<Response, C
             "unsupported migration source",
         )));
     }
+    let source = Version::parse(&previous.version)
+        .map_err(|_| ContractError::Std(StdError::generic_err("unsupported migration source")))?;
+    let target = Version::parse(CONTRACT_VERSION)
+        .map_err(|_| ContractError::Std(StdError::generic_err("invalid contract version")))?;
+    if source.major != 0 || source.minor != 2 || source >= target {
+        return Err(ContractError::Std(StdError::generic_err(
+            "unsupported migration source",
+        )));
+    }
+    CONFIG.load(deps.storage)?;
     assert_no_pending(deps.as_ref())?;
     PENDING_ADMIN.remove(deps.storage);
     set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
@@ -894,6 +905,51 @@ fn cw20_error(error: cw20_base::ContractError) -> ContractError {
 mod tests {
     use super::*;
     use cosmwasm_std::testing::{mock_dependencies, mock_env, mock_info};
+    use proptest::prelude::*;
+    use proptest::test_runner::Config as ProptestConfig;
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 128,
+            ..ProptestConfig::default()
+        })]
+
+        #[test]
+        fn deposit_donation_withdraw_rounding_preserves_value_without_free_profit(
+            assets in 1u128..=u64::MAX as u128,
+            supply in 1u128..=u64::MAX as u128,
+            deposit in 1u128..=u64::MAX as u128,
+            donation in 0u128..=u64::MAX as u128,
+        ) {
+            let minted = Uint256::from(deposit) * Uint256::from(supply) / Uint256::from(assets);
+            prop_assume!(minted > Uint256::zero());
+            let post_supply = Uint256::from(supply) + minted;
+            let post_assets = Uint256::from(assets) + Uint256::from(deposit) + Uint256::from(donation);
+            let claim = post_assets * minted / post_supply;
+
+            // A depositor can receive only their deposit plus their pro-rata donation;
+            // the donation is external value, not protocol-created profit.
+            prop_assert!(claim * post_supply
+                <= Uint256::from(deposit) * post_supply + Uint256::from(donation) * minted);
+            prop_assert_eq!(claim + (post_assets - claim), post_assets);
+            prop_assert_eq!(Uint256::from(supply) + minted, post_supply);
+        }
+
+        #[test]
+        fn proportional_two_token_withdrawal_conserves_each_balance(
+            balances in (any::<u128>(), any::<u128>()),
+            supply in 1u128..=u128::MAX,
+            shares in any::<u128>(),
+        ) {
+            let shares = shares.min(supply);
+            for balance in [balances.0, balances.1] {
+                let paid = Uint256::from(balance) * Uint256::from(shares) / Uint256::from(supply);
+                let remaining = Uint256::from(balance) - paid;
+                prop_assert_eq!(paid + remaining, Uint256::from(balance));
+            }
+            prop_assert_eq!(shares + (supply - shares), supply);
+        }
+    }
     use cosmwasm_std::{from_json, ContractResult, Reply, SubMsgResult, SystemResult};
     use cw20_base::state::TokenInfo;
 
@@ -1028,10 +1084,12 @@ mod tests {
     fn migration_preserves_config_and_rejects_pending_settlement() {
         let mut deps = mock_dependencies();
         CONFIG.save(deps.as_mut().storage, &test_config()).unwrap();
-        set_contract_version(deps.as_mut().storage, CONTRACT_NAME, "0.0.1").unwrap();
+        set_contract_version(deps.as_mut().storage, CONTRACT_NAME, "0.2.0-rc.1").unwrap();
         migrate(deps.as_mut(), mock_env(), MigrateMsg {}).unwrap();
         assert_eq!(CONFIG.load(&deps.storage).unwrap(), test_config());
 
+        assert!(migrate(deps.as_mut(), mock_env(), MigrateMsg {}).is_err());
+        set_contract_version(deps.as_mut().storage, CONTRACT_NAME, "0.2.0-rc.1").unwrap();
         PENDING
             .save(
                 deps.as_mut().storage,

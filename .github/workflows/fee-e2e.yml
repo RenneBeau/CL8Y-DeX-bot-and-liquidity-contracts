@@ -1,0 +1,69 @@
+name: Canonical fee E2E
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "fee-system/**"
+      - "rebalancer-system/**"
+      - "market-grid-system/**"
+      - "limit-grid-system/**"
+      - "test-area/**"
+      - ".github/workflows/fee-e2e.yml"
+      - "Makefile"
+  pull_request:
+    paths:
+      - "fee-system/**"
+      - "rebalancer-system/**"
+      - "market-grid-system/**"
+      - "limit-grid-system/**"
+      - "test-area/**"
+      - ".github/workflows/fee-e2e.yml"
+      - "Makefile"
+  schedule:
+    - cron: "19 4 * * 4"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: canonical-fee-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  canonical-fee-e2e:
+    name: canonical-fee-e2e
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install Wasm target
+        run: rustup target add wasm32-unknown-unknown --toolchain 1.81.0
+      - name: Deploy LocalTerra once
+        run: |
+          mkdir -p evidence
+          timeout 55m make local-setup 2>&1 | tee evidence/setup.log
+      - name: Run canonical fee scenarios
+        run: timeout 55m make local-fee-e2e 2>&1 | tee evidence/fee-e2e.log
+      - name: Record build inputs
+        if: always()
+        run: |
+          cp test-area/.fee-e2e-build-manifest.json evidence/build-manifest.json 2>/dev/null || true
+          sha256sum test-area/*.sh >evidence/test-script-hashes.txt
+      - name: Collect container logs
+        if: always()
+        run: |
+          mkdir -p evidence/docker
+          docker ps -a --format '{{.ID}} {{.Names}} {{.Image}}' >evidence/docker/containers.txt
+          while read -r container; do
+            docker logs "$container" >"evidence/docker/$container.log" 2>&1 || true
+          done < <(docker ps -aq)
+      - name: Upload fee E2E evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: canonical-fee-e2e-${{ github.run_id }}-${{ github.sha }}
+          path: evidence/
+          retention-days: 30
+          if-no-files-found: error

@@ -9,6 +9,11 @@ User=cl8ykeeper
 WorkingDirectory=/opt/CL8Y-DeX-bot-and-liquidity-contracts/rebalancer-system
 EnvironmentFile=/etc/cl8y-keeper/config.env
 Environment=KEEPER_BROADCAST=1
+Environment=KEEPER_KEYRING_BACKEND=file
+Environment=KEEPER_TERRAD_HOME=/var/lib/cl8y-keeper/terra
+Environment=KEEPER_STATE_FILE=/var/lib/cl8y-keeper/keeper-state.json
+Environment=KEEPER_KEYRING_PASSWORD_FILE=%d/keyring-password
+LoadCredential=keyring-password:/etc/cl8y-keeper/keyring-password
 ExecStart=/usr/bin/python3 /opt/CL8Y-DeX-bot-and-liquidity-contracts/rebalancer-system/examples/keeper/keeper.py --broadcast
 Restart=always
 RestartSec=10

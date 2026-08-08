@@ -16,6 +16,10 @@ pub struct Config {
     pub max_grid_count: u32,
     pub max_orders_per_reconcile: u32,
     pub max_active_orders_per_vault: u32,
+    #[serde(default)]
+    pub fee_registry: Option<Addr>,
+    #[serde(default)]
+    pub fee_collector: Option<Addr>,
 }
 
 #[cw_serde]

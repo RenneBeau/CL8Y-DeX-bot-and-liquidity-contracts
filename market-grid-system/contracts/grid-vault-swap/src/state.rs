@@ -6,7 +6,9 @@ use cw_storage_plus::{Item, Map};
 pub struct Config {
     pub admin: Addr,
     pub pending_admin: Option<Addr>,
+    pub factory: Addr,
     pub pair: Addr,
+    pub pair_code_id: u64,
     pub asset_tokens: [Addr; 2],
     pub decimals: u8,
     pub twap_window_seconds: u32,
@@ -28,6 +30,12 @@ pub struct Config {
 }
 
 #[cw_serde]
+pub struct CachedEffectiveFee {
+    pub fee_bps: u16,
+    pub tier_id: Option<u8>,
+}
+
+#[cw_serde]
 pub struct PendingSwap {
     pub captured_twap: Decimal,
     pub balances: [Uint128; 2],
@@ -42,3 +50,4 @@ pub const PENDING_SWAP: Item<PendingSwap> = Item::new("pending_swap");
 pub const SHARES: Map<&str, Uint128> = Map::new("shares");
 pub const TOTAL_SHARES: Item<Uint128> = Item::new("total_shares");
 pub const PAUSED: Item<bool> = Item::new("paused");
+pub const EFFECTIVE_FEE_CACHE: Map<&Addr, CachedEffectiveFee> = Map::new("effective_fee_cache");

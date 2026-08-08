@@ -4,7 +4,7 @@ This directory is the shared **operator service and documentation** harness for
 the two grid ecosystems. It contains no Rust contract crates; those live in two
 separate Cargo workspaces at the repository root:
 
-- [`market-grid-system`](../market-grid-system/README.md) — the **deployable**
+- [`market-grid-system`](../market-grid-system/README.md) — the pre-production
   standard swap grid.
 - [`limit-grid-system`](../limit-grid-system/README.md) — the limit-order grid,
   which reconciles against the shipped CL8Y DEX pair via its own cancel ledger
@@ -37,4 +37,14 @@ python3 -m unittest discover -s grid-operator-system/services/grid-operator/test
 
 This remains pre-production code. Real mainnet-equivalent CL8Y adversarial
 validation, an external security review, and staged limited-value rollout remain
-required.
+required. Manager fee wiring and four-workspace artifact definitions are now in
+the working tree; production remains blocked by approved canonical addresses,
+external semantics, unresolved audit findings, unrun fee E2E, and independent
+review. Mainnet vaults compile-time pin registry and collector, and market-grid
+also pins its proxy. Market-grid `0.2.0` requires factory/pair-code provenance
+and redeployment from `0.1.x`; do not migrate incompatible vault state. The
+operator's production systemd path requires host-provisioned credentials: the
+rebalancer uses a service-home file keyring unlocked through `LoadCredential`
+and stdin, while grid uses a strict no-shell JSON external signer. The `test`
+backend is prohibited in production. See
+[`../docs/DEPLOY_FEE_SYSTEM.md`](../docs/DEPLOY_FEE_SYSTEM.md).

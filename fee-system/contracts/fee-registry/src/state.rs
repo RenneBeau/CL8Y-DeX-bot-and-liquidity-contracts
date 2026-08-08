@@ -31,8 +31,8 @@ pub struct Tier {
     pub governance_only: bool,
 }
 
-/// Last-known-good CL8Y holding, written from a *successful* live query and used
-/// as fallback when a live query fails.
+/// Last-known-good CL8Y holding, written from a successful live query for
+/// historical observability. It is not used for fee pricing.
 #[cw_serde]
 pub struct Holding {
     pub amount: Uint128,

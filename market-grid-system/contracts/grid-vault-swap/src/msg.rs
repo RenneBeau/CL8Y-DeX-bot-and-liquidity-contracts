@@ -5,7 +5,9 @@ use cw20::Cw20ReceiveMsg;
 #[cw_serde]
 pub struct InstantiateMsg {
     pub admin: String,
+    pub factory: String,
     pub pair: String,
+    pub pair_code_id: u64,
     pub twap_window_seconds: u32,
     pub grid_count: u32,
     pub lower_price: Decimal,
@@ -117,6 +119,16 @@ pub enum PairQueryMsg {
 }
 
 #[cw_serde]
+pub enum FactoryQueryMsg {
+    Pair { asset_infos: [AssetInfo; 2] },
+}
+
+#[cw_serde]
+pub struct PairResponse {
+    pub pair: PairInfo,
+}
+
+#[cw_serde]
 pub struct HybridSwapParams {
     pub pool_input: Uint128,
     pub book_input: Uint128,
@@ -195,7 +207,9 @@ pub enum QueryMsg {
 pub struct ConfigResponse {
     pub admin: String,
     pub pending_admin: Option<String>,
+    pub factory: String,
     pub pair: String,
+    pub pair_code_id: u64,
     pub asset_tokens: [String; 2],
     pub decimals: u8,
     pub twap_window_seconds: u32,

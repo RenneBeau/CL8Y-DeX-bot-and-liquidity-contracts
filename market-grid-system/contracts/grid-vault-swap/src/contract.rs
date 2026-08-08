@@ -3,15 +3,19 @@ use cosmwasm_std::{
     entry_point, to_json_binary, Addr, Binary, Decimal, Deps, DepsMut, Env, MessageInfo, Reply,
     Response, StdError, StdResult, SubMsg, Uint128, Uint256, WasmMsg,
 };
-use cw2::set_contract_version;
+use cw2::{get_contract_version, set_contract_version};
 use cw20::{BalanceResponse, Cw20ExecuteMsg, Cw20QueryMsg, Cw20ReceiveMsg};
 
 use crate::error::ContractError;
 use crate::msg::{
-    ExecuteMsg, GridStatusResponse, HybridSwapParams, InstantiateMsg, MigrateMsg, PairCw20HookMsg,
-    PairQueryMsg, PoolResponse, QueryMsg, ReceiveMsg, SwapProxyHookMsg,
+    ExecuteMsg, FactoryQueryMsg, GridStatusResponse, HybridSwapParams, InstantiateMsg, MigrateMsg,
+    PairCw20HookMsg, PairQueryMsg, PairResponse, PoolResponse, QueryMsg, ReceiveMsg,
+    SwapProxyHookMsg,
 };
-use crate::state::{Config, PendingSwap, CONFIG, PAUSED, PENDING_SWAP, SHARES, TOTAL_SHARES};
+use crate::state::{
+    CachedEffectiveFee, Config, PendingSwap, CONFIG, EFFECTIVE_FEE_CACHE, PAUSED, PENDING_SWAP,
+    SHARES, TOTAL_SHARES,
+};
 
 const CONTRACT_NAME: &str = "crates.io:cl8y-grid-vault-swap";
 const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -33,6 +37,7 @@ const MAX_TRADE_POOL_BPS: u16 = 2_000;
 const MAX_ALLOCATION_TOLERANCE_BPS: u16 = 2_000;
 const MAX_TWAP_WINDOW_SECONDS: u32 = 86_400;
 const MAX_GRID_COUNT: u32 = 500;
+const UNDISCOUNTED_FEE_BPS: u16 = 180;
 
 #[entry_point]
 pub fn instantiate(
@@ -43,11 +48,28 @@ pub fn instantiate(
 ) -> Result<Response, ContractError> {
     set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
     let admin = deps.api.addr_validate(&msg.admin)?;
+    let factory = deps.api.addr_validate(&msg.factory)?;
     let pair = deps.api.addr_validate(&msg.pair)?;
+    if msg.pair_code_id == 0
+        || deps.querier.query_wasm_contract_info(&pair)?.code_id != msg.pair_code_id
+    {
+        return Err(ContractError::InvalidPair);
+    }
     let pair_info = deps
         .querier
         .query_wasm_smart::<crate::msg::PairInfo>(&pair, &PairQueryMsg::Pair {})?;
     if pair_info.contract_addr.as_str() != pair.as_str() {
+        return Err(ContractError::InvalidPair);
+    }
+    let registered: PairResponse = deps.querier.query_wasm_smart(
+        &factory,
+        &FactoryQueryMsg::Pair {
+            asset_infos: pair_info.asset_infos.clone(),
+        },
+    )?;
+    if deps.api.addr_validate(&registered.pair.contract_addr)? != pair
+        || registered.pair.asset_infos != pair_info.asset_infos
+    {
         return Err(ContractError::InvalidPair);
     }
     let [asset_0, asset_1] = pair_info.asset_infos;
@@ -107,6 +129,7 @@ pub fn instantiate(
         .transpose()?;
     #[cfg(feature = "mainnet")]
     {
+        crate::mainnet::assert_fee_registry_canonical_mainnet(fee_registry.as_ref())?;
         crate::mainnet::assert_fee_collector_canonical_mainnet(fee_collector.as_ref())?;
         crate::mainnet::assert_proxy_canonical_mainnet(proxy.as_ref())?;
     }
@@ -128,7 +151,9 @@ pub fn instantiate(
     let config = Config {
         admin,
         pending_admin: None,
+        factory,
         pair: pair.clone(),
+        pair_code_id: msg.pair_code_id,
         asset_tokens,
         decimals: token_0.decimals,
         twap_window_seconds: msg.twap_window_seconds,
@@ -225,6 +250,9 @@ fn execute_receive(
     let hook: ReceiveMsg = from_json(&receive.msg)?;
     let ReceiveMsg::Deposit {} = hook;
     let config = CONFIG.load(deps.storage)?;
+    let depositor = deps.api.addr_validate(&receive.sender)?;
+    assert_admin(&config, &depositor)?;
+    assert_pair_code_id(deps.as_ref(), &config)?;
     let token_index = config
         .asset_tokens
         .iter()
@@ -242,7 +270,6 @@ fn execute_receive(
     if minted.is_zero() {
         return Err(ContractError::ZeroAmount);
     }
-    let depositor = deps.api.addr_validate(&receive.sender)?;
     TOTAL_SHARES.save(
         deps.storage,
         &total_shares
@@ -270,7 +297,6 @@ fn execute_withdraw(
     recipient: Option<String>,
 ) -> Result<Response, ContractError> {
     assert_no_funds(&info)?;
-    assert_not_paused(deps.as_ref())?;
     if PENDING_SWAP.may_load(deps.storage)?.is_some() {
         return Err(ContractError::RebalancePending);
     }
@@ -339,6 +365,7 @@ fn execute_rebalance(
         return Err(ContractError::Expired);
     }
     let config = CONFIG.load(deps.storage)?;
+    assert_pair_code_id(deps.as_ref(), &config)?;
     let plan = rebalance_plan(deps.as_ref(), &env, &config)?;
     if !plan.should_rebalance {
         return Err(ContractError::RebalanceNotRequired);
@@ -429,11 +456,18 @@ pub fn reply(deps: DepsMut, env: Env, reply: Reply) -> Result<Response, Contract
             pending.captured_twap.atomics(),
         )?
     };
+    let asset_value_in_token0 = settled[0]
+        .checked_add(checked_ratio(
+            settled[1],
+            Decimal::one().atomics(),
+            pending.captured_twap.atomics(),
+        )?)
+        .map_err(StdError::overflow)?;
     let mut response = Response::new()
         .add_attribute("action", "complete_rebalance")
         .add_attribute("allocation_deviation_bps", current.to_string())
         .add_attribute("cell_updated", within_tolerance.to_string());
-    match charge_fee(&mut deps, &config, &env, value_in_token0)? {
+    match charge_fee(&mut deps, &config, value_in_token0, asset_value_in_token0)? {
         ChargeFee::None => {}
         ChargeFee::Applied(fee) => {
             response = response
@@ -445,9 +479,6 @@ pub fn reply(deps: DepsMut, env: Env, reply: Reply) -> Result<Response, Contract
                 )
                 .add_attribute("fee_source", fee.source)
                 .add_attribute("fee_shares", fee.shares.to_string());
-        }
-        ChargeFee::Unavailable(reason) => {
-            response = response.add_attribute("fee_skipped", reason);
         }
     }
     Ok(response)
@@ -480,6 +511,13 @@ fn execute_update_config(
     }
     #[cfg(feature = "mainnet")]
     {
+        if let Some(value) = &fee_registry {
+            let parsed = match value.as_str() {
+                "" => None,
+                address => Some(deps.api.addr_validate(address)?),
+            };
+            crate::mainnet::assert_fee_registry_canonical_mainnet(parsed.as_ref())?;
+        }
         if let Some(value) = &fee_collector {
             let parsed = match value.as_str() {
                 "" => None,
@@ -565,6 +603,9 @@ fn execute_transfer_admin(
     let config = CONFIG.load(deps.storage)?;
     assert_admin(&config, &info.sender)?;
     let pending = deps.api.addr_validate(&admin)?;
+    if pending == config.admin {
+        return Err(ContractError::Unauthorized);
+    }
     CONFIG.update(deps.storage, |mut config| -> Result<_, ContractError> {
         config.pending_admin = Some(pending.clone());
         Ok(config)
@@ -576,14 +617,30 @@ fn execute_transfer_admin(
 
 fn execute_accept_admin(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractError> {
     assert_no_funds(&info)?;
-    CONFIG.update(deps.storage, |mut config| -> Result<_, ContractError> {
-        if config.pending_admin.as_ref() != Some(&info.sender) {
-            return Err(ContractError::Unauthorized);
-        }
-        config.admin = info.sender.clone();
-        config.pending_admin = None;
-        Ok(config)
-    })?;
+    let mut config = CONFIG.load(deps.storage)?;
+    if config.pending_admin.as_ref() != Some(&info.sender) {
+        return Err(ContractError::Unauthorized);
+    }
+    let old_admin = config.admin.clone();
+    let old_shares = SHARES
+        .may_load(deps.storage, old_admin.as_str())?
+        .unwrap_or_default();
+    if !old_shares.is_zero() {
+        SHARES.update(
+            deps.storage,
+            info.sender.as_str(),
+            |shares| -> StdResult<_> {
+                shares
+                    .unwrap_or_default()
+                    .checked_add(old_shares)
+                    .map_err(StdError::overflow)
+            },
+        )?;
+        SHARES.remove(deps.storage, old_admin.as_str());
+    }
+    config.admin = info.sender;
+    config.pending_admin = None;
+    CONFIG.save(deps.storage, &config)?;
     Ok(Response::new().add_attribute("action", "accept_admin"))
 }
 
@@ -626,10 +683,8 @@ struct FeeRegistryEffectiveFeeResponse {
 }
 
 struct FeeApplied {
-    /// Weighted-average effective fee across all charged LP holders, in bps.
     fee_bps: u16,
     shares: Uint128,
-    /// The number of LP holders whose share was charged at their own tier.
     holders: usize,
     tier: Option<u8>,
     source: String,
@@ -638,25 +693,17 @@ struct FeeApplied {
 enum ChargeFee {
     None,
     Applied(FeeApplied),
-    /// Fee-registry read failed. The rebalance still completes; the fee is
-    /// skipped rather than reverting the swap.
-    Unavailable(String),
 }
 
-/// Protocol fee per executed swap (token-0 value based), resolved as a
-/// **single user** (`FEE_TIER_PROTOCOL.md` §5): the operating user — the
-/// address that instantiated / deposited into the vault (`config.admin`) — is
-/// billed at THEIR OWN tier for the full fill value. The user keeps
-/// `value − fee` as a fresh share mint (real growth, correct dilution) and the
-/// fee is minted to the configured fee-collector, so total shares grow by the
-/// fill value. No fee is charged when the vault has no fee configured, or the
-/// resolved rate is zero. A transient fee-registry failure is non-blocking (the
-/// whole charge is skipped, never a revert).
+/// Protocol fee per executed swap, resolved for the vault's single operating
+/// user. The fee's token-0 economic value is converted to LP at the current
+/// post-settlement NAV. Share conversion rounds down so dilution can never give
+/// the collector a claim greater than the desired fee.
 fn charge_fee(
     deps: &mut DepsMut,
     config: &Config,
-    _env: &Env,
     value_in_token0: Uint128,
+    asset_value_in_token0: Uint128,
 ) -> Result<ChargeFee, ContractError> {
     let (Some(registry), Some(collector)) = (&config.fee_registry, &config.fee_collector) else {
         return Ok(ChargeFee::None);
@@ -664,16 +711,34 @@ fn charge_fee(
     if value_in_token0.is_zero() {
         return Ok(ChargeFee::None);
     }
-    let user = config.admin.to_string();
-    let fee: FeeRegistryEffectiveFeeResponse = match deps.querier.query_wasm_smart(
-        registry,
-        &FeeRegistryQueryMsg::EffectiveFee { trader: user },
-    ) {
-        Ok(fee) => fee,
-        Err(err) => return Ok(ChargeFee::Unavailable(err.to_string())),
+    let fee = match deps
+        .querier
+        .query_wasm_smart::<FeeRegistryEffectiveFeeResponse>(
+            registry,
+            &FeeRegistryQueryMsg::EffectiveFee {
+                trader: config.admin.to_string(),
+            },
+        ) {
+        Ok(fee) => {
+            let cached = CachedEffectiveFee {
+                fee_bps: fee.fee_bps.min(10_000),
+                tier_id: fee.tier_id,
+            };
+            EFFECTIVE_FEE_CACHE.save(deps.storage, &config.admin, &cached)?;
+            (cached, fee.source)
+        }
+        Err(_) => match EFFECTIVE_FEE_CACHE.may_load(deps.storage, &config.admin)? {
+            Some(cached) => (cached, "vault_cached".to_string()),
+            None => (
+                CachedEffectiveFee {
+                    fee_bps: UNDISCOUNTED_FEE_BPS,
+                    tier_id: None,
+                },
+                "lowest".to_string(),
+            ),
+        },
     };
-    // Defensive bound: cap the effective fee at 100% (10_000 bps).
-    let fee_bps = fee.fee_bps.min(10_000);
+    let fee_bps = fee.0.fee_bps;
     if fee_bps == 0 {
         return Ok(ChargeFee::None);
     }
@@ -681,31 +746,35 @@ fn charge_fee(
     if fee_value.is_zero() {
         return Ok(ChargeFee::None);
     }
+    let total_shares = TOTAL_SHARES.load(deps.storage)?;
+    let fee_shares = fee_shares_for_value(fee_value, asset_value_in_token0, total_shares)?;
+    if fee_shares.is_zero() {
+        return Ok(ChargeFee::None);
+    }
 
-    // Single-user model: the user's position already exists (deposited LP). A fill
-    // grows the pooled assets by `value_in_token0` but mints NO extra LP to the
-    // user — their existing shares simply appreciate via NAV. Only the protocol fee
-    // is realized as fresh LP, minted straight to the fee-collector.
     SHARES.update(
         deps.storage,
         collector.as_str(),
         |current: Option<Uint128>| -> StdResult<Uint128> {
             current
                 .unwrap_or_default()
-                .checked_add(fee_value)
+                .checked_add(fee_shares)
                 .map_err(StdError::overflow)
         },
     )?;
-    TOTAL_SHARES.update(deps.storage, |total| -> StdResult<Uint128> {
-        total.checked_add(fee_value).map_err(StdError::overflow)
-    })?;
+    TOTAL_SHARES.save(
+        deps.storage,
+        &total_shares
+            .checked_add(fee_shares)
+            .map_err(StdError::overflow)?,
+    )?;
 
     Ok(ChargeFee::Applied(FeeApplied {
         fee_bps,
-        shares: fee_value,
+        shares: fee_shares,
         holders: 1,
-        tier: fee.tier_id,
-        source: fee.source,
+        tier: fee.0.tier_id,
+        source: fee.1,
     }))
 }
 
@@ -720,7 +789,6 @@ fn execute_redeem_shares(
     recipient: Option<String>,
 ) -> Result<Response, ContractError> {
     assert_no_funds(&info)?;
-    assert_not_paused(deps.as_ref())?;
     let config = CONFIG.load(deps.storage)?;
     let collector = config
         .fee_collector
@@ -797,7 +865,9 @@ fn query_config(deps: Deps) -> StdResult<crate::msg::ConfigResponse> {
     Ok(crate::msg::ConfigResponse {
         admin: config.admin.to_string(),
         pending_admin: config.pending_admin.as_ref().map(ToString::to_string),
+        factory: config.factory.to_string(),
         pair: config.pair.to_string(),
+        pair_code_id: config.pair_code_id,
         asset_tokens: [
             config.asset_tokens[0].to_string(),
             config.asset_tokens[1].to_string(),
@@ -825,6 +895,7 @@ fn query_config(deps: Deps) -> StdResult<crate::msg::ConfigResponse> {
 
 fn grid_status(deps: Deps, env: &Env) -> StdResult<GridStatusResponse> {
     let config = CONFIG.load(deps.storage)?;
+    assert_pair_code_id(deps, &config)?;
     let pending_swap = PENDING_SWAP.may_load(deps.storage)?.is_some();
     let mut status = GridStatusResponse {
         current_cell: config.last_cell,
@@ -859,6 +930,7 @@ fn grid_status(deps: Deps, env: &Env) -> StdResult<GridStatusResponse> {
 
 fn query_vault(deps: Deps, env: &Env) -> StdResult<crate::msg::VaultResponse> {
     let config = CONFIG.load(deps.storage)?;
+    assert_pair_code_id(deps, &config)?;
     let balances = balances(deps, &env.contract.address, &config)?;
     let price = reference_price(deps, env, &config.pair, config.twap_window_seconds)?;
     let token_0_value = checked_ratio(balances[0], price.atomics(), Decimal::one().atomics())?;
@@ -879,6 +951,7 @@ fn rebalance_plan(
     env: &Env,
     config: &Config,
 ) -> StdResult<crate::msg::GridStatusResponse> {
+    assert_pair_code_id(deps, config)?;
     let captured_twap = reference_price(deps, env, &config.pair, config.twap_window_seconds)?;
     let holdings = balances(deps, &env.contract.address, config)?;
     let current_cell = grid_cell(
@@ -947,6 +1020,17 @@ fn rebalance_plan(
         min_return,
         pending_swap: false,
     })
+}
+
+fn assert_pair_code_id(deps: Deps, config: &Config) -> StdResult<()> {
+    let actual = deps.querier.query_wasm_contract_info(&config.pair)?.code_id;
+    if actual != config.pair_code_id {
+        return Err(StdError::generic_err(format!(
+            "pair code id mismatch: expected {}, found {actual}",
+            config.pair_code_id
+        )));
+    }
+    Ok(())
 }
 
 fn reference_price(deps: Deps, _env: &Env, pair: &Addr, window: u32) -> StdResult<Decimal> {
@@ -1029,6 +1113,9 @@ fn allocation_deviation(holdings: [Uint128; 2], price: Decimal, config: &Config)
         .checked_mul(Uint256::from(weight.atomics()))?
         .checked_div(Uint256::from(Decimal::one().atomics()))?;
     let actual = Uint256::from(holdings[1]).checked_mul(Uint256::from(Decimal::one().atomics()))?;
+    if target.is_zero() {
+        return Ok(if actual.is_zero() { 0 } else { 10_000 });
+    }
     ratio_deviation(actual, target)
 }
 
@@ -1047,15 +1134,11 @@ fn planned_offer(
         total_value * Uint256::from(weight.atomics()) / Uint256::from(Decimal::one().atomics());
     let (index, uncapped) = match token1_value.cmp(&target_token1) {
         std::cmp::Ordering::Greater => {
-            let amount = (token1_value - target_token1)
-                / Uint256::from(Decimal::one().atomics())
-                / Uint256::from(2u8);
+            let amount = (token1_value - target_token1) / Uint256::from(Decimal::one().atomics());
             (1, amount)
         }
         std::cmp::Ordering::Less => {
-            let amount = (target_token1 - token1_value)
-                / Uint256::from(price.atomics())
-                / Uint256::from(2u8);
+            let amount = (target_token1 - token1_value) / Uint256::from(price.atomics());
             (0, amount)
         }
         std::cmp::Ordering::Equal => {
@@ -1358,6 +1441,32 @@ fn deposit_value(
     }
 }
 
+fn fee_shares_for_value(
+    fee_value: Uint128,
+    asset_value: Uint128,
+    total_shares: Uint128,
+) -> StdResult<Uint128> {
+    if fee_value.is_zero() || asset_value.is_zero() || total_shares.is_zero() {
+        return Ok(Uint128::zero());
+    }
+    if fee_value >= asset_value {
+        return Ok(Uint128::zero());
+    }
+    // x = floor(F*S/(A-F)). Flooring x ensures x*A/(S+x) <= F.
+    let numerator = Uint256::from(fee_value)
+        .checked_mul(Uint256::from(total_shares))
+        .map_err(|_| StdError::generic_err("fee share numerator overflow"))?;
+    let denominator = Uint256::from(asset_value)
+        .checked_sub(Uint256::from(fee_value))
+        .map_err(|_| StdError::generic_err("fee share denominator underflow"))?;
+    let shares = numerator
+        .checked_div(denominator)
+        .map_err(|_| StdError::generic_err("fee share division failed"))?;
+    shares
+        .try_into()
+        .map_err(|_| StdError::generic_err("fee share result overflow"))
+}
+
 fn from_json<T>(value: &[u8]) -> StdResult<T>
 where
     T: serde::de::DeserializeOwned,
@@ -1365,15 +1474,139 @@ where
     cosmwasm_std::from_json(value)
 }
 
-pub fn migrate(_deps: DepsMut, _env: Env, _msg: MigrateMsg) -> Result<Response, ContractError> {
-    Ok(Response::new())
+#[entry_point]
+pub fn migrate(deps: DepsMut, _env: Env, _msg: MigrateMsg) -> Result<Response, ContractError> {
+    let stored =
+        get_contract_version(deps.storage).map_err(|err| ContractError::InvalidMigration {
+            reason: format!("malformed or missing cw2 metadata: {err}"),
+        })?;
+    if stored.contract != CONTRACT_NAME {
+        return Err(ContractError::InvalidMigration {
+            reason: format!("expected {CONTRACT_NAME}, found {}", stored.contract),
+        });
+    }
+    let source =
+        semver::Version::parse(&stored.version).map_err(|err| ContractError::InvalidMigration {
+            reason: format!("malformed source version: {err}"),
+        })?;
+    let target = semver::Version::parse(CONTRACT_VERSION).map_err(|err| {
+        ContractError::InvalidMigration {
+            reason: format!("malformed target version: {err}"),
+        }
+    })?;
+    if source >= target {
+        return Err(ContractError::InvalidMigration {
+            reason: format!("source version {source} must be older than {target}"),
+        });
+    }
+    Err(ContractError::LegacySchemaRequiresRedeploy)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::msg::{Asset, AssetInfo};
+    use cosmwasm_std::testing::{mock_dependencies, mock_env};
+    use proptest::prelude::*;
+    use proptest::test_runner::Config as ProptestConfig;
     use std::str::FromStr;
+
+    const PROPERTY_CASES: u32 = 128;
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: PROPERTY_CASES,
+            ..ProptestConfig::default()
+        })]
+
+        #[test]
+        fn fee_share_formula_matches_wide_model_and_immediate_claim_is_bounded(
+            assets in 1u128..=u128::MAX,
+            fee in any::<u128>(),
+            supply in any::<u128>(),
+        ) {
+            let fee = fee.min(assets - 1);
+            let expected = Uint256::from(fee) * Uint256::from(supply)
+                / Uint256::from(assets - fee);
+            let actual = fee_shares_for_value(
+                Uint128::new(fee), Uint128::new(assets), Uint128::new(supply));
+            if expected > Uint256::from(u128::MAX) {
+                prop_assert!(actual.is_err());
+            } else {
+                let shares = actual.unwrap();
+                prop_assert_eq!(Uint256::from(shares), expected);
+                if supply != 0 {
+                    let claim = Uint256::from(shares) * Uint256::from(assets)
+                        / (Uint256::from(supply) + Uint256::from(shares));
+                    prop_assert!(claim <= Uint256::from(fee));
+                }
+            }
+        }
+
+        #[test]
+        fn fee_shares_are_monotone_in_fee_when_results_fit(
+            assets in 2u128..=u128::MAX,
+            supply in 1u128..=u128::MAX,
+            first in any::<u128>(),
+            second in any::<u128>(),
+        ) {
+            let first = first.min(assets - 1);
+            let second = second.min(assets - 1).max(first);
+            let low = fee_shares_for_value(Uint128::new(first), Uint128::new(assets), Uint128::new(supply));
+            let high = fee_shares_for_value(Uint128::new(second), Uint128::new(assets), Uint128::new(supply));
+            if let (Ok(low), Ok(high)) = (low, high) {
+                prop_assert!(low <= high);
+            }
+        }
+
+        #[test]
+        fn deposit_donation_withdraw_model_conserves_and_cannot_capture_incumbent_value(
+            assets in 1u128..=u64::MAX as u128,
+            supply in 1u128..=u64::MAX as u128,
+            deposit in 1u128..=u64::MAX as u128,
+            donation in 0u128..=u64::MAX as u128,
+        ) {
+            let minted = Uint256::from(deposit) * Uint256::from(supply) / Uint256::from(assets);
+            prop_assume!(minted > Uint256::zero() && minted <= Uint256::from(u128::MAX));
+            let post_supply = Uint256::from(supply) + minted;
+            let post_assets = Uint256::from(assets) + Uint256::from(deposit) + Uint256::from(donation);
+            let withdrawn = post_assets * minted / post_supply;
+            prop_assert!(withdrawn * post_supply
+                <= Uint256::from(deposit) * post_supply + Uint256::from(donation) * minted);
+            prop_assert_eq!(withdrawn + (post_assets - withdrawn), post_assets);
+            prop_assert_eq!(minted + Uint256::from(supply), post_supply);
+        }
+    }
+
+    #[test]
+    fn paused_withdrawal_remains_available_unless_a_swap_is_pending() {
+        let mut deps = mock_dependencies();
+        PAUSED.save(deps.as_mut().storage, &true).unwrap();
+        PENDING_SWAP
+            .save(
+                deps.as_mut().storage,
+                &PendingSwap {
+                    captured_twap: Decimal::one(),
+                    balances: [Uint128::one(), Uint128::one()],
+                    pre_deviation_bps: 1,
+                    offer_index: 0,
+                    amount: Uint128::one(),
+                    min_return: Uint128::one(),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            execute_withdraw(
+                deps.as_mut(),
+                mock_env(),
+                cosmwasm_std::testing::mock_info("holder", &[]),
+                Uint128::one(),
+                None,
+            )
+            .unwrap_err(),
+            ContractError::RebalancePending
+        );
+    }
 
     #[test]
     fn ratio_deviation_uses_reference_basis() {
@@ -1392,7 +1625,9 @@ mod tests {
         let config = Config {
             admin: Addr::unchecked("admin"),
             pending_admin: None,
+            factory: Addr::unchecked("factory"),
             pair: Addr::unchecked("pair"),
+            pair_code_id: 1,
             asset_tokens: [Addr::unchecked("t0"), Addr::unchecked("t1")],
             decimals: 6,
             twap_window_seconds: 300,
@@ -1485,7 +1720,7 @@ mod tests {
     #[test]
     fn planned_offer_caps_at_max_trade_bps() {
         // 60t0 + 60t1 at price 1.75, cell 3 -> target 75% token1.
-        // Uncap = (123.75 - 60) / 1.75 / 2 = 18.21e9, but max_trade_bps 2500
+        // Uncap = (123.75 - 60) / 1.75 = 36.42e9, but max_trade_bps 2500
         // caps it to 25% of the 60e9 token0 balance = 15e9.
         let holdings = [Uint128::new(60_000_000_000), Uint128::new(60_000_000_000)];
         let (index, amount) =
@@ -1505,6 +1740,26 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn planned_offer_reaches_each_target_in_one_ideal_trade() {
+        let price = Decimal::from_str("1.5").unwrap();
+        let holdings = [Uint128::new(400), Uint128::new(600)];
+        for cell in 0..=4 {
+            let target = Uint256::from(1_200u16) * Uint256::from(cell) / Uint256::from(4u8);
+            let offer = planned_offer(holdings, price, cell, 4, 10_000).unwrap();
+            let resulting_token1 = match offer {
+                None => Uint256::from(holdings[1]),
+                Some((0, amount)) => {
+                    Uint256::from(holdings[1])
+                        + Uint256::from(expected_return(amount, 0, price).unwrap())
+                }
+                Some((1, amount)) => Uint256::from(holdings[1] - amount),
+                Some((_, _)) => unreachable!(),
+            };
+            assert_eq!(resulting_token1, target, "cell {cell}");
+        }
     }
 
     #[test]
@@ -1531,6 +1786,95 @@ mod tests {
             .unwrap(),
             10_000
         );
+    }
+
+    #[test]
+    fn zero_target_deviation_and_offer_are_valid_at_or_below_lower_price() {
+        let config = cell_config(4);
+        for price in [
+            Decimal::from_atomics(100u128, 0).unwrap(),
+            Decimal::from_atomics(99u128, 0).unwrap(),
+        ] {
+            assert_eq!(
+                allocation_deviation([Uint128::new(10), Uint128::zero()], price, &config).unwrap(),
+                0
+            );
+            assert_eq!(
+                allocation_deviation([Uint128::new(10), Uint128::new(20)], price, &config).unwrap(),
+                10_000
+            );
+            let offer = planned_offer(
+                [Uint128::new(10), Uint128::new(20)],
+                price,
+                0,
+                config.grid_count,
+                5_000,
+            )
+            .unwrap();
+            assert_eq!(offer, Some((1, Uint128::new(10))));
+        }
+    }
+
+    #[test]
+    fn fee_shares_track_nav_and_never_overcharge() {
+        for (asset_value, supply) in [
+            (Uint128::new(500_000), Uint128::new(1_000_000)),
+            (Uint128::new(1_000_000), Uint128::new(1_000_000)),
+            (Uint128::new(2_000_000), Uint128::new(1_000_000)),
+            (Uint128::new(1_234_567), Uint128::new(765_432)),
+        ] {
+            let fee = asset_value.multiply_ratio(180u16, 10_000u16);
+            let shares = fee_shares_for_value(fee, asset_value, supply).unwrap();
+            let claim =
+                Uint256::from(shares) * Uint256::from(asset_value) / Uint256::from(supply + shares);
+            assert!(claim <= Uint256::from(fee));
+
+            let second = fee_shares_for_value(fee, asset_value, supply + shares).unwrap();
+            let total_claim = Uint256::from(shares + second) * Uint256::from(asset_value)
+                / Uint256::from(supply + shares + second);
+            assert!(total_claim <= Uint256::from(fee) * Uint256::from(2u8));
+        }
+        assert_eq!(
+            fee_shares_for_value(Uint128::new(1), Uint128::new(10), Uint128::zero()).unwrap(),
+            Uint128::zero()
+        );
+        assert_eq!(
+            fee_shares_for_value(Uint128::new(10), Uint128::new(10), Uint128::new(10)).unwrap(),
+            Uint128::zero()
+        );
+    }
+
+    #[test]
+    fn migrate_validates_metadata_then_requires_redeployment() {
+        let mut deps = mock_dependencies();
+        set_contract_version(deps.as_mut().storage, CONTRACT_NAME, "0.1.0").unwrap();
+        assert_eq!(
+            migrate(deps.as_mut(), mock_env(), MigrateMsg {}),
+            Err(ContractError::LegacySchemaRequiresRedeploy)
+        );
+        let version = get_contract_version(deps.as_ref().storage).unwrap();
+        assert_eq!(version.contract, CONTRACT_NAME);
+        assert_eq!(version.version, "0.1.0");
+
+        for (contract, version) in [
+            (CONTRACT_NAME, CONTRACT_VERSION),
+            (CONTRACT_NAME, "999.0.0"),
+            (CONTRACT_NAME, "not-semver"),
+            ("wrong-contract", "0.1.0"),
+        ] {
+            let mut deps = mock_dependencies();
+            set_contract_version(deps.as_mut().storage, contract, version).unwrap();
+            assert!(matches!(
+                migrate(deps.as_mut(), mock_env(), MigrateMsg {}),
+                Err(ContractError::InvalidMigration { .. })
+            ));
+        }
+
+        let mut deps = mock_dependencies();
+        assert!(matches!(
+            migrate(deps.as_mut(), mock_env(), MigrateMsg {}),
+            Err(ContractError::InvalidMigration { .. })
+        ));
     }
 
     #[test]
@@ -1616,7 +1960,9 @@ mod tests {
         Config {
             admin: Addr::unchecked("admin"),
             pending_admin: None,
+            factory: Addr::unchecked("factory"),
             pair: Addr::unchecked("pair"),
+            pair_code_id: 1,
             asset_tokens: [Addr::unchecked("t0"), Addr::unchecked("t1")],
             decimals: 6,
             twap_window_seconds: 300,

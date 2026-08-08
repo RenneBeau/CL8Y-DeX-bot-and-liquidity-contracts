@@ -38,5 +38,6 @@ pub struct ConfigResponse {
 pub struct RouteResponse {
     pub vault: String,
     pub pair: String,
+    pub pair_code_id: u64,
     pub asset_tokens: [String; 2],
 }

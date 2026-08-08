@@ -14,6 +14,8 @@ pub struct InstantiateMsg {
     pub max_grid_count: u32,
     pub max_orders_per_reconcile: u32,
     pub max_active_orders_per_vault: u32,
+    pub fee_registry: Option<String>,
+    pub fee_collector: Option<String>,
 }
 
 #[cw_serde]
@@ -24,6 +26,8 @@ pub enum ExecuteMsg {
     UpdateConfig {
         keeper: Option<String>,
         vault_code_id: Option<u64>,
+        fee_registry: Option<String>,
+        fee_collector: Option<String>,
     },
     TransferAdmin {
         admin: String,
@@ -44,6 +48,8 @@ pub struct VaultInstantiateMsg {
     pub max_grid_count: u32,
     pub max_orders_per_reconcile: u32,
     pub max_active_orders_per_bot: u32,
+    pub fee_registry: Option<String>,
+    pub fee_collector: Option<String>,
 }
 
 #[cw_serde]
@@ -71,6 +77,8 @@ pub struct ConfigResponse {
     pub max_grid_count: u32,
     pub max_orders_per_reconcile: u32,
     pub max_active_orders_per_vault: u32,
+    pub fee_registry: Option<String>,
+    pub fee_collector: Option<String>,
 }
 
 #[cw_serde]

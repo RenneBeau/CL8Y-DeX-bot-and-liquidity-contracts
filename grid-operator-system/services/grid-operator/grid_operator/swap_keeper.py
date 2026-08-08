@@ -17,12 +17,16 @@ Dry-run is the default. Pass --broadcast to sign and submit.
 
 import argparse
 import json
+import math
 import os
 import time
 
 from .protocol import fingerprint_v1 as plan_fingerprint
 from .protocol import grid_protocol
 from .rpc import RpcError, Terrad
+from .reliability import ProcessLock, StateIdentityError
+
+__all__ = ["plan_fingerprint"]
 
 
 class DeterministicTxError(RuntimeError):
@@ -49,8 +53,11 @@ def is_transient_error(detail: str) -> bool:
 class SwapTxTracker:
     """Persists the single in-flight rebalance transaction per vault."""
 
-    def __init__(self, path: str):
+    SCHEMA_VERSION = 1
+
+    def __init__(self, path: str, identity: dict | None = None):
         self.path = path
+        self.identity = identity
         self.pending_hash = None
         self.pending_vault = None
         self.pending_plan = None
@@ -58,8 +65,25 @@ class SwapTxTracker:
         self.suppressed_plan = None
         self.broadcasting = False
         if path and os.path.exists(path):
-            with open(path, encoding="utf-8") as state_file:
-                state = json.load(state_file)
+            try:
+                with open(path, encoding="utf-8") as state_file:
+                    state = json.load(state_file)
+            except (OSError, json.JSONDecodeError) as exc:
+                raise StateIdentityError(
+                    f"cannot safely read state {path}; preserve it and recover manually: {exc}"
+                ) from exc
+            if not isinstance(state, dict):
+                raise StateIdentityError(f"state {path} is not a JSON object; preserve it for recovery")
+            if identity is not None:
+                stored = state.get("identity")
+                if state.get("schema_version") != self.SCHEMA_VERSION or stored is None:
+                    raise StateIdentityError(
+                        f"legacy state {path} has no trusted identity; explicit migration is required"
+                    )
+                if stored != identity:
+                    raise StateIdentityError(
+                        f"state identity mismatch for {path}: stored={stored!r}, configured={identity!r}"
+                    )
             self.pending_hash = state.get("pending_hash")
             self.pending_vault = state.get("pending_vault")
             self.pending_plan = state.get("pending_plan")
@@ -76,6 +100,8 @@ class SwapTxTracker:
         with open(temporary, "w", encoding="utf-8") as state_file:
             json.dump(
                 {
+                    "schema_version": self.SCHEMA_VERSION,
+                    "identity": self.identity,
                     "pending_hash": self.pending_hash,
                     "pending_vault": self.pending_vault,
                     "pending_plan": self.pending_plan,
@@ -110,7 +136,9 @@ def broadcast(vault: str, message: dict, terrad: Terrad):
     signed = terrad.sign_execute(vault, message)
     response = terrad.broadcast(signed)
     tx_response = response.get("tx_response", response)
-    code = int(tx_response.get("code", 0) or 0)
+    if not isinstance(tx_response, dict) or "code" not in tx_response:
+        raise RpcError("sync broadcast response omitted transaction code")
+    code = int(tx_response["code"])
     if code != 0:
         detail = tx_response.get("raw_log") or tx_response.get("log") or "CheckTx failed"
         if is_transient_error(detail):
@@ -130,8 +158,18 @@ def poll_pending(args, tracker, terrad, sleep=time.sleep, clock=time.monotonic):
         except RpcError:
             result = None
         if result:
-            tx_response = result.get("tx_response", result)
-            tx_height = int(tx_response.get("height", 0) or 0)
+            try:
+                tx_response = result.get("tx_response", result)
+                observed_hash = tx_response.get("txhash") or tx_response.get("hash")
+                if "code" not in tx_response or "height" not in tx_response or not observed_hash:
+                    raise ValueError("incomplete transaction response")
+                tx_height = int(tx_response["height"])
+                code = int(tx_response["code"])
+                if tx_height <= 0 or observed_hash.lower() != tracker.pending_hash.lower():
+                    raise ValueError("invalid height or mismatched transaction hash")
+            except (AttributeError, TypeError, ValueError):
+                result = None
+        if result:
             if args.confirmation_blocks and tx_height:
                 latest = int(terrad.latest_height())
                 if latest < tx_height + args.confirmation_blocks:
@@ -139,7 +177,6 @@ def poll_pending(args, tracker, terrad, sleep=time.sleep, clock=time.monotonic):
                         return False
                     sleep(args.tx_poll_seconds)
                     continue
-            code = int(tx_response.get("code", 0) or 0)
             tx_hash = tracker.pending_hash
             plan = tracker.pending_plan
             tracker.pending_hash = None
@@ -209,7 +246,7 @@ def keep_vault(args, terrad, tracker, vault, protocol=None):
         tracker.pending_since = time.time()
         tracker.save()
         tx_hash, _response = broadcast(vault, message, terrad)
-    except DeterministicTxError as exc:
+    except DeterministicTxError:
         tracker.broadcasting = False
         tracker.pending_vault = None
         tracker.pending_plan = None
@@ -218,13 +255,8 @@ def keep_vault(args, terrad, tracker, vault, protocol=None):
         tracker.save()
         raise
     except RpcError:
-        # Transient node failure: keep the plan pending but not "broadcasting"
-        # so a crash here does not wedge the tracker into an unknown state.
-        tracker.broadcasting = False
-        tracker.pending_vault = None
-        tracker.pending_plan = None
-        tracker.pending_since = None
-        tracker.save()
+        # The durable marker was written before send. The node may have accepted
+        # the transaction even when the client saw an error or invalid reply.
         raise
     tracker.pending_hash = tx_hash
     tracker.broadcasting = False
@@ -264,24 +296,39 @@ def parse_args(argv=None):
     args = parser.parse_args(argv)
     if not args.vault:
         parser.error("--vault or GRID_SWAP_VAULTS is required")
-    if args.deadline_seconds <= 0 or args.tx_poll_seconds <= 0 or args.tx_timeout_seconds <= 0 \
-            or args.confirmation_blocks < 0:
+    if args.deadline_seconds <= 0 or not math.isfinite(args.tx_poll_seconds) \
+            or not math.isfinite(args.tx_timeout_seconds) or args.tx_poll_seconds <= 0 \
+            or args.tx_timeout_seconds <= 0 \
+            or args.poll_seconds <= 0 or args.confirmation_blocks < 0:
         parser.error("deadline and transaction polling values must be positive")
     return args
 
 
 def main(argv=None) -> int:
     args = parse_args(argv)
-    tracker = SwapTxTracker(args.state_file)
-    terrad = Terrad(args.terrad, args.rpc, args.chain_id, args.key, args.keyring_backend,
-                    args.gas_adjustment, args.fees)
-    while True:
-        try:
-            run_once(args, terrad, tracker)
-        except Exception as error:
-            print(f"keeper error: {error}")
-            if args.once:
-                return 1
-        if args.once:
-            return 0
-        time.sleep(args.poll_seconds)
+    try:
+        with ProcessLock(args.state_file):
+            terrad = Terrad(args.terrad, args.rpc, args.chain_id, args.key, args.keyring_backend,
+                            args.gas_adjustment, args.fees)
+            identity = {
+                "chain_id": args.chain_id,
+                "vault": args.vault.lower(),
+                "signer": f"{args.keyring_backend}:{args.key}:{terrad.key_address()}",
+                "protocol_kind": "grid-swap",
+            }
+            tracker = SwapTxTracker(args.state_file, identity)
+            if not os.path.exists(args.state_file):
+                tracker.save()
+            while True:
+                try:
+                    run_once(args, terrad, tracker)
+                except Exception as error:
+                    print(f"keeper error: {error}")
+                    if args.once:
+                        return 1
+                if args.once:
+                    return 0
+                time.sleep(args.poll_seconds)
+    except (StateIdentityError, RuntimeError) as error:
+        print(f"keeper startup refused: {error}")
+        return 2

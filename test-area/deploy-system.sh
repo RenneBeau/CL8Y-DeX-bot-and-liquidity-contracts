@@ -178,10 +178,13 @@ PROXY_INIT=$(jq -nc --arg admin "$TEST_ADDRESS" \
     '{admin:$admin}')
 PROXY_ADDRESS=$(instantiate_contract "$PROXY_CODE_ID" "$PROXY_INIT" cl8y-shared-swap-proxy)
 
+PAIR_CODE_ID=$(terrad_query wasm contract "$PAIR_ADDRESS" | jq -er '.contract_info.code_id')
 VAULT_INIT=$(jq -nc --arg admin "$TEST_ADDRESS" --arg keeper "$TEST_ADDRESS" \
-    --arg proxy "$PROXY_ADDRESS" --arg pair "$PAIR_ADDRESS" \
+    --arg proxy "$PROXY_ADDRESS" --arg pair "$PAIR_ADDRESS" --arg factory "$VITE_FACTORY_ADDRESS" \
+    --argjson pair_code_id "$PAIR_CODE_ID" \
     --argjson liquidity_code_id "$LIQUIDITY_CODE_ID" \
-    '{admin:$admin,keeper:$keeper,proxy:$proxy,pair:$pair,liquidity_code_id:$liquidity_code_id,twap_window_seconds:1,
+    '{admin:$admin,keeper:$keeper,proxy:$proxy,pair:$pair,factory:$factory,pair_code_id:$pair_code_id,
+      liquidity_code_id:$liquidity_code_id,twap_window_seconds:1,
       rebalance_threshold_bps:500,allocation_tolerance_bps:500,max_trade_bps:2500,
       max_execution_deviation_bps:500,quote_slippage_bps:200,
       max_spot_twap_deviation_bps:500,max_trade_pool_bps:1000,max_spread:"0.05"}')

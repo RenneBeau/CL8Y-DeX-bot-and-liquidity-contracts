@@ -6,8 +6,8 @@
 
 use assert_matches::assert_matches;
 use cl8y_fee_registry::msg::{
-    ConfigResponse, EffectiveFeeResponse, ExecuteMsg, InstantiateMsg, QueryMsg, TierEntry,
-    TierSource,
+    ConfigResponse, EffectiveFeeResponse, ExecuteMsg, HoldingResponse, InstantiateMsg, QueryMsg,
+    TierEntry, TierSource,
 };
 use cl8y_fee_registry::ContractError;
 use cosmwasm_std::{Addr, Uint128};
@@ -399,8 +399,7 @@ fn holding_never_cleared_on_transient_live_failure() {
     )
     .unwrap();
 
-    // Point at a dead token so the live read must fail; the saved 6% tier must
-    // survive as the cached fallback.
+    // Point at a dead token so the live read and refresh must fail.
     app.execute_contract(
         governance.clone(),
         registry.clone(),
@@ -414,9 +413,29 @@ fn holding_never_cleared_on_transient_live_failure() {
         &[],
     )
     .unwrap();
+    app.execute_contract(
+        Addr::unchecked("anyone"),
+        registry.clone(),
+        &ExecuteMsg::RefreshHolding {
+            trader: trader.to_string(),
+        },
+        &[],
+    )
+    .unwrap();
+
     let fee = live_fee(&app, &registry, &trader);
-    assert_matches!(fee.source, TierSource::Cached);
-    assert_eq!(fee.tier_id, Some(6));
-    assert_eq!(fee.fee_bps, reference_fee(1_000, 6_000));
-    assert_eq!(fee.holding, Some(Uint128::new(500 * ONE_CLY)));
+    assert_matches!(fee.source, TierSource::Lowest);
+    assert_eq!(fee.tier_id, None);
+    assert_eq!(fee.discount_bps, 0);
+    assert_eq!(fee.fee_bps, 1_000);
+    assert_eq!(fee.holding, None);
+
+    let holding: HoldingResponse = query_smart(
+        &app,
+        &registry,
+        &QueryMsg::Holding {
+            trader: trader.to_string(),
+        },
+    );
+    assert_eq!(holding.holding, Some(Uint128::new(500 * ONE_CLY)));
 }

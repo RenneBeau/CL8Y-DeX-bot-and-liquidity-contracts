@@ -2,7 +2,8 @@
 
 use assert_matches::assert_matches;
 use cl8y_fee_registry::msg::{
-    ConfigResponse, EffectiveFeeResponse, ExecuteMsg, InstantiateMsg, QueryMsg, TierSource,
+    ConfigResponse, EffectiveFeeResponse, ExecuteMsg, HoldingResponse, InstantiateMsg, QueryMsg,
+    TierSource,
 };
 use cl8y_fee_registry::ContractError;
 use cosmwasm_std::{Addr, Uint128};
@@ -150,11 +151,11 @@ fn effective_fee_reads_live_holding() {
 }
 
 #[test]
-fn effective_fee_falls_back_to_saved_holding_when_live_read_fails() {
+fn cached_high_tier_holder_pays_full_base_when_live_read_fails() {
     let (mut app, registry, cl8y) = setup();
     let governance = app.api().addr_make("governance");
     let trader = app.api().addr_make("trader");
-    mint_cl8y(&mut app, &cl8y, &trader, 200 * ONE_CL8Y);
+    mint_cl8y(&mut app, &cl8y, &trader, 7_500 * ONE_CL8Y);
     app.execute_contract(
         Addr::unchecked("anyone"),
         registry.clone(),
@@ -187,13 +188,24 @@ fn effective_fee_falls_back_to_saved_holding_when_live_read_fails() {
             trader: trader.to_string(),
         },
     );
-    assert_matches!(fee.source, TierSource::Cached);
-    assert_eq!(fee.tier_id, Some(5));
-    assert_eq!(fee.fee_bps, 90);
-    assert_eq!(fee.holding, Some(Uint128::new(200 * ONE_CL8Y)));
+    assert_matches!(fee.source, TierSource::Lowest);
+    assert_eq!(fee.tier_id, None);
+    assert_eq!(fee.discount_bps, 0);
+    assert_eq!(fee.fee_bps, 180);
+    assert_eq!(fee.holding, None);
 
-    // A trader with no saved holding and a dead live source is the lowest tier
-    // (full base fee) -- never under-fee.
+    // The last successful observation remains queryable, but cannot affect fee
+    // pricing after the live source fails.
+    let holding: HoldingResponse = query_smart(
+        &app,
+        &registry,
+        &QueryMsg::Holding {
+            trader: trader.to_string(),
+        },
+    );
+    assert_eq!(holding.holding, Some(Uint128::new(7_500 * ONE_CL8Y)));
+
+    // A trader with no saved holding gets the same full base fee.
     let stranger = app.api().addr_make("stranger");
     let fee: EffectiveFeeResponse = query_smart(
         &app,

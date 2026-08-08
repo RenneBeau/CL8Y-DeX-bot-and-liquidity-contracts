@@ -14,6 +14,8 @@ pub enum ContractError {
     UnexpectedFunds,
     #[error("invalid manager configuration")]
     InvalidConfig,
+    #[error("fee registry and fee collector must be configured together")]
+    InvalidFeeConfig,
     #[error("unknown vault instantiation reply")]
     UnknownReply,
 }

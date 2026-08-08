@@ -15,6 +15,11 @@ use cw20::{BalanceResponse, Cw20ExecuteMsg, Cw20ReceiveMsg, TokenInfoResponse};
 use cw_multi_test::{App, Contract, ContractWrapper, Executor};
 use cw_storage_plus::{Item, Map};
 
+#[cfg(feature = "mainnet")]
+use cosmwasm_std::{Api, Storage};
+#[cfg(feature = "mainnet")]
+use cw_multi_test::{error::AnyResult, AddressGenerator, AppBuilder, WasmKeeper};
+
 use cl8y_grid_manager::msg::{
     ExecuteMsg as ManagerExecuteMsg, InstantiateMsg as ManagerInstantiateMsg,
     QueryMsg as ManagerQueryMsg,
@@ -76,6 +81,11 @@ pub struct MockFeeRegistryInstantiateMsg {
 }
 
 #[cw_serde]
+pub enum MockFeeRegistryExecuteMsg {
+    SetAvailable { available: bool },
+}
+
+#[cw_serde]
 pub enum MockFeeRegistryQueryMsg {
     EffectiveFee { trader: String },
 }
@@ -93,11 +103,17 @@ pub struct MockFeeRegistryResponse {
 }
 
 const MOCK_FEE_BPS: Item<u16> = Item::new("mock_fee_bps");
+const MOCK_FEE_AVAILABLE: Item<bool> = Item::new("mock_fee_available");
 
 fn mock_fee_registry_code() -> Box<dyn Contract<Empty, Empty>> {
     let contract = ContractWrapper::new(
-        |_deps, _env, _info, _msg: Empty| -> StdResult<cosmwasm_std::Response> {
-            Err(StdError::generic_err("registry has no execute"))
+        |deps, _env, _info, msg: MockFeeRegistryExecuteMsg| -> StdResult<cosmwasm_std::Response> {
+            match msg {
+                MockFeeRegistryExecuteMsg::SetAvailable { available } => {
+                    MOCK_FEE_AVAILABLE.save(deps.storage, &available)?;
+                    Ok(cosmwasm_std::Response::new())
+                }
+            }
         },
         |deps,
          _env,
@@ -105,16 +121,20 @@ fn mock_fee_registry_code() -> Box<dyn Contract<Empty, Empty>> {
          msg: MockFeeRegistryInstantiateMsg|
          -> StdResult<cosmwasm_std::Response> {
             MOCK_FEE_BPS.save(deps.storage, &msg.fee_bps)?;
+            MOCK_FEE_AVAILABLE.save(deps.storage, &true)?;
             Ok(cosmwasm_std::Response::new())
         },
         |deps, _env, msg: MockFeeRegistryQueryMsg| -> StdResult<Binary> {
+            if !MOCK_FEE_AVAILABLE.load(deps.storage)? {
+                return Err(StdError::generic_err("registry unavailable"));
+            }
             let fee_bps = MOCK_FEE_BPS.load(deps.storage)?;
             match msg {
                 MockFeeRegistryQueryMsg::EffectiveFee { .. } => {
                     to_json_binary(&MockFeeRegistryResponse {
                         fee_bps,
                         discount_bps: 0,
-                        tier_id: None,
+                        tier_id: Some(3),
                         holding: Some(Uint128::new(1)),
                         source: "live".to_string(),
                     })
@@ -624,6 +644,38 @@ const KEEPER_REWARD: u128 = 20;
 const MIN_GAS_RESERVE: u128 = 100;
 const ORDER_TIMEOUT_SECONDS: u64 = 3600;
 
+#[cfg(feature = "mainnet")]
+fn local_fee_collector() -> Addr {
+    Addr::unchecked(cl8y_grid_vault::mainnet::CANONICAL_FEE_COLLECTOR)
+}
+
+#[cfg(not(feature = "mainnet"))]
+fn local_fee_collector() -> Addr {
+    Addr::unchecked("collector")
+}
+
+#[cfg(feature = "mainnet")]
+struct CanonicalFirstContract;
+
+#[cfg(feature = "mainnet")]
+impl AddressGenerator for CanonicalFirstContract {
+    fn contract_address(
+        &self,
+        _api: &dyn Api,
+        _storage: &mut dyn Storage,
+        _code_id: u64,
+        instance_id: u64,
+    ) -> AnyResult<Addr> {
+        if instance_id == 0 {
+            Ok(Addr::unchecked(
+                cl8y_grid_vault::mainnet::CANONICAL_FEE_REGISTRY,
+            ))
+        } else {
+            Ok(Addr::unchecked(format!("contract{instance_id}")))
+        }
+    }
+}
+
 struct Harness {
     app: App,
     vault: Addr,
@@ -680,6 +732,15 @@ impl Harness {
         let alice = Addr::unchecked("alice");
         let admin = Addr::unchecked("admin");
         let keeper = Addr::unchecked("keeper");
+        #[cfg(feature = "mainnet")]
+        let (fee_registry, fee_collector) = if fee_registry.is_none() {
+            (
+                Some(cl8y_grid_vault::mainnet::CANONICAL_FEE_REGISTRY.to_string()),
+                Some(local_fee_collector().to_string()),
+            )
+        } else {
+            (fee_registry, fee_collector)
+        };
 
         let cw20 = app.store_code(cw20_code());
         let malicious = app.store_code(malicious_token_code());
@@ -815,8 +876,8 @@ impl Harness {
                     max_grid_count: 12,
                     max_orders_per_reconcile: 20,
                     max_active_orders_per_bot: 20,
-                    fee_registry,
-                    fee_collector,
+                    fee_registry: fee_registry.clone(),
+                    fee_collector: fee_collector.clone(),
                 },
                 &[],
                 "grid-vault",
@@ -841,6 +902,8 @@ impl Harness {
                     max_grid_count: 12,
                     max_orders_per_reconcile: 20,
                     max_active_orders_per_vault: 20,
+                    fee_registry,
+                    fee_collector,
                 },
                 &[],
                 "grid-manager",
@@ -1003,6 +1066,20 @@ impl Harness {
             .unwrap()
     }
 
+    fn owner_shares(&self, bot_id: u64) -> Uint128 {
+        self.app
+            .wrap()
+            .query_wasm_smart::<cl8y_grid_vault::msg::ShareResponse>(
+                &self.vault,
+                &VaultQueryMsg::Shares {
+                    bot_id,
+                    address: self.alice.to_string(),
+                },
+            )
+            .unwrap()
+            .shares
+    }
+
     fn balance_of(&self, token: &Addr, account: &Addr) -> Uint128 {
         let response: BalanceResponse = self
             .app
@@ -1117,13 +1194,13 @@ fn full_lifecycle_with_fill_reconcile_cancel_withdraw() {
     assert_eq!(bot.free_balances[1], Uint128::new(1_100));
 
     // Withdraw everything.
-    h.withdraw(1, bot.total_shares);
+    h.withdraw(1, h.owner_shares(1));
     assert_eq!(
-        h.balance_of(&h.token_0, &h.alice),
+        h.balance_of(&h.token_0, &h.alice) + h.balance_of(&h.token_0, &h.vault),
         Uint128::new(1_000_000_000 - 100_000_000 + 300)
     );
     assert_eq!(
-        h.balance_of(&h.token_1, &h.alice),
+        h.balance_of(&h.token_1, &h.alice) + h.balance_of(&h.token_1, &h.vault),
         Uint128::new(1_000_000_000 - 100_000_000 - 900)
     );
 }
@@ -1437,7 +1514,7 @@ fn generic_pair_query_error_never_cancelled_is_classified_fully_executed() {
     h.cancel_all(1);
     let bot = h.bot(1);
     assert_eq!(bot.active_orders, 0);
-    h.withdraw(1, bot.total_shares);
+    h.withdraw(1, h.owner_shares(1));
 }
 
 #[test]
@@ -1522,17 +1599,134 @@ fn manager_create_vault_then_full_vault_flow() {
     assert_eq!(bot.free_balances[0], Uint128::new(600));
     assert_eq!(bot.free_balances[1], Uint128::new(2_200));
 
-    h.withdraw(1, bot.total_shares);
+    h.withdraw(1, h.owner_shares(1));
     assert_eq!(
-        h.balance_of(&h.token_0, &h.alice),
+        h.balance_of(&h.token_0, &h.alice) + h.balance_of(&h.token_0, &h.vault),
         Uint128::new(1_000_000_000 - 100_000_000 - 1_000 + 600)
     );
     assert_eq!(
-        h.balance_of(&h.token_1, &h.alice),
+        h.balance_of(&h.token_1, &h.alice) + h.balance_of(&h.token_1, &h.vault),
         Uint128::new(1_000_000_000 - 100_000_000 - 2_000 + 2_200)
     );
 
     h.vault = standalone_vault;
+}
+
+#[cfg(not(feature = "mainnet"))]
+#[test]
+fn manager_fee_update_only_affects_new_vaults_and_new_vault_charges_fee() {
+    let (mut h, collector) = new_fee_harness(200);
+
+    h.app
+        .execute_contract(
+            h.alice.clone(),
+            h.manager.clone(),
+            &ManagerExecuteMsg::CreateVault { label: None },
+            &[],
+        )
+        .unwrap();
+    let first_vaults: Vec<cl8y_grid_manager::msg::VaultResponse> = h
+        .app
+        .wrap()
+        .query_wasm_smart(
+            &h.manager,
+            &ManagerQueryMsg::VaultsByOwner {
+                owner: h.alice.to_string(),
+            },
+        )
+        .unwrap();
+    let first_vault = Addr::unchecked(&first_vaults[0].address);
+    let first_config: cl8y_grid_vault::msg::ConfigResponse = h
+        .app
+        .wrap()
+        .query_wasm_smart(&first_vault, &VaultQueryMsg::Config {})
+        .unwrap();
+
+    let replacement_registry_id = h.app.store_code(mock_fee_registry_code());
+    let replacement_registry = h
+        .app
+        .instantiate_contract(
+            replacement_registry_id,
+            Addr::unchecked("governance"),
+            &MockFeeRegistryInstantiateMsg { fee_bps: 300 },
+            &[],
+            "replacement-fee-registry",
+            None,
+        )
+        .unwrap();
+    h.app
+        .execute_contract(
+            Addr::unchecked("admin"),
+            h.manager.clone(),
+            &ManagerExecuteMsg::UpdateConfig {
+                keeper: None,
+                vault_code_id: None,
+                fee_registry: Some(replacement_registry.to_string()),
+                fee_collector: Some(collector.to_string()),
+            },
+            &[],
+        )
+        .unwrap();
+
+    let unchanged_config: cl8y_grid_vault::msg::ConfigResponse = h
+        .app
+        .wrap()
+        .query_wasm_smart(&first_vault, &VaultQueryMsg::Config {})
+        .unwrap();
+    assert_eq!(unchanged_config.fee_registry, first_config.fee_registry);
+
+    h.app
+        .execute_contract(
+            h.alice.clone(),
+            h.manager.clone(),
+            &ManagerExecuteMsg::CreateVault { label: None },
+            &[],
+        )
+        .unwrap();
+    let vaults: Vec<cl8y_grid_manager::msg::VaultResponse> = h
+        .app
+        .wrap()
+        .query_wasm_smart(
+            &h.manager,
+            &ManagerQueryMsg::VaultsByOwner {
+                owner: h.alice.to_string(),
+            },
+        )
+        .unwrap();
+    h.vault = Addr::unchecked(&vaults[1].address);
+    let new_config: cl8y_grid_vault::msg::ConfigResponse = h
+        .app
+        .wrap()
+        .query_wasm_smart(&h.vault, &VaultQueryMsg::Config {})
+        .unwrap();
+    assert_eq!(
+        new_config.fee_registry,
+        Some(replacement_registry.to_string())
+    );
+    assert_eq!(new_config.fee_collector, Some(collector.to_string()));
+
+    h.create_bot();
+    h.deposit(1, &h.token_0.clone(), Uint128::new(1_000));
+    h.deposit(1, &h.token_1.clone(), Uint128::new(2_000));
+    let bid = h
+        .orders(1)
+        .into_iter()
+        .find(|order| order.side == LimitOrderSide::Bid)
+        .unwrap();
+    h.fill(bid.order_id, Uint128::new(1_000), Uint128::new(500));
+    h.reconcile(1, vec![bid.order_id]);
+    let collector_shares: cl8y_grid_vault::msg::ShareResponse = h
+        .app
+        .wrap()
+        .query_wasm_smart(
+            &h.vault,
+            &VaultQueryMsg::Shares {
+                bot_id: 1,
+                address: collector.to_string(),
+            },
+        )
+        .unwrap();
+    assert!(!collector_shares.shares.is_zero());
 }
 
 #[test]
@@ -1932,6 +2126,25 @@ fn allowlist_and_quarantine_block_usage_until_cleared() {
 /// A mock fee-registry whose `EffectiveFee` returns `fee_bps`, plus a Harness
 /// wired to that registry and the given collector (all on one App).
 fn new_fee_harness(fee_bps: u16) -> (Harness, Addr) {
+    let (h, collector, _) = new_fee_harness_with_registry(fee_bps);
+    (h, collector)
+}
+
+fn new_fee_harness_with_registry(fee_bps: u16) -> (Harness, Addr, Addr) {
+    #[cfg(feature = "mainnet")]
+    let mut app = AppBuilder::default()
+        .with_wasm(WasmKeeper::new().with_address_generator(CanonicalFirstContract))
+        .build(|router, _api, storage| {
+            router
+                .bank
+                .init_balance(
+                    storage,
+                    &Addr::unchecked("alice"),
+                    vec![coin(1_000_000_000, GAS_DENOM)],
+                )
+                .unwrap();
+        });
+    #[cfg(not(feature = "mainnet"))]
     let mut app = App::new(|router, _api, storage| {
         router
             .bank
@@ -1954,9 +2167,9 @@ fn new_fee_harness(fee_bps: u16) -> (Harness, Addr) {
         )
         .unwrap();
 
-    let collector = Addr::unchecked("collector");
+    let collector = local_fee_collector();
     let h = Harness::new_with_fee_on(app, fee_registry.as_str(), collector.as_str());
-    (h, collector)
+    (h, collector, fee_registry)
 }
 
 #[test]
@@ -2069,6 +2282,95 @@ fn protocol_fee_mints_collector_lp_and_redeems() {
     let treasury_0 = h.balance_of(&h.token_0, &treasury);
     let treasury_1 = h.balance_of(&h.token_1, &treasury);
     assert!(treasury_0 > Uint128::zero() || treasury_1 > Uint128::zero());
+    let redemption_claim = treasury_0
+        .checked_add(
+            treasury_1.multiply_ratio(Decimal::one().atomics(), bot.reference_price.atomics()),
+        )
+        .unwrap();
+    let desired_fee = value_in_token_0.multiply_ratio(200u16, 10_000u16);
+    assert!(redemption_claim <= desired_fee);
+}
+
+#[test]
+fn emergency_owner_exit_reserves_collector_assets_and_collector_redeems_in_exit() {
+    let (mut h, collector) = new_fee_harness(200);
+    let treasury = Addr::unchecked("treasury");
+    h.create_bot();
+    h.deposit(1, &h.token_0.clone(), Uint128::new(1_000));
+    h.deposit(1, &h.token_1.clone(), Uint128::new(2_000));
+    let bid = h
+        .orders(1)
+        .into_iter()
+        .find(|order| order.side == LimitOrderSide::Bid)
+        .unwrap();
+    h.fill(bid.order_id, Uint128::new(1_000), Uint128::new(500));
+    h.reconcile(1, vec![bid.order_id]);
+    h.cancel_all(1);
+
+    let collector_before: cl8y_grid_vault::msg::ShareResponse = h
+        .app
+        .wrap()
+        .query_wasm_smart(
+            &h.vault,
+            &VaultQueryMsg::Shares {
+                bot_id: 1,
+                address: collector.to_string(),
+            },
+        )
+        .unwrap();
+    assert!(!collector_before.shares.is_zero());
+
+    h.app
+        .execute_contract(
+            h.alice.clone(),
+            h.vault.clone(),
+            &VaultExecuteMsg::EnterExit { bot_id: 1 },
+            &[],
+        )
+        .unwrap();
+    h.app
+        .execute_contract(
+            h.alice.clone(),
+            h.vault.clone(),
+            &VaultExecuteMsg::EmergencyWithdraw {
+                bot_id: 1,
+                recipient: None,
+            },
+            &[],
+        )
+        .unwrap();
+
+    let bot = h.bot(1);
+    assert_eq!(bot.total_shares, collector_before.shares);
+    let collector_after_owner_exit: cl8y_grid_vault::msg::ShareResponse = h
+        .app
+        .wrap()
+        .query_wasm_smart(
+            &h.vault,
+            &VaultQueryMsg::Shares {
+                bot_id: 1,
+                address: collector.to_string(),
+            },
+        )
+        .unwrap();
+    assert_eq!(collector_after_owner_exit.shares, bot.total_shares);
+
+    h.app
+        .execute_contract(
+            collector,
+            h.vault.clone(),
+            &VaultExecuteMsg::RedeemShares {
+                bot_id: 1,
+                recipient: Some(treasury.to_string()),
+            },
+            &[],
+        )
+        .unwrap();
+    assert_eq!(h.bot(1).total_shares, Uint128::zero());
+    assert!(
+        !h.balance_of(&h.token_0, &treasury).is_zero()
+            || !h.balance_of(&h.token_1, &treasury).is_zero()
+    );
 }
 
 #[test]
@@ -2093,7 +2395,10 @@ fn fee_rate_at_full_base_charges_entire_collected_value() {
     // 500 credited token_0; at 100% the entire value is credited to the collector.
     let bot = h.bot(1);
     let credited_0 = Uint128::new(500);
-    let expected_fee_shares = credited_0.multiply_ratio(10_000u16, 10_000u16);
+    let desired_fee = credited_0.multiply_ratio(10_000u16, 10_000u16);
+    let assets = Uint128::new(2_000);
+    let expected_fee_shares =
+        desired_fee.multiply_ratio(initial_shares, assets.checked_sub(desired_fee).unwrap());
     assert_eq!(bot.total_shares, initial_shares + expected_fee_shares);
     let collector_shares: cl8y_grid_vault::msg::ShareResponse = h
         .app
@@ -2196,12 +2501,100 @@ fn redeem_shares_is_collector_only() {
 }
 
 #[test]
-fn reconcile_is_non_blocking_when_fee_registry_is_unreachable() {
-    // A fee_registry address that is not a contract makes the EffectiveFee
-    // query fail. The reconcile must NOT revert: the fill is processed and the
-    // fee is skipped via a `fee_skipped` attribute.
+fn successful_fee_is_cached_and_charged_when_registry_becomes_unreachable() {
+    let (mut h, collector, registry) = new_fee_harness_with_registry(200);
+    h.create_bot();
+    h.deposit(1, &h.token_0.clone(), Uint128::new(1_000));
+    h.deposit(1, &h.token_1.clone(), Uint128::new(2_000));
+    let bids: Vec<_> = h
+        .orders(1)
+        .into_iter()
+        .filter(|order| order.side == LimitOrderSide::Bid)
+        .collect();
+
+    h.fill(bids[0].order_id, Uint128::new(1_000), Uint128::new(500));
+    h.app
+        .execute_contract(
+            h.alice.clone(),
+            h.vault.clone(),
+            &VaultExecuteMsg::Reconcile {
+                bot_id: 1,
+                order_ids: vec![bids[0].order_id],
+            },
+            &[],
+        )
+        .unwrap();
+    let shares_after_live = h
+        .app
+        .wrap()
+        .query_wasm_smart::<cl8y_grid_vault::msg::ShareResponse>(
+            &h.vault,
+            &VaultQueryMsg::Shares {
+                bot_id: 1,
+                address: collector.to_string(),
+            },
+        )
+        .unwrap()
+        .shares;
+    assert!(!shares_after_live.is_zero());
+
+    h.app
+        .execute_contract(
+            Addr::unchecked("governance"),
+            registry,
+            &MockFeeRegistryExecuteMsg::SetAvailable { available: false },
+            &[],
+        )
+        .unwrap();
+    h.fill(bids[1].order_id, Uint128::new(1_000), Uint128::new(500));
+    let res = h
+        .app
+        .execute_contract(
+            h.alice.clone(),
+            h.vault.clone(),
+            &VaultExecuteMsg::Reconcile {
+                bot_id: 1,
+                order_ids: vec![bids[1].order_id],
+            },
+            &[],
+        )
+        .unwrap();
+    let attributes: Vec<_> = res
+        .events
+        .iter()
+        .flat_map(|event| &event.attributes)
+        .collect();
+    assert!(attributes
+        .iter()
+        .any(|attribute| attribute.key == "fee_bps" && attribute.value == "200"));
+    assert!(attributes
+        .iter()
+        .any(|attribute| attribute.key == "fee_tier" && attribute.value == "3"));
+    assert!(attributes
+        .iter()
+        .any(|attribute| attribute.key == "fee_source" && attribute.value == "vault_cached"));
+    let shares_after_cached = h
+        .app
+        .wrap()
+        .query_wasm_smart::<cl8y_grid_vault::msg::ShareResponse>(
+            &h.vault,
+            &VaultQueryMsg::Shares {
+                bot_id: 1,
+                address: collector.to_string(),
+            },
+        )
+        .unwrap()
+        .shares;
+    assert!(shares_after_cached > shares_after_live);
+}
+
+#[test]
+fn no_cache_registry_outage_charges_lowest_fee_without_zero_bypass() {
+    #[cfg(feature = "mainnet")]
+    let bogus_registry = cl8y_grid_vault::mainnet::CANONICAL_FEE_REGISTRY;
+    #[cfg(not(feature = "mainnet"))]
     let bogus_registry = "does-not-exist";
-    let collector = Addr::unchecked("collector");
+    let collector = local_fee_collector();
     let mut h = Harness::new_with_tokens(
         None,
         Some(bogus_registry.to_string()),
@@ -2214,11 +2607,11 @@ fn reconcile_is_non_blocking_when_fee_registry_is_unreachable() {
     let initial_shares = h.bot(1).total_shares;
 
     let orders = h.orders(1);
-    let ask = orders
+    let bid = orders
         .iter()
-        .find(|order| order.side == LimitOrderSide::Ask)
+        .find(|order| order.side == LimitOrderSide::Bid)
         .unwrap();
-    h.fill(ask.order_id, Uint128::new(200), Uint128::new(100));
+    h.fill(bid.order_id, Uint128::new(1_000), Uint128::new(500));
 
     let res = h
         .app
@@ -2227,7 +2620,7 @@ fn reconcile_is_non_blocking_when_fee_registry_is_unreachable() {
             h.vault.clone(),
             &VaultExecuteMsg::Reconcile {
                 bot_id: 1,
-                order_ids: vec![ask.order_id],
+                order_ids: vec![bid.order_id],
             },
             &[],
         )
@@ -2236,16 +2629,16 @@ fn reconcile_is_non_blocking_when_fee_registry_is_unreachable() {
         .events
         .iter()
         .flat_map(|e| e.attributes.iter())
-        .filter(|a| a.key == "fee_skipped")
         .collect();
-    assert_eq!(
-        attrs.len(),
-        1,
-        "reconcile must skip the unreachable fee, not revert"
-    );
+    assert!(attrs
+        .iter()
+        .any(|attribute| attribute.key == "fee_bps" && attribute.value == "180"));
+    assert!(attrs
+        .iter()
+        .any(|attribute| attribute.key == "fee_source" && attribute.value == "lowest"));
+    assert!(!attrs.iter().any(|attribute| attribute.key == "fee_skipped"));
 
-    // No fee was minted and holders were not diluted.
-    assert_eq!(h.bot(1).total_shares, initial_shares);
+    assert!(h.bot(1).total_shares > initial_shares);
     let collector_shares: cl8y_grid_vault::msg::ShareResponse = h
         .app
         .wrap()
@@ -2257,7 +2650,7 @@ fn reconcile_is_non_blocking_when_fee_registry_is_unreachable() {
             },
         )
         .unwrap();
-    assert_eq!(collector_shares.shares, Uint128::zero());
+    assert!(!collector_shares.shares.is_zero());
 }
 
 // ---------------------------------------------------------------------------
@@ -2277,7 +2670,7 @@ const CL8Y_LADDER: [(u8, u128, u16); 9] = [
 ];
 
 const ONE_CL8Y: u128 = 1_000_000_000_000_000_000;
-const BASE_FEE_BPS: u16 = 1_800;
+const BASE_FEE_BPS: u16 = 180;
 
 #[cw_serde]
 struct RealEffectiveFee {

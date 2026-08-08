@@ -66,13 +66,23 @@ to the bot's pair assets, and quarantine is the runtime disable control.
 ## Initialization
 
 The manager stores the vault code ID, CL8Y factory, operator settings, safety
-limits, and `order_timeout_seconds`. `create_vault` instantiates a vault with the
+limits, `order_timeout_seconds`, and optional paired `fee_registry` /
+`fee_collector`. Partial fee configuration is rejected and `mainnet` requires
+both. `create_vault` propagates the current pair and instantiates a vault with the
 caller as its designated owner and Wasm migration admin. The owner then creates the sole bot and prepays
 its native gas reserve.
 
-Manager configuration is a creation-time template. Updating the manager keeper
-or vault code ID affects only subsequently created vaults; existing vaults retain
-independent admin, keeper, and pinned-code state and must be updated separately.
+Manager configuration is a creation-time template. Updating the manager keeper,
+vault code ID, or fee addresses affects only subsequently created vaults;
+existing vaults retain independent admin, keeper, fee, and pinned-code state.
+An old fee-disabled vault requires migration or redeployment because the vault
+has no post-instantiation fee update.
+
+Fee resolution is keyed to `bot.owner`. The vault stores the last successful
+effective bps/tier locally. If the registry is unavailable, it charges that
+exact result with source `vault_cached`, or 180 bps/source `lowest` without
+history. If the registry is reachable but its live CL8Y token query fails, the
+registry returns full base/`Lowest`; historical holdings are not pricing input.
 
 The vault admits only a factory-registered CL8Y CW20/CW20 pair with distinct
 assets, equal decimals, nonzero reserves, compatible batch limits, valid price
@@ -174,8 +184,11 @@ The owner can irreversibly enter exit mode, disabling deposits and placements.
 Bounded `emergency_cancel` pages use current pair state rather than indexed fill
 history or stale recorded remaining values. They cancel active rows and claim
 positively verified parked refunds. Any ambiguous query aborts the complete call
-without deleting rows. `emergency_withdraw` then queries and transfers
-the vault's actual liquid CW20 balances. Expired orders may require a CL8Y cleanup
+without deleting rows. `emergency_withdraw` then burns only the owner's shares
+and transfers only the owner's pro-rata liquid balances. Collector shares,
+backing assets, and remaining total shares are preserved; once active orders are
+zero, the collector can redeem while the vault remains in Exit. Expired orders
+may require a CL8Y cleanup
 walk before their refund row becomes claimable. Pair pause can delay this flow but
 cannot redirect the funds.
 
@@ -248,7 +261,7 @@ cases. The query never blocks execution.
 Manager state:
 
 - `Config`: admin handoff, keeper, CL8Y factory, vault code ID, gas settings,
-  order timeout, and bounded-work limits.
+  order timeout, bounded-work limits, fee registry, and fee collector.
 - `PendingVault`: reply ID, vault ID, and owner.
 - `Vault`: owner and instantiated address.
 - Owner-to-vault secondary index.
@@ -285,6 +298,10 @@ Vault state:
 13. A local order is removed without a fill only after a confirmed cancel or a
     recorded cancel in the vault's own ledger, or when it is absent from the pair
     with no parked refund (fully executed).
+14. Exit withdrawal preserves `sum(SHARES) == total_shares`; owner recovery
+    cannot transfer assets backing collector shares.
+15. A fee-registry outage cannot bypass the fee; it selects the explicit
+    vault-local cached/base outage policy.
 
 ## Migration From Pooled Custody
 
@@ -301,8 +318,8 @@ Migration must:
    reviewed accounting and a verified custody snapshot.
 4. Deploy the new manager and vault code, create one vault per owner/bot, and
    deposit directly into those addresses.
-5. Ensure the swap-proxy is whitelisted on the CL8Y DEX so the vault swaps it
-   routes pay zero DEX fees; no CL8Y fee-tier registration is required.
+5. Limit-grid does not use a swap-proxy. Wire `fee_registry` and `fee_collector`
+   at vault instantiation; the vault interacts directly with the CL8Y pair.
 6. Keep the old contract recoverable until every old pair-owned order is resolved.
 
 Upgrade order is mandatory:
@@ -337,7 +354,7 @@ so no rollback-ordering constraint applies beyond the ordinary pinned-code check
 
 ## Production Status
 
-### Limit-Order Vault (deployable)
+### Limit-Order Vault (pre-production)
 
 `contracts/grid-vault` is the limit-order grid vault. It reconciles directly
 against the shipped CL8Y DEX pair using exactly the shipped query interface
@@ -360,3 +377,9 @@ requires no upstream merge and no fork.
 Production readiness still requires adversarial validation against the production
 CL8Y runtime, an independent external audit, and staged testnet/limited-value
 rollout.
+
+Production is additionally blocked by approved canonical build inputs,
+deployment verification, external pair semantics, unrun canonical fee E2E, and
+remaining audit findings. The manager propagates fee configuration only to
+future vaults; old fee-disabled vaults still need migration or redeployment. See
+`../../docs/DEPLOY_FEE_SYSTEM.md` and `../../RELEASE.md`.

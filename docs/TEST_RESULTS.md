@@ -1,30 +1,116 @@
 # Verification Evidence
 
-Last updated: 2026-08-08
+Last documentation audit: 2026-08-08
 
 This file distinguishes local execution from GitHub Actions evidence. A workflow
 definition is not proof that it ran, and source tests are not a security audit.
 
-## Current Revision
+## Current Documentation Baseline
 
-- Repository baseline: `995f4d4` (`fee(fee-system): pin canonical CL8Y/treasury
-  behind the mainnet feature`) — committed and pushed to `origin/main`
-- Earlier verified baseline: `b1e943de8da888330d6c0c825b8d702ad03e8d48`
+- Repository HEAD inspected for this documentation audit:
+  `921859b7bcfa9e6e80ffb78672474874332dd03d`
+- Current uncommitted audit-fix working tree: `make test`, `make clippy`, shell
+  syntax validation, `test-area/common-test.sh`, workflow YAML parsing, and the
+  expected compile failure with missing `CL8Y_CANONICAL_FEE_REGISTRY` passed on
+  2026-08-08. Isolated package installs/builds, pinned lint/type checks, and the
+  Python branch-coverage gate also passed. These are working-tree results until
+  committed and rerun on an immutable SHA. The full canonical LocalTerra fee E2E
+  was not run here.
+- Earlier evidence below remains attached to its stated date, command, artifact,
+  and baseline; it must not be attributed to current uncommitted documentation.
 - Rust toolchain: `1.81.0`
 - CL8Y fixture revision: `fad801117fe54420d7529da04e485d67d511ef2c`
 
-All corrections below are committed. No uncommitted working-tree changes
-represent them.
+Current behavior is specified in `FEE_TIER_PROTOCOL.md`. Historical sections
+below preserve implementation chronology, including designs later superseded.
 
-## Local Results
+## Current Evidence Scope
 
-The following commands were executed locally while implementing the current
-working-tree corrections:
+- User-facing tier 0 (no eligible CL8Y holder tier) pays the undiscounted 180
+  bps rate; the code returns `tier_id: None` for this case. Effective rates are
+  175, 162, 144, 117, 90, 72, 45, 27, and 9 bps for tiers 1 through 9. Reserved
+  governance storage ID `0` is a different concept.
+- Market-grid has a full rebalance flow using the real fee-registry ladder:
+  `rebalance_uses_the_real_cl8y_ladder_for_every_tier`.
+- Limit-grid
+  `real_registry_detects_every_ladder_tier_for_the_bot_owner` and rebalancer
+  `real_registry_detects_every_ladder_tier_for_the_bot_admin_model` directly
+  query the real registry contract; they are not full fill/rebalance flows.
+- Rebalancer `charge_fee_applies_every_canonical_ladder_rate` exercises the real
+  charge path with mocked registry rates, not a real registry ladder query.
+- Fee shares now convert economic fee `F` through NAV in all venues as
+  `floor(F*S/(A-F))`; unit/integration regressions cover varied NAV and no
+  immediate overclaim. Limit Exit, market lower-bound/ideal-offer/migration,
+  manager fee propagation, and multi-vault proxy regressions are also included.
+- All three vaults now cache the last successful effective bps/tier by fee
+  subject. Registry outage charges that exact local result (`vault_cached`) or
+  180 bps with no local history (`lowest`); it does not skip the fee. A reachable
+  registry whose CL8Y token query fails returns full base/`Lowest` and never uses
+  historical holding for pricing.
+- Market-grid and rebalancer provenance tests cover required factory lookup,
+  pinned runtime pair code, and execution-time rechecks. Their affected
+  contracts/schemas are `0.2.0`; redeployment and route re-registration were not
+  executed.
+- Frozen raw-state fixtures exercise all seven migrate entry points. Market-grid
+  and bot-vault 0.1.x require redeployment; routed swap-proxy 0.1.x and
+  bot-liquidity 0.1.x reject migration, while an empty compatible proxy may
+  migrate. Limit grid-vault 0.1.0 to 0.1.1 is supported, and initial fee-system
+  state remains queryable after migration.
+- Proptest 1.5.0 runs 128 cases over wide `Uint128` fee/NAV/share inputs,
+  repeated changing/fixed-NAV mints, donation/withdraw no-profit, two-token
+  conservation, emergency owner/collector exit, and pause/pending invariants.
+- Late-fill races consume reconciled events exactly once through verified
+  execution height. Typed intervention and checksummed JSON/SQLite recovery
+  tests preserve unknown broadcasts without rebroadcast.
+- Collector cumulative accounting uses checked addition. Market pause tests
+  permit owner/collector pro-rata withdrawal while preserving the pending-swap
+  exclusion.
+- `deploy-system.sh`, `fee-e2e-multi.sh`, and `fee-e2e-market-1000.sh` query pair
+  code ID and pass factory plus `pair_code_id`; the full LocalTerra suite remains
+  unrun after this wiring change.
+- Default `make local-e2e` runs without protocol fee configuration. A dedicated
+  `make local-fee-e2e` target and canonical workflow now exist, but were not run
+  in this working tree.
+- No evidence here establishes production readiness, current-mainnet proxy
+  deployment/whitelisting, external pair semantics, completed `0.2.0`
+  redeployment, or complete reproducible artifacts.
+
+Current working-tree gate totals from `make test`:
+
+| Workspace/suite | Result |
+|---|---|
+| `rebalancer-system` default Rust | PASS through `make test` |
+| `market-grid-system` default Rust | PASS through `make test` |
+| `limit-grid-system` default Rust | PASS through `make test` |
+| `fee-system` default Rust | PASS through `make test` |
+| Rebalancer keeper Python | PASS: 63 tests; 72.84% combined branch coverage |
+| Grid operator Python | PASS: 71 tests; 76.08% combined branch coverage |
+| Isolated Python sdist/wheel build and install | PASS |
+| Ruff 0.12.10 / MyPy 1.17.1 | PASS |
+| Coverage 7.10.4 branch baseline | PASS: 70% required |
+| All four Rust workspaces with `mainnet` through `make test` | PASS |
+| All four workspaces through `make clippy` (`mainnet`, `-D warnings`) | PASS |
+| Shell syntax (`bash -n`) | PASS |
+| `test-area/common-test.sh` | PASS |
+| GitHub workflow YAML parse | PASS |
+| Missing registry environment compile-failure check | PASS (compilation failed as required) |
+| Full canonical LocalTerra fee E2E | NOT RUN in this working tree |
+| Complete reproducible double build | NOT CLAIMED by primary validation |
+
+The Python suites intentionally invoke invalid CLI arguments in negative tests;
+printed `argparse` errors are expected while the suites still pass.
+Rust contract test counts increased during the latest fixes; no current aggregate
+is stated here because the latest command output is the source of truth.
+
+## Historical Local Results (Earlier Working Tree)
+
+The following commands were recorded while implementing an earlier working tree.
+They are preserved as historical evidence and are not a current-SHA run:
 
 | Command | Result | Scope |
 |---|---|---|
 | `cargo +1.81.0 test --locked --workspace --all-targets` in `limit-grid-system` | PASS: 50 tests (4 manager, 29 vault unit, 17 integration incl. fee rate boundaries) | Grid limit-order contracts (reference) |
-| `cargo +1.81.0 test --locked --workspace --all-targets` in `market-grid-system` | PASS: 20 tests (10 vault unit, 10 swap integration incl. fee mint + redeem + non-blocking) | Grid swap contract (deployable) |
+| `cargo +1.81.0 test --locked --workspace --all-targets` in `market-grid-system` | PASS: 20 tests (10 vault unit, 10 swap integration incl. fee mint + redeem + non-blocking) | Grid swap contract (historically labelled deployable; now pre-production) |
 | `cargo +1.81.0 test --locked --workspace --all-targets` in `rebalancer-system` | PASS: 35 Rust tests (11 liquidity, 20 vault incl. fee charge math/redeem, 4 proxy) | Rebalancer contracts/packages |
 | `cargo +1.81.0 test --locked --workspace --all-targets` in `fee-system` | PASS: 22 tests (10 fee-registry, 8 fee-ladder audit, 4 fee-collector) | Protocol fee-system (new workspace) |
 | `python3 -m unittest -v test_keeper.py` | PASS: 50 tests | Rebalancer keeper |
@@ -46,7 +132,7 @@ image pinned by `Makefile`. Optimized hashes from that run were:
 - `cl8y_grid_manager.wasm`: `a276a70b25151567e0b3c4cb8df72e0a0607d9680a50bafceee0ffcf65c2b533`
 - `cl8y_grid_vault.wasm`: `c6687ddbb2eaf56f909a54757639c6f4670b61f18d66c357443e3cb2294bc0f4`
 
-## On-Chain Fee E2E (LocalTerra, 2026-08-05)
+## Historical On-Chain Fee E2E (LocalTerra, 2026-08-05)
 
 Full end-to-end proof of the protocol fee path on a real signed chain (chain ID
 `localterra`, network node at height ~529500). `test-area/fee-e2e-test.sh`
@@ -83,7 +169,7 @@ exposed and fixed a real schema bug (the vault's local
 `cw_serde` rejected the registry response and the fee was silently skipped).
 Unit and Clippy gates are clean for both workspaces after that fix.
 
-## On-Chain Per-Execution Fee E2E: market-grid + rebalancer (LocalTerra, 2026-08-05)
+## Historical On-Chain Per-Execution Fee E2E (LocalTerra, 2026-08-05)
 
 Second on-chain proof on the same signed chain (chain ID `localterra`, height
 ~535000). `test-area/fee-e2e-multi.sh` reuses the already-live fee-registry /
@@ -129,7 +215,13 @@ Unit and Clippy gates for `market-grid-system` (10 unit + 10 integration, incl.
 redeem, no-fee-without-config, charge math, and non-blocking registry skip) are
 clean after these additions.
 
-## Fee-System Audit Pass (2026-08-05)
+## Historical Fee-System Audit Pass (2026-08-05)
+
+> Superseded conclusions: this section predates the final single-subject model,
+> the 2026-08-08 NAV conversion, and the final outage policy. Economic fee value
+> is now converted to LP with `floor(F*S/(A-F))`. Registry token-query failure
+> always returns full base/`Lowest`; only the vault's last successful effective
+> bps/tier is retained during registry unavailability by explicit policy.
 
 A fresh-eyes audit of the whole protocol-fee path (fee-registry + fee-collector +
 grid-vault + grid-vault-swap + bot-vault). New evidence:
@@ -153,9 +245,10 @@ grid-vault + grid-vault-swap + bot-vault). New evidence:
 Audit conclusions (all gates green: `cargo test --workspace --all-targets` +
 `cargo clippy --workspace --all-targets -- -D warnings` in all four workspaces):
 
-1. Pricing is monotone and never under-fees: `EffectiveFee` is live-first,
+1. Historical conclusion at that revision: pricing was described as monotone and
+   never under-feeing. `EffectiveFee` is live-first,
    cached-fallback-on-failure, otherwise the full base fee; `resolve_discount`
-   picks the highest met non-governance tier; `effective_fee` is an exact
+   picks the highest met non-governance tier; `effective_fee` is a floored
    floor `base * (10000 - discount) / 10000`.
 2. Governance tiers 0/255 are reserved and can never auto-apply to a holder
    balance (verified by add + update tests). Note: there is currently no
@@ -164,14 +257,19 @@ Audit conclusions (all gates green: `cargo test --workspace --all-targets` +
    conservative (they simply keep paying the base fee) and is future work.
 3. Vault charge math (`value * fee_bps / 10_000`, capped at 10_000 bps, rounded
    down) is identical across grid-vault / grid-vault-swap / bot-vault and is
-   exercised at 0, 1, 200/1800/10000 bps. Rounding always favors the protocol
-   slightly (floor of the discounted rate).
-4. Non-blocking invariant holds at every layer: unreachable registry → `fee_skipped`
-   attribute, trade commits, no fee minted, no revert.
+   exercised at 0, 1, 200/1800/10000 bps. These noncanonical rates are test
+   boundaries; the production base is 180 bps. Integer flooring favors the
+   payer.
+4. Historical behavior at that revision skipped fees when the registry was
+   unreachable. Current vaults instead charge their local cached effective fee,
+   or 180 bps when no local history exists, while allowing settlement to commit.
 5. Redeem is strictly collector-only, refuses zero/insufficient shares, and burns
    the claim after paying a pro-rata slice of the vault balances.
 
-## Per-LP Fee-Tier Rework (2026-08-06)
+## Historical Per-LP Fee-Tier Rework (2026-08-06, Superseded)
+
+> Entire section superseded by the 2026-08-07 single-user fee-only mint rework.
+> Current code does not enumerate or individually tier LP holders.
 
 Following the audit, the fee charge was reworked from "vault contract address"
 to **per-LP**: every holder is taxed at their **own** CL8Y tier, so higher-tier
@@ -209,6 +307,10 @@ holders lose strictly less LP.
 
 ## Uniform Single-User Fee-Only Mint Rework (2026-08-07)
 
+> Historical implementation stage. The single fee subject and fee-only mint
+> remain, but the nominal LP denomination described below was superseded on
+> 2026-08-08 by NAV-priced fee shares.
+
 Following the CMM decision, the fee mechanic is **unified across all venues into one
 model (B, fee-only mint, single user)**: whichever venue, a fill crediting `V`
 token-0 value resolves the **single operating user's** effective fee
@@ -216,6 +318,9 @@ token-0 value resolves the **single operating user's** effective fee
 does **not** mint LP to the user. The user's already-deposited position simply
 appreciates via NAV (the fill's `V` assets land in the pool holdings; supply grows
 by `fee`). No pooled enumeration, no burn.
+
+At this historical stage, `fee` was treated as a nominal LP unit count without
+NAV conversion. That behavior is no longer current.
 
 Changes per contract (see `FEE_TIER_PROTOCOL.md` §5/7/8/9):
 
@@ -276,7 +381,7 @@ All venues are wired to **one** `fee-registry`, **one** `fee-collector` and **on
   internal vault path only once that LP pool is set. This is a script-wiring gap,
   not a contract defect.
 
-## Mainnet Address Lock — `mainnet` feature (2026-08-08)
+## Historical Mainnet Address Lock Evidence (2026-08-08)
 
 Commit `d06b5d8` baseline was the fee-only-mint single-user rework. Commit
 `995f4d4` adds a **compile-time production lock** to the fee system:
@@ -327,14 +432,13 @@ compile-time pinned one only when the artifact was built with `MAINNET=1`; the
 address values themselves (CL8Y token, CMM treasury) are the same ones recorded
 in `docs/DEPLOY_FEE_SYSTEM.md` §1 and now compiled verbatim into the contracts.
 
-Remaining follow-up: once the fee-collector is live on mainnet, add its real
-address (the reference registry's `fee_collector`) to the `mainnet` feature of
-`fee-registry` so a deploying key cannot point the system at a personal
-collector. The lock is already wired for `cl8y`/`treasury`; the collector pin is
-the same pattern applied to `fee_collector` (and, optionally, a per-vault
-`fee_collector` validation).
+Historical gap at that revision: vault registry/collector/proxy constants were
+incomplete or `None`, and the release pipeline omitted fee-system/mainnet
+artifacts. Current mainnet builds require canonical registry, collector, and
+applicable proxy environment values and the pipeline definitions cover all four
+workspaces; approved production values remain unavailable.
 
-## Swap-Proxy Slim-Down (2026-08-08)
+## Historical Swap-Proxy Slim-Down Evidence (2026-08-08)
 
 `swap-proxy` was reduced to a pure router. Its config previously carried
 `cl8y_token` and `fee_registry` and exposed a `WithdrawCl8y` sweep; all three
@@ -350,9 +454,10 @@ were legacy from the pre-whitelist tier design and are removed:
   `IMPLEMENTATION.md`, `ARCHITECTURE.md`, root/rebalancer/README, grid
   operations, `FEE_TIER_PROTOCOL.md`).
 
-Whitelisting scope is now stated exactly: **only the swap-proxy is
-whitelisted** on the CL8Y DEX; vaults pay no DEX swap fee by routing their swaps
-through it. No contract holds CL8Y. The protocol fee is driven by each user's
+Historical local intent was that only the swap-proxy be whitelisted. Current
+mainnet whitelisting is not proven: the canonical proxy is not deployed or
+pinned. No contract needs to hold CL8Y. The protocol fee is driven by the fee
+subject's
 CL8Y balance via `fee-registry` at fill time and is the DEX's revenue path: the
 bots are the DEX's own bots and the collected fee is forwarded to the CMM
 treasury.
@@ -363,7 +468,7 @@ dex helpers), `cargo clippy --locked --manifest-path rebalancer-system/Cargo.tom
 --all-targets -- -D warnings` clean, `cargo fmt --check` clean across all four
 workspaces, and `bash -n` clean on every `test-area/*.sh`.
 
-## Vault Address Lock — `mainnet` feature on the three vaults (2026-08-08)
+## Historical Vault Address Lock Evidence (2026-08-08)
 
 Following the swap-proxy slim-down, the compile-time `mainnet` lock is extended
 from the fee-system to the **three vaults**, so a deploying key cannot point a
@@ -379,10 +484,10 @@ vault at a fee-collector (or swap router) it controls:
   only (no proxy field, and no fee update message — the collector is fixed for
   the contract's lifetime); validated in `instantiate`.
 
-All constants are `Option<&str> = None` until the fee-collector and swap-proxy
-are deployed to mainnet, so the lock is **inert while unset** (local/E2E
-dummy-address deployments keep working) and **active the moment it is filled**
-(rejects any non-canonical value and an absent collector). Each contract gains
+At that historical revision, constants were `Option<&str> = None`, so locks were
+inert while unset. Current mainnet builds instead require nonempty canonical
+address environment values and reject absent/alternate configuration. Each
+contract had gained
 `ContractError::NonCanonicalAddress { field, expected }` and inline unit tests
 for the pin helper. `make test` and `make clippy` now build all three vault
 workspaces with `--features mainnet` in addition to the default config.
@@ -397,7 +502,7 @@ Gate runs (feature-gated):
 | `make test` (all workspaces, default + mainnet) | PASS: 245 Rust tests, exit 0 |
 | `make clippy` (all workspaces, `--features mainnet`, `-D warnings`) | PASS, exit 0 |
 
-## Real CL8Y Ladder Detection In Vault Workspaces (2026-08-08)
+## CL8Y Ladder Test Evidence (2026-08-08)
 
 The earlier gap was real: the fee-registry's canonical CL8Y tier ladder was
 already tested in `fee-system/contracts/fee-registry/tests/audit_tiers.rs`, but
@@ -414,10 +519,10 @@ and resolves `EffectiveFee` at every canonical tier boundary and one wei above.
 - `rebalancer-system/contracts/bot-vault/tests/real_registry_ladder.rs`:
   `real_registry_detects_every_ladder_tier_for_the_bot_admin_model`
 
-These tests use the same `EffectiveFee` query that the vaults issue on a fill /
-rebalance / reconcile path, so any future schema mismatch (`holding`, `source`,
-`tier_id`, etc.) between a vault and the real fee-registry will fail in the
-vault workspace rather than only in on-chain E2E.
+These three tests use the vault-facing `EffectiveFee` query shape. Only the
+market-grid test below drives a full rebalance against the real registry.
+Limit-grid and rebalancer ladder-detection tests query the registry directly;
+they do not execute full reconcile/rebalance paths.
 
 Gate runs:
 
@@ -441,16 +546,17 @@ the emitted `fee_bps` / `fee_tier` on `complete_rebalance` are asserted. This
 proves the live market-grid fee flow consumes the DEX ladder exactly as seeded
 in the fee-system.
 
-The rebalancer workspace now covers the **full vault fee application path**
-across the same ladder:
+The rebalancer workspace also covers the charge application path across the
+same rates:
 
 - `charge_fee_applies_every_canonical_ladder_rate`
 
-This test still uses the vault's internal pool/liquidity mocks (there is not yet
-a cw-multi-test rebalance harness for the whole bot-vault swap path), but it
-does exercise the real `charge_fee` code path end-to-end for every canonical
-ladder rate: the resolved `fee_bps` is applied, only the collector is minted,
-and the minted LP amount matches `value × fee_bps / 10_000` for tiers 1..9.
+This test uses internal pool/liquidity mocks and mocked registry rates; there is
+not a cw-multi-test rebalance harness for the whole bot-vault swap path. It
+exercises `charge_fee` for every canonical effective rate, verifies that only
+  the collector is minted. Current NAV conversion tests separately check
+  `floor(F*S/(A-F))`; this historical ladder test's rate-resolution scope should
+  not be read as NAV evidence.
 
 Additional gate runs:
 
@@ -459,7 +565,7 @@ Additional gate runs:
 | `cargo test --manifest-path market-grid-system/Cargo.toml -p cl8y-grid-vault-swap rebalance_uses_the_real_cl8y_ladder_for_every_tier` | PASS |
 | `cargo test --manifest-path rebalancer-system/Cargo.toml -p cl8y-bot-vault charge_fee_applies_every_canonical_ladder_rate` | PASS |
 
-## Existing CI Evidence
+## Historical CI Evidence
 
 The baseline commit had retained source-quality, dependency-security, and
 reproducible-build runs. Those runs do not validate the current working tree:

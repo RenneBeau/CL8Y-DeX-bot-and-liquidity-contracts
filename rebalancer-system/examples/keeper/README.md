@@ -164,7 +164,9 @@ Before broadcast the keeper runs a `terrad --generate-only` gas simulation. It p
 sync CheckTx code and hash, then polls LCD with RPC fallback until DeliverTx is
 final and requires code zero. Only one hash can be in flight. Pending hashes and
 deterministic-failure suppression are persisted and fsynced in
-`KEEPER_STATE_FILE`. A `broadcasting` marker is committed before network access;
+`KEEPER_STATE_FILE`. State has a SHA-256 checksum, atomic replacement, and three
+rotating backups. Invalid state is preserved in a timestamped corruption copy.
+A `broadcasting` marker is committed before network access;
 if the process restarts before receiving a hash, automatic submission stops for
 operator intervention rather than risking a duplicate. Commands have a 60-second
 timeout, and transient connection, sequence, timeout, availability, and mempool
@@ -173,6 +175,22 @@ CheckTx or DeliverTx remains suppressed until on-chain plan inputs change.
 Code-zero inclusion is re-queried until `KEEPER_CONFIRMATION_BLOCKS` later
 blocks exist (default 2), so a transaction that disappears in a shallow reorg
 remains pending rather than advancing keeper state.
+
+The process holds a nonblocking OS `flock` beside `KEEPER_STATE_FILE`; a second
+instance refuses startup. The state identity includes its schema, chain, vault,
+protocol kind, keyring identity, and resolved signer address. Any mismatch is
+refused before action. Legacy state without identity and corrupted JSON are
+never deleted or migrated automatically: preserve the file, resolve every
+pending or unknown broadcast against multiple chain endpoints/account sequence,
+then perform an explicitly reviewed offline migration.
+
+`keeper.py diagnose` audits checksum, backups, transaction, vault plan, and
+account sequence. `keeper.py resolve --reason deterministic-failure` clears only
+deterministic suppression after live chain checks. `--reason pending-final` clears only a
+matching finalized transaction. Both create timestamped backups and JSONL audit
+records. `--restore-backup 1` (through `3`) is explicit recovery: identity and
+live account/vault/transaction/finality checks run before replacement. Unknown
+broadcast state is always refused and can never trigger rebroadcast.
 
 ## 7. Run As A Service
 
@@ -189,15 +207,19 @@ sudo journalctl -u cl8y-keeper -f
 ```
 
 The service restarts after RPC failures or process exits. Its systemd
-`StateDirectory` supplies the writable persistent transaction-state path.
+`StateDirectory` supplies the state file and service-specific Terra home. The
+unit uses the production-capable `file` keyring and `LoadCredential`; the keeper
+reads `%d/keyring-password` only when invoking `terrad` and sends the password on
+stdin, never argv, environment, or logs. Use the `os` backend for interactive
+operation. Never use the `test` backend for production.
 Monitor final transaction results, RPC availability, vault allocation, and
 keeper LUNC balance.
 
 Before enabling continuous broadcast, run one signed transaction as the
-service user and confirm its keyring can unlock noninteractively. If the chosen
-keyring requires an interactive password or desktop session, use a reviewed
-signer wrapper as `KEEPER_TERRAD` or an operator key-management setup that can
-sign unattended without placing private-key material in `config.env`.
+service user and verify the credential-backed file keyring unlocks correctly.
+Provisioning that service-user keyring and systemd credential on the host is a
+deployment prerequisite, not functionality supplied by the repository. Do not
+weaken the unit or substitute the `test` backend when provisioning is incomplete.
 
 ## Key Rotation
 

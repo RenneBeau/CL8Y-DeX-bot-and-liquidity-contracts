@@ -1,12 +1,9 @@
 import base64
 import copy
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from grid_operator.db import Database
 from grid_operator.discovery_keeper import DiscoveryKeeper
@@ -124,6 +121,9 @@ class DiscoveryKeeperTests(unittest.TestCase):
         self.args = type("Args", (), {
             "state_dir": str(Path(self.temp.name) / "state"),
             "once": False,
+            "chain_id": "chain",
+            "keyring_backend": "os",
+            "key": "keeper",
         })()
         self.terrad = MagicMock()
 

@@ -47,6 +47,12 @@ pub struct Bot {
 }
 
 #[cw_serde]
+pub struct CachedEffectiveFee {
+    pub fee_bps: u16,
+    pub tier_id: Option<u8>,
+}
+
+#[cw_serde]
 pub struct Rung {
     pub price: Decimal,
     pub side: Option<LimitOrderSide>,
@@ -95,6 +101,7 @@ pub const PLACEMENTS: Map<u64, PlacementPlan> = Map::new("placements");
 pub const ALLOWED_TOKENS: Map<&Addr, ()> = Map::new("allowed_tokens");
 pub const TOKEN_POLICY_ENABLED: Item<bool> = Item::new("token_policy_enabled");
 pub const QUARANTINE: Map<&Addr, ()> = Map::new("quarantine");
+pub const EFFECTIVE_FEE_CACHE: Map<&Addr, CachedEffectiveFee> = Map::new("effective_fee_cache");
 
 #[cw_serde]
 pub enum PageKind {

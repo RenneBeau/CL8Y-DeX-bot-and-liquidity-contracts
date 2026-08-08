@@ -9,6 +9,8 @@ pub enum ContractError {
     Unauthorized,
     #[error("invalid CL8Y pair")]
     InvalidPair,
+    #[error("pair implementation no longer matches its pinned code id")]
+    PairCodeMismatch,
     #[error("pool assets must use the same decimals")]
     DecimalMismatch,
     #[error("liquidity contract is already configured")]

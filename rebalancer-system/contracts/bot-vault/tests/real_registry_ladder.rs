@@ -15,7 +15,7 @@ const CL8Y_LADDER: [(u8, u128, u16); 9] = [
 ];
 
 const ONE_CL8Y: u128 = 1_000_000_000_000_000_000;
-const BASE_FEE_BPS: u16 = 1_800;
+const BASE_FEE_BPS: u16 = 180;
 
 #[cw_serde]
 struct RealEffectiveFee {

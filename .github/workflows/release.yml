@@ -14,6 +14,9 @@ permissions:
 env:
   GH_TOKEN: ${{ github.token }}
   OPTIMIZER_IMAGE: cosmwasm/workspace-optimizer:0.16.1@sha256:b9c92b2900b7ebaab3499203615c1b8589592bc557355ed3432e48851ffde69e
+  CL8Y_CANONICAL_FEE_COLLECTOR: ${{ vars.CL8Y_CANONICAL_FEE_COLLECTOR }}
+  CL8Y_CANONICAL_FEE_REGISTRY: ${{ vars.CL8Y_CANONICAL_FEE_REGISTRY }}
+  CL8Y_CANONICAL_SWAP_PROXY: ${{ vars.CL8Y_CANONICAL_SWAP_PROXY }}
 
 jobs:
   publish:
@@ -34,6 +37,15 @@ jobs:
           test "$(jq -r '.verification.verified' <<<"$tag")" = true
           test "$(jq -r '.object.sha' <<<"$tag")" = "$GITHUB_SHA"
           jq '.verification' <<<"$tag" | tee tag-verification.json
+      - name: Require release tag on main
+        run: |
+          git fetch origin main
+          test "$(git merge-base "$GITHUB_SHA" origin/main)" = "$GITHUB_SHA"
+      - name: Require approved canonical build inputs
+        run: |
+          : "${CL8Y_CANONICAL_FEE_COLLECTOR:?release environment must approve CL8Y_CANONICAL_FEE_COLLECTOR}"
+          : "${CL8Y_CANONICAL_FEE_REGISTRY:?release environment must approve CL8Y_CANONICAL_FEE_REGISTRY}"
+          : "${CL8Y_CANONICAL_SWAP_PROXY:?release environment must approve CL8Y_CANONICAL_SWAP_PROXY}"
       - name: Require successful checks for release commit
         env:
           SHA: ${{ github.sha }}
@@ -43,10 +55,13 @@ jobs:
             "Rust (rebalancer-system)"
             "Rust (market-grid-system)"
             "Rust (limit-grid-system)"
+            "Rust (fee-system)"
             "Keeper and operator tests"
+            "ShellCheck"
             "audit-and-policy"
             "build"
             "localterra"
+            "canonical-fee-e2e"
           )
           for name in "${required[@]}"; do
             conclusion=$(jq -r --arg name "$name" \
@@ -64,9 +79,14 @@ jobs:
           mkdir -p release evidence
           SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)
           export SOURCE_DATE_EPOCH
-          .github/scripts/reproducible-build.sh rebalancer-system release 2>&1 | tee evidence/rebalancer-build.log
-          .github/scripts/reproducible-build.sh market-grid-system release 2>&1 | tee evidence/grid-swap-build.log
-          .github/scripts/reproducible-build.sh limit-grid-system release 2>&1 | tee evidence/limit-grid-system-build.log
+          for workspace in rebalancer-system market-grid-system limit-grid-system fee-system; do
+            .github/scripts/reproducible-build.sh "$workspace" release default \
+              2>&1 | tee "evidence/$workspace-default-build.log"
+            .github/scripts/reproducible-build.sh "$workspace" release mainnet \
+              2>&1 | tee "evidence/$workspace-mainnet-build.log"
+          done
+          test "$(find release -maxdepth 1 -name '*.wasm' | wc -l)" -eq 16
+          test "$(find release -maxdepth 1 -name '*-manifest.json' | wc -l)" -eq 8
       - name: Generate SBOM
         uses: anchore/sbom-action@55dc4ee22412511ee8c3142cbea40418e6cec693 # v0.17.8
         with:

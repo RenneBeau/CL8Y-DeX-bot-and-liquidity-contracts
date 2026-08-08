@@ -37,6 +37,21 @@ pub fn instantiate(
     {
         return Err(ContractError::InvalidConfig);
     }
+    if msg.fee_registry.is_some() != msg.fee_collector.is_some() {
+        return Err(ContractError::InvalidFeeConfig);
+    }
+    #[cfg(feature = "mainnet")]
+    if msg.fee_registry.is_none() {
+        return Err(ContractError::InvalidFeeConfig);
+    }
+    let fee_registry = msg
+        .fee_registry
+        .map(|address| deps.api.addr_validate(&address))
+        .transpose()?;
+    let fee_collector = msg
+        .fee_collector
+        .map(|address| deps.api.addr_validate(&address))
+        .transpose()?;
     set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
     CONFIG.save(
         deps.storage,
@@ -53,6 +68,8 @@ pub fn instantiate(
             max_grid_count: msg.max_grid_count,
             max_orders_per_reconcile: msg.max_orders_per_reconcile,
             max_active_orders_per_vault: msg.max_active_orders_per_vault,
+            fee_registry,
+            fee_collector,
         },
     )?;
     NEXT_VAULT_ID.save(deps.storage, &1)?;
@@ -72,7 +89,16 @@ pub fn execute(
         ExecuteMsg::UpdateConfig {
             keeper,
             vault_code_id,
-        } => execute_update_config(deps, info, keeper, vault_code_id),
+            fee_registry,
+            fee_collector,
+        } => execute_update_config(
+            deps,
+            info,
+            keeper,
+            vault_code_id,
+            fee_registry,
+            fee_collector,
+        ),
         ExecuteMsg::TransferAdmin { admin } => execute_transfer_admin(deps, info, admin),
         ExecuteMsg::AcceptAdmin {} => execute_accept_admin(deps, info),
     }
@@ -112,6 +138,8 @@ fn execute_create_vault(
         max_grid_count: config.max_grid_count,
         max_orders_per_reconcile: config.max_orders_per_reconcile,
         max_active_orders_per_bot: config.max_active_orders_per_vault,
+        fee_registry: config.fee_registry.map(|address| address.to_string()),
+        fee_collector: config.fee_collector.map(|address| address.to_string()),
     };
     Ok(Response::new()
         .add_submessage(SubMsg::reply_on_success(
@@ -135,7 +163,14 @@ fn execute_update_config(
     info: MessageInfo,
     keeper: Option<String>,
     vault_code_id: Option<u64>,
+    fee_registry: Option<String>,
+    fee_collector: Option<String>,
 ) -> Result<Response, ContractError> {
+    if fee_registry.is_some() != fee_collector.is_some() {
+        return Err(ContractError::InvalidFeeConfig);
+    }
+    // Manager configuration is only a template for subsequent CreateVault
+    // calls. Already-instantiated vault contracts are deliberately untouched.
     CONFIG.update(deps.storage, |mut config| -> Result<_, ContractError> {
         if info.sender != config.admin {
             return Err(ContractError::Unauthorized);
@@ -148,6 +183,10 @@ fn execute_update_config(
                 return Err(ContractError::InvalidConfig);
             }
             config.vault_code_id = code_id;
+        }
+        if let (Some(registry), Some(collector)) = (&fee_registry, &fee_collector) {
+            config.fee_registry = Some(deps.api.addr_validate(registry)?);
+            config.fee_collector = Some(deps.api.addr_validate(collector)?);
         }
         Ok(config)
     })?;
@@ -225,6 +264,8 @@ pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
                 max_grid_count: config.max_grid_count,
                 max_orders_per_reconcile: config.max_orders_per_reconcile,
                 max_active_orders_per_vault: config.max_active_orders_per_vault,
+                fee_registry: config.fee_registry.map(|address| address.to_string()),
+                fee_collector: config.fee_collector.map(|address| address.to_string()),
             })
         }
         QueryMsg::Vault { vault_id } => to_json_binary(
@@ -289,6 +330,16 @@ mod tests {
                 max_grid_count: 20,
                 max_orders_per_reconcile: 10,
                 max_active_orders_per_vault: 40,
+                fee_registry: if cfg!(feature = "mainnet") {
+                    Some("fee_registry".into())
+                } else {
+                    None
+                },
+                fee_collector: if cfg!(feature = "mainnet") {
+                    Some("fee_collector".into())
+                } else {
+                    None
+                },
             },
         )
         .unwrap();
@@ -338,6 +389,61 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error, ContractError::UnexpectedFunds);
+    }
+
+    #[test]
+    fn manager_rejects_partial_fee_configuration() {
+        let mut deps = mock_dependencies();
+        let error = instantiate(
+            deps.as_mut(),
+            mock_env(),
+            mock_info("creator", &[]),
+            InstantiateMsg {
+                admin: "admin".into(),
+                keeper: "keeper".into(),
+                dex_factory: "dex_factory".into(),
+                vault_code_id: 7,
+                gas_denom: "uluna".into(),
+                keeper_reward: Uint128::new(20),
+                minimum_gas_reserve: Uint128::new(100),
+                order_timeout_seconds: 86_400,
+                max_grid_count: 20,
+                max_orders_per_reconcile: 10,
+                max_active_orders_per_vault: 40,
+                fee_registry: Some("fee_registry".into()),
+                fee_collector: None,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error, ContractError::InvalidFeeConfig);
+    }
+
+    #[cfg(feature = "mainnet")]
+    #[test]
+    fn mainnet_manager_requires_fee_configuration() {
+        let mut deps = mock_dependencies();
+        let error = instantiate(
+            deps.as_mut(),
+            mock_env(),
+            mock_info("creator", &[]),
+            InstantiateMsg {
+                admin: "admin".into(),
+                keeper: "keeper".into(),
+                dex_factory: "dex_factory".into(),
+                vault_code_id: 7,
+                gas_denom: "uluna".into(),
+                keeper_reward: Uint128::new(20),
+                minimum_gas_reserve: Uint128::new(100),
+                order_timeout_seconds: 86_400,
+                max_grid_count: 20,
+                max_orders_per_reconcile: 10,
+                max_active_orders_per_vault: 40,
+                fee_registry: None,
+                fee_collector: None,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error, ContractError::InvalidFeeConfig);
     }
 
     fn info_addr(value: &str) -> cosmwasm_std::Addr {
