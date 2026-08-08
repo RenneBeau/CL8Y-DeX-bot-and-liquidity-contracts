@@ -25,7 +25,7 @@ schemars = "0.8.15"
 serde = { version = "1.0.188", default-features = false, features = ["derive"] }
 thiserror = "1.0.4"
 base64ct = "=1.7.3"
-zeroize = "=1.8.1"
+zeroize = "=1.9.0"
 
 [profile.release]
 codegen-units = 1
