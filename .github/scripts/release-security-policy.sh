@@ -57,7 +57,7 @@ release_versions() {
 }
 
 audit_policy() {
-    local output_dir=${AUDIT_JSON_DIR:-} temporary= workspace report
+    local output_dir=${AUDIT_JSON_DIR:-} temporary='' workspace report
     local today expires advisory package version count actual
     today=${POLICY_DATE:-$(date -u +%F)}
     expires=$(jq -r '.rustsec_exception.expires_utc' "$policy")
