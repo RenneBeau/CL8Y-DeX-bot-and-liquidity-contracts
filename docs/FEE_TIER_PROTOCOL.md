@@ -15,10 +15,13 @@ These are the `cl8y` and `treasury` addresses the `fee-registry` and
 
 ## 1. Rationale
 
-The CL8Y systems are being **whitelisted**, which makes their DEX swaps **0-fee**.
-Currently revenue is implicit: the DEX charges a swap/limit fee and the proxy
-holds CL8Y to qualify for a cheaper tier. Once whitelisted there is no DEX fee
-and therefore no implicit revenue.
+The CL8Y **swap-proxy** is **whitelisted** by the CL8Y DEX governance, so its
+DEX swaps are **0-fee** with no tier qualification and no contract holds CL8Y.
+Vaults route their rebalance swaps through this whitelisted proxy, which pays no
+on-chain DEX fee. The DEX's revenue therefore comes from the **protocol fee**
+this system collects: the bots are the DEX's own bots, so the fee they charge
+their users is DEX revenue, collected by the fee-collector and forwarded to the
+CMM treasury.
 
 The systems must collect their own protocol tax, **differentiated by each user's
 CL8Y (`cl8y-cb`) holding**, charged **per fill**, denominated in **vault LP**,
@@ -28,12 +31,12 @@ realized by a **fee-collector**, and forwarded to the **CMM treasury**.
 
 | Plane | Who collects | Basis | Destination | Status |
 |---|---|---|---|---|
-| DEX (infrastructure) | CL8Y DEX on the proxy/vault | CL8Y held by the proxy | DEX fees | becomes 0 for whitelisted systems |
-| Protocol (user tax) | each vault on its users | **CL8Y held by the user** | fee-collector → CMM treasury | **this design** |
+| DEX (infrastructure) | the whitelisted swap-proxy | its routed swaps | DEX fees | 0 — superseded by the protocol plane |
+| Protocol (user tax) | each vault on its users | **CL8Y held by the user** | fee-collector → CMM treasury | **this design — the DEX's revenue path** |
 
-The DEX plane and the protocol plane are independent. The proxy no longer needs
-to *hold* CL8Y for its own tier; the user's CL8Y balance now drives the protocol
-tax.
+The DEX plane (the proxy) is free; the protocol plane replaces it as the DEX's
+revenue source. No contract holds CL8Y; the user's own CL8Y balance drives the
+protocol tax.
 
 ## 3. CL8Y fee-tier ladder (canonical)
 

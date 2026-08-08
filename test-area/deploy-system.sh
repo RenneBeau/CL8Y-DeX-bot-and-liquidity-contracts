@@ -174,9 +174,8 @@ instantiate_contract() {
     printf '%s\n' "$address"
 }
 
-PROXY_INIT=$(jq -nc --arg admin "$TEST_ADDRESS" --arg cl8y "$CL8Y_ADDRESS" \
-    --arg registry "$FEE_REGISTRY_ADDRESS" \
-    '{admin:$admin,cl8y_token:$cl8y,fee_registry:$registry}')
+PROXY_INIT=$(jq -nc --arg admin "$TEST_ADDRESS" \
+    '{admin:$admin}')
 PROXY_ADDRESS=$(instantiate_contract "$PROXY_CODE_ID" "$PROXY_INIT" cl8y-shared-swap-proxy)
 
 VAULT_INIT=$(jq -nc --arg admin "$TEST_ADDRESS" --arg keeper "$TEST_ADDRESS" \
@@ -240,14 +239,6 @@ TX_HASH=$(terrad_tx wasm execute "$PROXY_ADDRESS" "$REGISTER_VAULT" | jq -r '.tx
 wait_tx "$TX_HASH" >/dev/null
 
 CL8Y_FUND="200000000000000000000"
-FUND_PROXY=$(jq -nc --arg recipient "$PROXY_ADDRESS" --arg amount "$CL8Y_FUND" \
-    '{transfer:{recipient:$recipient,amount:$amount}}')
-TX_HASH=$(terrad_tx wasm execute "$CL8Y_ADDRESS" "$FUND_PROXY" | jq -r '.txhash')
-wait_tx "$TX_HASH" >/dev/null
-REGISTER_PROXY=$(jq -nc --arg wallet "$PROXY_ADDRESS" \
-    '{register_wallet:{wallet:$wallet,tier_id:5}}')
-TX_HASH=$(terrad_tx wasm execute "$FEE_REGISTRY_ADDRESS" "$REGISTER_PROXY" | jq -r '.txhash')
-wait_tx "$TX_HASH" >/dev/null
 
 for grid_address in "$GRID_ADDRESS_1" "$GRID_ADDRESS_2" "$GRID_ADDRESS_3" "$GRID_ADDRESS_4"; do
     FUND_GRID=$(jq -nc --arg recipient "$grid_address" --arg amount "$CL8Y_FUND" \

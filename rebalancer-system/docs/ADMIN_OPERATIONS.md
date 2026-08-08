@@ -132,20 +132,10 @@ Remove:
 
 Removing a route pauses that vault's proxy swaps until registration is restored.
 
-## Proxy CL8Y Management
+## Proxy Authority
 
-```json
-{
-  "withdraw_cl8y": {
-    "amount": "<RAW_CL8Y_AMOUNT>",
-    "recipient": "<RECIPIENT>"
-  }
-}
-```
-
-The remaining proxy balance should satisfy its assigned tier.
-
-Transfer proxy administration:
+The proxy is a pure router and holds no tokens, so there is nothing to withdraw
+from it. Transfer proxy administration:
 
 ```json
 {

@@ -91,9 +91,7 @@ Instantiate one proxy for the protocol:
 
 ```json
 {
-  "admin": "<PROXY_ADMIN_MULTISIG>",
-  "cl8y_token": "<CL8Y_CW20>",
-  "fee_registry": "<CL8Y_FEE_REGISTRY>"
+  "admin": "<PROXY_ADMIN_MULTISIG>"
 }
 ```
 
@@ -103,17 +101,10 @@ terrad tx wasm instantiate <PROXY_CODE_ID> '<JSON_ABOVE>' \
   --admin <PROXY_ADMIN_MULTISIG> $TX_FLAGS
 ```
 
-Record `PROXY_ADDRESS`. Transfer the CL8Y required for the desired tier to this
-address. CL8Y registry governance then registers it:
-
-```json
-{
-  "register_wallet": {
-    "wallet": "<PROXY_ADDRESS>",
-    "tier_id": 5
-  }
-}
-```
+Record `PROXY_ADDRESS`. The proxy never holds tokens: Vaults route their pool
+swaps through it, and because the proxy is whitelisted on the CL8Y DEX those
+swaps pay no DEX fee. Protocol fees are pushed directly to the fee-collector by
+the vault itself.
 
 ## Deploy A Bot For A Pair
 
@@ -231,16 +222,18 @@ Query these endpoints:
 
 ```text
 Proxy:     {"route":{"vault":"<VAULT_ADDRESS>"}}
+Proxy:     {"config":{}}
 Vault:     {"config":{}}
 Vault:     {"balances":{}}
 Vault:     {"rebalance_status":{}}
 Bot LP:    {"config":{}}
 Bot LP:    {"token_info":{}}
-Registry:  {"get_discount":{"trader":"<PROXY_ADDRESS>","sender":"<PROXY_ADDRESS>"}}
+Registry:  {"effective_fee":{"trader":"<HOLDER_ADDRESS>"}}
 ```
 
 Confirm the pair and token order, keeper, liquidity address, initial zero bot
-LP supply, and expected proxy discount.
+LP supply, and that the proxy config exposes only the admin. Protocol fee tiers
+are resolved per LP holder through the fee-registry at fill time.
 
 ## First Deposit
 

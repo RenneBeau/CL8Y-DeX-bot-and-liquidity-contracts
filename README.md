@@ -10,9 +10,8 @@ guide, and operating instructions.
 
 [`rebalancer-system`](rebalancer-system/README.md) is the portfolio rebalancing
 system. It provides isolated two-token vaults, transferable bot LP tokens, and a
-shared swap proxy through which approved vaults route their swaps. The proxy and
-vault contracts are whitelisted on the CL8Y DEX, so the DEX charges them no
-fees.
+shared swap proxy through which approved vaults route their swaps. The proxy is
+whitelisted on the CL8Y DEX, so the swaps it routes pay no DEX fees.
 
 ### Grid
 

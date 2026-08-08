@@ -301,8 +301,8 @@ Migration must:
    reviewed accounting and a verified custody snapshot.
 4. Deploy the new manager and vault code, create one vault per owner/bot, and
    deposit directly into those addresses.
-5. Ensure the deployed contracts are whitelisted on the CL8Y DEX so they pay
-   zero DEX fees; no CL8Y fee-tier registration is required.
+5. Ensure the swap-proxy is whitelisted on the CL8Y DEX so the vault swaps it
+   routes pay zero DEX fees; no CL8Y fee-tier registration is required.
 6. Keep the old contract recoverable until every old pair-owned order is resolved.
 
 Upgrade order is mandatory:

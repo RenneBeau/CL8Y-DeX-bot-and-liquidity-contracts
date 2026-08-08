@@ -4,9 +4,11 @@ Source: `contracts/swap-proxy`
 
 ## Purpose
 
-The proxy gives many isolated bot vaults access to one CL8Y fee registration.
-It holds the protocol's CL8Y balance, connects every approved vault to its
-assigned pair, and returns each trade's output to the requesting vault.
+The proxy gives many isolated bot vaults access to one whitelisted CL8Y fee
+registration. It connects every approved vault to its assigned pair and returns
+each trade's output to the requesting vault. The proxy never holds tokens:
+protocol fees are charged by the vaults directly and CL8Y fee tiers are resolved
+by the fee-registry, so no CL8Y balance needs to live on the proxy.
 
 ## Registration
 
@@ -29,13 +31,13 @@ amount, deadline, and maximum spread. It forwards the exact received amount to
 the pair with output fixed to the originating vault.
 
 The registered route fixes the recipient to the originating vault and grants
-discount access exclusively to registered vault contracts.
+zero-fee access exclusively to registered vault contracts.
 
 ## Administrative Authority
 
-The admin may register or remove vault routes, transfer proxy administration,
-and withdraw only the configured CL8Y token. There is no arbitrary-message
-execution or method to withdraw vault asset tokens.
+The admin may register or remove vault routes and transfer proxy administration.
+There is no arbitrary-message execution, no token balance, and no method to
+withdraw vault asset tokens.
 
 ## Invariants
 
@@ -48,6 +50,6 @@ execution or method to withdraw vault asset tokens.
 ## Trust Assumptions
 
 - Proxy administration must be controlled by a multisig.
-- CL8Y registry governance must assign the desired tier.
-- The proxy must retain the CL8Y balance required by that tier.
+- The swap-proxy itself must be whitelisted on the CL8Y DEX so the swaps it
+  routes pay no DEX fee.
 - Registered CL8Y pairs must match the reviewed deployed pair implementation.

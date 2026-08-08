@@ -2,7 +2,7 @@ use bot_types::{SwapProxyHookMsg, VaultQueryMsg};
 use cl8y_dex::{AssetInfo, HybridSwapParams, PairCw20HookMsg, PairInfo, PairQueryMsg};
 use cosmwasm_std::{
     entry_point, from_json, to_json_binary, Addr, Binary, Decimal, Deps, DepsMut, Env, MessageInfo,
-    Response, StdResult, Uint128, WasmMsg,
+    Response, StdResult, WasmMsg,
 };
 use cw2::{get_contract_version, set_contract_version};
 use cw20::{Cw20ExecuteMsg, Cw20ReceiveMsg};
@@ -27,8 +27,6 @@ pub fn instantiate(
         deps.storage,
         &Config {
             admin: deps.api.addr_validate(&msg.admin)?,
-            cl8y_token: deps.api.addr_validate(&msg.cl8y_token)?,
-            fee_registry: deps.api.addr_validate(&msg.fee_registry)?,
         },
     )?;
     Ok(Response::new().add_attribute("action", "instantiate"))
@@ -62,9 +60,6 @@ pub fn execute(
             execute_register_vault(deps, env, info, vault, pair)
         }
         ExecuteMsg::RemoveVault { vault } => execute_remove_vault(deps, info, vault),
-        ExecuteMsg::WithdrawCl8y { amount, recipient } => {
-            execute_withdraw_cl8y(deps, info, amount, recipient)
-        }
         ExecuteMsg::TransferAdmin { admin } => execute_transfer_admin(deps, info, admin),
         ExecuteMsg::AcceptAdmin {} => execute_accept_admin(deps, info),
         ExecuteMsg::CancelAdminTransfer {} => execute_cancel_admin_transfer(deps, info),
@@ -211,30 +206,6 @@ fn execute_receive(
         .add_attribute("amount", receive.amount))
 }
 
-fn execute_withdraw_cl8y(
-    deps: DepsMut,
-    info: MessageInfo,
-    amount: Uint128,
-    recipient: String,
-) -> Result<Response, ContractError> {
-    let config = CONFIG.load(deps.storage)?;
-    assert_admin(&config, &info.sender)?;
-    if amount.is_zero() {
-        return Err(ContractError::ZeroAmount);
-    }
-    let recipient = deps.api.addr_validate(&recipient)?;
-    Ok(Response::new()
-        .add_message(WasmMsg::Execute {
-            contract_addr: config.cl8y_token.to_string(),
-            msg: to_json_binary(&Cw20ExecuteMsg::Transfer {
-                recipient: recipient.to_string(),
-                amount,
-            })?,
-            funds: vec![],
-        })
-        .add_attribute("action", "withdraw_cl8y"))
-}
-
 fn execute_transfer_admin(
     deps: DepsMut,
     info: MessageInfo,
@@ -286,8 +257,6 @@ pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
                 pending_admin: PENDING_ADMIN
                     .may_load(deps.storage)?
                     .map(|admin| admin.to_string()),
-                cl8y_token: config.cl8y_token.to_string(),
-                fee_registry: config.fee_registry.to_string(),
             })
         }
         QueryMsg::Route { vault } => {
@@ -320,6 +289,7 @@ fn assert_admin(config: &Config, sender: &Addr) -> Result<(), ContractError> {
 mod tests {
     use super::*;
     use cosmwasm_std::testing::{mock_dependencies, mock_env, mock_info};
+    use cosmwasm_std::Uint128;
 
     fn setup() -> cosmwasm_std::OwnedDeps<
         cosmwasm_std::MemoryStorage,
@@ -333,28 +303,10 @@ mod tests {
             mock_info("creator", &[]),
             InstantiateMsg {
                 admin: "admin".to_string(),
-                cl8y_token: "cl8y".to_string(),
-                fee_registry: "registry".to_string(),
             },
         )
         .unwrap();
         deps
-    }
-
-    #[test]
-    fn non_admin_cannot_withdraw_cl8y() {
-        let mut deps = setup();
-        let error = execute(
-            deps.as_mut(),
-            mock_env(),
-            mock_info("attacker", &[]),
-            ExecuteMsg::WithdrawCl8y {
-                amount: Uint128::one(),
-                recipient: "attacker".to_string(),
-            },
-        )
-        .unwrap_err();
-        assert_eq!(error, ContractError::Unauthorized);
     }
 
     #[test]

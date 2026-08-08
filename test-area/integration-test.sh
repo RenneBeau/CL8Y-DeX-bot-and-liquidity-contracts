@@ -5,17 +5,15 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 # shellcheck source=test-lib.sh
 source "$SCRIPT_DIR/test-lib.sh"
 
-echo "[1/10] Verifying clean contract boundaries and fee tier"
+echo "[1/10] Verifying clean contract boundaries and empty proxy"
 VAULT_CONFIG=$(terrad_query wasm contract-state smart "$VAULT_ADDRESS" '{"config":{}}')
 jq -e --arg proxy "$PROXY_ADDRESS" --arg pair "$PAIR_ADDRESS" \
     --arg liquidity "$LIQUIDITY_ADDRESS" \
     '.data.proxy == $proxy and .data.pair == $pair and
      .data.liquidity_contract == $liquidity and .data.rebalance_threshold_bps == 500' \
     <<<"$VAULT_CONFIG" >/dev/null
-DISCOUNT=$(terrad_query wasm contract-state smart "$FEE_REGISTRY_ADDRESS" \
-    "{\"get_discount\":{\"trader\":\"$PROXY_ADDRESS\",\"sender\":\"$PROXY_ADDRESS\"}}")
-jq -e '.data.discount_bps == 5000 and .data.needs_deregister == false' \
-    <<<"$DISCOUNT" >/dev/null
+PROXY_CONFIG=$(terrad_query wasm contract-state smart "$PROXY_ADDRESS" '{"config":{}}')
+jq -e --arg admin "$TEST_ADDRESS" '.data.admin == $admin' <<<"$PROXY_CONFIG" >/dev/null
 PAIR_INFO=$(terrad_query wasm contract-state smart "$PAIR_ADDRESS" '{"pair":{}}')
 DEX_LP_TOKEN=$(jq -r '.data.liquidity_token' <<<"$PAIR_INFO")
 test "$(cw20_balance "$DEX_LP_TOKEN" "$VAULT_ADDRESS")" = "0"
@@ -134,16 +132,16 @@ jq -e --argjson pre "$PRE_DEVIATION" \
      (if .allocation_deviation_bps <= 500 then .price_deviation_bps <= 100
       else .price_deviation_bps >= 500 end)' <<<"$POST_STATUS" >/dev/null
 
-echo "[9/10] Verifying no DEX LP custody and no protocol fee"
+echo "[9/10] Verifying no DEX LP custody, no protocol fee, and empty proxy"
 test "$(cw20_balance "$DEX_LP_TOKEN" "$VAULT_ADDRESS")" = "0"
 test "$(cw20_balance "$DEX_LP_TOKEN" "$LIQUIDITY_ADDRESS")" = "0"
-test "$(cw20_balance "$CL8Y_ADDRESS" "$PROXY_ADDRESS")" = "200000000000000000000"
+test "$(cw20_balance "$CL8Y_ADDRESS" "$PROXY_ADDRESS")" = "0"
 
 echo "[10/10] Verifying failure limits"
 expect_execute_failure test1 "$LIQUIDITY_ADDRESS" \
     '{"deposit":{"amounts":["0","0"],"min_shares":"1","deadline":9999999999,"swap":null}}'
 expect_execute_failure attacker "$PROXY_ADDRESS" \
-    "{\"withdraw_cl8y\":{\"amount\":\"1\",\"recipient\":\"$ATTACKER_ADDRESS\"}}"
+    '{"remove_vault":{"vault":"'$VAULT_ADDRESS'"}}'
 expect_execute_failure attacker "$VAULT_ADDRESS" '{"pause":{}}'
 execute_wait "$VAULT_ADDRESS" '{"pause":{}}'
 VAULT_CONFIG=$(terrad_query wasm contract-state smart "$VAULT_ADDRESS" '{"config":{}}')

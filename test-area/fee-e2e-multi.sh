@@ -114,9 +114,8 @@ LIQ_CODE_ID=$(store_contract "$PROJECT_ROOT/rebalancer-system/target/wasm32-unkn
 log "code ids: market_grid=$MG_CODE_ID bot_vault=$BV_CODE_ID swap_proxy=$SP_CODE_ID bot_liquidity=$LIQ_CODE_ID"
 
 log "-- deploy ONE shared swap-proxy used by both the market-grid and the rebalancer --"
-SP_INIT=$(jq -nc --arg admin "$TEST_ADDRESS" --arg cl8y "$DUMMY_CL8Y" \
-    --arg registry "$FEE_REGISTRY" \
-    '{admin:$admin,cl8y_token:$cl8y,fee_registry:$registry}')
+SP_INIT=$(jq -nc --arg admin "$TEST_ADDRESS" \
+    '{admin:$admin}')
 SP_PROXY=$(instantiate_contract "$SP_CODE_ID" "$SP_INIT" cl8y-fee-e2e-shared-swap-proxy)
 log "shared swap-proxy: $SP_PROXY"
 

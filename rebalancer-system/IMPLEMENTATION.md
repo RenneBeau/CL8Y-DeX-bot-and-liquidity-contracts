@@ -36,10 +36,9 @@ single-token withdrawal, route the unwanted side through the vault and proxy.
 2. Register the vault and its CL8Y pair in the proxy.
 3. Connect the vault and liquidity contract authorities.
 4. Assign a dedicated keeper to the vault.
-5. Whitelist the deployed proxy and vault contracts on the CL8Y DEX so they pay
-   zero DEX fees.
-6. Fund the proxy with the tier's required CL8Y balance.
-7. Benchmark a short nonzero TWAP window, such as 30-300 seconds, and
+5. Whitelist the deployed swap-proxy on the CL8Y DEX so its swaps pay zero DEX
+   fees (vaults route through the proxy).
+6. Benchmark a short nonzero TWAP window, such as 30-300 seconds, and
    independently validate the pool's liquidity and oracle safety.
 
 Detailed messages and commands are in [the deployment guide](docs/DEPLOYMENT.md)

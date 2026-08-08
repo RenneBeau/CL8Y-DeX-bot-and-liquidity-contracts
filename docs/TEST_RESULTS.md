@@ -334,6 +334,35 @@ collector. The lock is already wired for `cl8y`/`treasury`; the collector pin is
 the same pattern applied to `fee_collector` (and, optionally, a per-vault
 `fee_collector` validation).
 
+## Swap-Proxy Slim-Down (2026-08-08)
+
+`swap-proxy` was reduced to a pure router. Its config previously carried
+`cl8y_token` and `fee_registry` and exposed a `WithdrawCl8y` sweep; all three
+were legacy from the pre-whitelist tier design and are removed:
+
+- `InstantiateMsg` / `Config` / `ConfigResponse` now hold only `admin`.
+- `WithdrawCl8y` (and its `execute_withdraw_cl8y`) is deleted — the proxy never
+  holds tokens, so there is nothing to sweep.
+- `deploy-system.sh` no longer funds the proxy with CL8Y nor registers it for a
+  tier; `integration-test.sh` asserts the proxy holds **0** CL8Y and tests
+  `remove_vault` as the remaining admin-only action instead of `withdraw_cl8y`.
+- Docs updated (`SWAP_PROXY.md`, `DEPLOYMENT.md`, `ADMIN_OPERATIONS.md`,
+  `IMPLEMENTATION.md`, `ARCHITECTURE.md`, root/rebalancer/README, grid
+  operations, `FEE_TIER_PROTOCOL.md`).
+
+Whitelisting scope is now stated exactly: **only the swap-proxy is
+whitelisted** on the CL8Y DEX; vaults pay no DEX swap fee by routing their swaps
+through it. No contract holds CL8Y. The protocol fee is driven by each user's
+CL8Y balance via `fee-registry` at fill time and is the DEX's revenue path: the
+bots are the DEX's own bots and the collected fee is forwarded to the CMM
+treasury.
+
+Validation after the change: `cargo test --locked --workspace --all-targets` in
+`rebalancer-system` green (11 bot-liquidity, 19 bot-vault, 4 proxy, 2 types, 3
+dex helpers), `cargo clippy --locked --manifest-path rebalancer-system/Cargo.toml
+--all-targets -- -D warnings` clean, `cargo fmt --check` clean across all four
+workspaces, and `bash -n` clean on every `test-area/*.sh`.
+
 ## Existing CI Evidence
 
 The baseline commit had retained source-quality, dependency-security, and

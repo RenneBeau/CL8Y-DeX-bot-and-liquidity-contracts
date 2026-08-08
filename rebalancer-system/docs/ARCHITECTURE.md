@@ -99,8 +99,8 @@ checks and independent oracle validation.
 
 ## CL8Y DEX Fees
 
-The proxy and vault contracts are whitelisted on the CL8Y DEX, so the DEX
-charges them no fees — the proxy does not need to hold CL8Y and no fee tier is
+The swap-proxy is whitelisted on the CL8Y DEX, so the swaps it routes pay no
+DEX fees — the proxy does not need to hold CL8Y and no fee tier is
 registered. The separate protocol fee (fee-registry + fee-collector) resolves
 each LP holder's CL8Y tier at fill time instead; see
 `docs/FEE_TIER_PROTOCOL.md` §2.
