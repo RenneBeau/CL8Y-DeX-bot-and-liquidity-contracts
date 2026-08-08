@@ -633,6 +633,197 @@ fn setup_core(enable_fees: bool, registry_kind: TieredRegistry, use_proxy: bool)
     }
 }
 
+/// Full vault harness wired to the REAL `cl8y-fee-registry` and a real CW20 CL8Y
+/// token whose balance belongs to the fee subject (`config.admin`). This lets a
+/// rebalance traverse the exact vault -> registry -> CL8Y ladder path rather
+/// than the local synthetic registry mocks.
+fn setup_with_real_fee_registry(use_proxy: bool, cl8y_balance: Uint128) -> Harness {
+    let mut app = App::default();
+    let admin = app.api().addr_make(ADMIN);
+    let depositor = app.api().addr_make(DEPOSITOR);
+
+    let cw20_code = app.store_code(mock_cw20_code());
+    let pair_code = app.store_code(mock_pair_code());
+    let vault_code = app.store_code(mock_vault_code());
+    let collector = app.api().addr_make("collector");
+    let treasury = app.api().addr_make("treasury");
+
+    let proxy = if use_proxy {
+        let proxy_code = app.store_code(mock_proxy_code());
+        Some(
+            app.instantiate_contract(proxy_code, admin.clone(), &Empty {}, &[], "proxy", None)
+                .unwrap(),
+        )
+    } else {
+        None
+    };
+
+    let cl8y = app
+        .instantiate_contract(
+            cw20_code,
+            admin.clone(),
+            &cw20_base::msg::InstantiateMsg {
+                name: "CL8Y".to_string(),
+                symbol: "CLY".to_string(),
+                decimals: 18,
+                initial_balances: vec![cw20::Cw20Coin {
+                    address: admin.to_string(),
+                    amount: cl8y_balance,
+                }],
+                mint: Some(cw20::MinterResponse {
+                    minter: admin.to_string(),
+                    cap: None,
+                }),
+                marketing: None,
+            },
+            &[],
+            "cl8y",
+            None,
+        )
+        .unwrap();
+
+    let registry_code = app.store_code(real_registry_code());
+    let registry = app
+        .instantiate_contract(
+            registry_code,
+            admin.clone(),
+            &cl8y_fee_registry::msg::InstantiateMsg {
+                governance: admin.to_string(),
+                cl8y: cl8y.to_string(),
+                treasury: treasury.to_string(),
+                fee_collector: collector.to_string(),
+                base_fee_bps: BASE_FEE_BPS,
+            },
+            &[],
+            "fee-registry",
+            None,
+        )
+        .unwrap();
+
+    let token0 = app
+        .instantiate_contract(
+            cw20_code,
+            admin.clone(),
+            &cw20_base::msg::InstantiateMsg {
+                name: "Token0".to_string(),
+                symbol: "TKA".to_string(),
+                decimals: 6,
+                initial_balances: vec![cw20::Cw20Coin {
+                    address: depositor.to_string(),
+                    amount: Uint128::new(100_000_000_000),
+                }],
+                mint: Some(cw20::MinterResponse {
+                    minter: admin.to_string(),
+                    cap: None,
+                }),
+                marketing: None,
+            },
+            &[],
+            "token0",
+            None,
+        )
+        .unwrap();
+
+    let token1 = app
+        .instantiate_contract(
+            cw20_code,
+            admin.clone(),
+            &cw20_base::msg::InstantiateMsg {
+                name: "Token1".to_string(),
+                symbol: "TKB".to_string(),
+                decimals: 6,
+                initial_balances: vec![cw20::Cw20Coin {
+                    address: depositor.to_string(),
+                    amount: Uint128::new(100_000_000_000),
+                }],
+                mint: Some(cw20::MinterResponse {
+                    minter: admin.to_string(),
+                    cap: None,
+                }),
+                marketing: None,
+            },
+            &[],
+            "token1",
+            None,
+        )
+        .unwrap();
+
+    let pair = app
+        .instantiate_contract(
+            pair_code,
+            admin.clone(),
+            &MockPairInstantiateMsg {
+                token_0: token0.to_string(),
+                token_1: token1.to_string(),
+                reserve_0: Uint128::new(1_000_000_000_000),
+                reserve_1: Uint128::new(1_500_000_000_000),
+                twap: Decimal::from_str(DEFAULT_TWAP).unwrap(),
+                window: 300,
+            },
+            &[],
+            "pair",
+            None,
+        )
+        .unwrap();
+
+    for (token, amount) in [
+        (&token0, Uint128::new(1_000_000_000_000)),
+        (&token1, Uint128::new(1_500_000_000_000)),
+    ] {
+        app.execute_contract(
+            admin.clone(),
+            token.clone(),
+            &cw20::Cw20ExecuteMsg::Mint {
+                recipient: pair.to_string(),
+                amount,
+            },
+            &[],
+        )
+        .unwrap();
+    }
+
+    let vault = app
+        .instantiate_contract(
+            vault_code,
+            admin.clone(),
+            &InstantiateMsg {
+                admin: admin.to_string(),
+                pair: pair.to_string(),
+                twap_window_seconds: 300,
+                grid_count: 4,
+                lower_price: Decimal::from_str("1.0").unwrap(),
+                upper_price: Decimal::from_str("2.0").unwrap(),
+                allocation_tolerance_bps: Some(100),
+                max_trade_bps: Some(2_500),
+                max_execution_deviation_bps: Some(500),
+                quote_slippage_bps: Some(200),
+                max_spot_twap_deviation_bps: Some(500),
+                max_trade_pool_bps: Some(1_000),
+                max_spread: Some(Decimal::percent(5)),
+                fee_registry: Some(registry.to_string()),
+                fee_collector: Some(collector.to_string()),
+                proxy: proxy.as_ref().map(ToString::to_string),
+            },
+            &[],
+            "vault",
+            None,
+        )
+        .unwrap();
+
+    Harness {
+        app,
+        vault,
+        token0,
+        token1,
+        depositor,
+        admin,
+        pair,
+        collector,
+        treasury,
+        proxy,
+    }
+}
+
 fn setup() -> Harness {
     setup_with_fee(false)
 }
@@ -1452,5 +1643,59 @@ fn real_registry_detects_every_ladder_tier_for_the_operating_user() {
                 "tier {tier_id} @ {label} holding must match the on-chain balance"
             );
         }
+    }
+}
+
+#[test]
+fn rebalance_uses_the_real_cl8y_ladder_for_every_tier() {
+    for (tier_id, min_cl8y, discount_bps) in CL8Y_LADDER {
+        let mut h = setup_with_real_fee_registry(false, Uint128::new(min_cl8y));
+        let (token0, token1) = (h.token0.clone(), h.token1.clone());
+        deposit(&mut h, &token0, Uint128::new(10_000_000_000));
+        deposit(&mut h, &token1, Uint128::new(10_000_000_000));
+        set_twap(&mut h, "1.75");
+
+        let response = h
+            .app
+            .execute_contract(
+                h.depositor.clone(),
+                h.vault.clone(),
+                &VaultExecuteMsg::Rebalance { deadline: u64::MAX },
+                &[],
+            )
+            .unwrap();
+
+        let mut fee_bps = None;
+        let mut fee_tier = None;
+        let mut fee_source = None;
+        for e in &response.events {
+            if e.attributes
+                .iter()
+                .any(|a| a.key == "action" && a.value == "complete_rebalance")
+            {
+                for a in &e.attributes {
+                    if a.key == "fee_bps" {
+                        fee_bps = Some(a.value.parse::<u16>().unwrap());
+                    } else if a.key == "fee_tier" {
+                        fee_tier = Some(a.value.parse::<u8>().unwrap());
+                    } else if a.key == "fee_source" {
+                        fee_source = Some(a.value.clone());
+                    }
+                }
+            }
+        }
+
+        let expected_bps = ((BASE_FEE_BPS as u32 * (10_000 - discount_bps) as u32) / 10_000) as u16;
+        assert_eq!(fee_bps, Some(expected_bps), "tier {tier_id} fee_bps");
+        assert_eq!(fee_tier, Some(tier_id), "tier {tier_id} fee_tier");
+        assert_eq!(
+            fee_source.as_deref(),
+            Some("live"),
+            "tier {tier_id} fee_source"
+        );
+        assert!(
+            shares_of(&h, &h.collector) > Uint128::zero(),
+            "tier {tier_id} collector fee"
+        );
     }
 }

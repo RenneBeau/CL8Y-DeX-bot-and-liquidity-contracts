@@ -2094,6 +2094,56 @@ mod tests {
     }
 
     #[test]
+    fn charge_fee_applies_every_canonical_ladder_rate() {
+        const LADDER: [(u8, u16); 9] = [
+            (1, 1_755),
+            (2, 1_620),
+            (3, 1_440),
+            (4, 1_170),
+            (5, 900),
+            (6, 720),
+            (7, 450),
+            (8, 270),
+            (9, 90),
+        ];
+
+        for (tier_id, fee_bps) in LADDER {
+            let mut deps = mock_dependencies();
+            install_pool_mock(&mut deps, &[], &[("admin", fee_bps)]);
+            let config = vault_config(Some("liquidity"), Some("registry"), Some("collector"));
+            let fill_value = Uint128::new(100_000);
+            let (charge, messages) = charge_fee(&mut deps.as_mut(), &config, fill_value).unwrap();
+            let expected_fee_lp = fill_value.multiply_ratio(fee_bps, 10_000u16);
+
+            match charge {
+                ChargeFee::Applied(fee) => {
+                    assert_eq!(fee.fee_bps, fee_bps, "tier {tier_id} fee_bps");
+                    assert_eq!(fee.shares, expected_fee_lp, "tier {tier_id} fee LP");
+                    assert_eq!(fee.holders, 1, "tier {tier_id} is single-user model");
+                    assert_eq!(fee.source, "live", "tier {tier_id} source");
+                }
+                _other => panic!("expected Applied fee for tier {tier_id}"),
+            }
+
+            assert_eq!(messages.len(), 1, "tier {tier_id} collector mint count");
+            match &messages[0] {
+                WasmMsg::Execute {
+                    contract_addr, msg, ..
+                } if contract_addr == "liquidity" => {
+                    let parsed: LiquidityExecuteMsg = from_json(msg).unwrap();
+                    match parsed {
+                        LiquidityExecuteMsg::MintTo { recipient, amount } => {
+                            assert_eq!(recipient, "collector", "tier {tier_id} recipient");
+                            assert_eq!(amount, expected_fee_lp, "tier {tier_id} mint amount");
+                        }
+                    }
+                }
+                other => panic!("unexpected message for tier {tier_id}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn charge_fee_skips_when_registry_unreachable_or_zero_rate() {
         // A configured pool but the fee-registry query fails => the whole charge
         // is skipped non-blockingly (no fee, no revert).

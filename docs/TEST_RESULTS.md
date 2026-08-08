@@ -430,6 +430,35 @@ Gate runs:
 | `cargo clippy --manifest-path limit-grid-system/Cargo.toml -p cl8y-grid-vault --tests -- -D warnings` | PASS |
 | `cargo clippy --manifest-path rebalancer-system/Cargo.toml -p cl8y-bot-vault --tests -- -D warnings` | PASS |
 
+The market-grid workspace now also drives the **full rebalance fee path** against
+the real ladder:
+
+- `rebalance_uses_the_real_cl8y_ladder_for_every_tier`
+
+For each canonical CL8Y tier boundary, the vault is instantiated against the
+real `cl8y-fee-registry` + a real CW20 CL8Y token, a rebalance is executed, and
+the emitted `fee_bps` / `fee_tier` on `complete_rebalance` are asserted. This
+proves the live market-grid fee flow consumes the DEX ladder exactly as seeded
+in the fee-system.
+
+The rebalancer workspace now covers the **full vault fee application path**
+across the same ladder:
+
+- `charge_fee_applies_every_canonical_ladder_rate`
+
+This test still uses the vault's internal pool/liquidity mocks (there is not yet
+a cw-multi-test rebalance harness for the whole bot-vault swap path), but it
+does exercise the real `charge_fee` code path end-to-end for every canonical
+ladder rate: the resolved `fee_bps` is applied, only the collector is minted,
+and the minted LP amount matches `value × fee_bps / 10_000` for tiers 1..9.
+
+Additional gate runs:
+
+| Command | Result |
+|---|---|
+| `cargo test --manifest-path market-grid-system/Cargo.toml -p cl8y-grid-vault-swap rebalance_uses_the_real_cl8y_ladder_for_every_tier` | PASS |
+| `cargo test --manifest-path rebalancer-system/Cargo.toml -p cl8y-bot-vault charge_fee_applies_every_canonical_ladder_rate` | PASS |
+
 ## Existing CI Evidence
 
 The baseline commit had retained source-quality, dependency-security, and
