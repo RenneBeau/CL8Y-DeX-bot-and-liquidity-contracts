@@ -94,7 +94,7 @@ jobs:
           test "$(find release -maxdepth 1 -name '*.wasm' | wc -l)" -eq "$((artifacts * 2))"
           test "$(find release -maxdepth 1 -name '*-manifest.json' | wc -l)" -eq "$((workspaces * 2))"
       - name: Generate SBOM
-        uses: anchore/sbom-action@55dc4ee22412511ee8c3142cbea40418e6cec693 # v0.17.8
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         with:
           path: .
           format: spdx-json
