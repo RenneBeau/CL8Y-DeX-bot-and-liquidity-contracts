@@ -1,19 +1,20 @@
 # Verification Evidence
 
-Last updated: 2026-08-05
+Last updated: 2026-08-08
 
 This file distinguishes local execution from GitHub Actions evidence. A workflow
 definition is not proof that it ran, and source tests are not a security audit.
 
 ## Current Revision
 
-- Repository baseline: `b1e943de8da888330d6c0c825b8d702ad03e8d48`
-- Reported security corrections: uncommitted working-tree changes after that baseline
+- Repository baseline: `995f4d4` (`fee(fee-system): pin canonical CL8Y/treasury
+  behind the mainnet feature`) — committed and pushed to `origin/main`
+- Earlier verified baseline: `b1e943de8da888330d6c0c825b8d702ad03e8d48`
 - Rust toolchain: `1.81.0`
 - CL8Y fixture revision: `fad801117fe54420d7529da04e485d67d511ef2c`
 
-No GitHub Actions run can yet represent the uncommitted working tree. After these
-changes are committed, all workflows must be rerun for that exact commit.
+All corrections below are committed. No uncommitted working-tree changes
+represent them.
 
 ## Local Results
 
@@ -274,6 +275,64 @@ All venues are wired to **one** `fee-registry`, **one** `fee-collector` and **on
   (`config.liquidity_contract` unset); per §7 the collector then realizes via the
   internal vault path only once that LP pool is set. This is a script-wiring gap,
   not a contract defect.
+
+## Mainnet Address Lock — `mainnet` feature (2026-08-08)
+
+Commit `d06b5d8` baseline was the fee-only-mint single-user rework. Commit
+`995f4d4` adds a **compile-time production lock** to the fee system:
+
+- All four workspaces now pass `make test` (exit 0) and `make clippy` (exit 0).
+- The `fee-system` workspace is folded into `make test` + `make clippy`
+  (`cargo clippy --features mainnet --all-targets -- -D warnings`).
+- A new `fee-wasm` Makefile target produces the mainnet artifact with
+  `MAINNET=1` (`cargo build --release --target wasm32-unknown-unknown
+  --features mainnet`); the feature is **off by default** so local
+  test-a-net / E2E dummy-address deployments are unaffected.
+
+Lock semantics (feature-gated):
+- `fee-registry`: `CANONICAL_CL8Y` / `CANONICAL_TREASURY` pinned at compile
+  time; `instantiate` REJECTS any non-canonical `cl8y`/`treasury`;
+  `update_config` refuses (hard error) to re-point them. Governance /
+  `fee_collector` / `base_fee_bps` stay mutable.
+- `fee-collector`: `CANONICAL_TREASURY` pinned; `instantiate` REJECTS any other
+  value and `update_config` refuses to re-point the `Collect` payout target.
+  `governance` / `registry` / `keeper` stay mutable.
+
+New feature-gated suite `tests/mainnet_lock.rs` in both contracts (rejecting
+fake addresses at instantiate, refusing re-pointing in `update_config`, and
+proving governance/base-fee still update). The dummy-address suites are now
+`#![cfg(not(feature = "mainnet"))]` so each configuration compiles its own
+coherent set. Gate runs:
+
+| Command | Result |
+|---|---|
+| `cargo test --locked --manifest-path fee-system/Cargo.toml --all-targets` (default features) | PASS: 22 tests (8 audit, 10 integration, 4 collector) |
+| `cargo test --locked --manifest-path fee-system/Cargo.toml --all-targets --features mainnet` | PASS: 9 tests (5 registry + 4 collector lock) |
+| `cargo clippy --locked --manifest-path fee-system/Cargo.toml --all-targets --features mainnet -- -D warnings` | PASS |
+| wasm build featureless vs `--features mainnet` | both build; sha256 differs (lock compiled in) |
+
+On-chain LocalTerra remained green after the change:
+`test-area/fee-e2e-test.sh` **PASSED** (tier-5 → 90 bps, zero-CL8Y → 180 bps,
+6 fills, collector → dummy treasury), and
+`test-area/fee-e2e-multi.sh` completed both the market-grid and rebalancer
+legs (treasury received EMBER/CORAL and LUNC-C/EMBER respectively; collector
+shares → 0 on both). The second `fee-e2e-multi.sh` re-run fails for state
+non-idempotency (the `bot-liquidity` pool was already provisioned by the first
+run → the re-bootstrap deposit exceeds the allocation tolerance), not a
+contract defect.
+
+Caveats from the broader evidence file still stand: the lock protects only
+against non-canonical `cl8y`/`treasury`; the deployed geometry is the
+compile-time pinned one only when the artifact was built with `MAINNET=1`; the
+address values themselves (CL8Y token, CMM treasury) are the same ones recorded
+in `docs/DEPLOY_FEE_SYSTEM.md` §1 and now compiled verbatim into the contracts.
+
+Remaining follow-up: once the fee-collector is live on mainnet, add its real
+address (the reference registry's `fee_collector`) to the `mainnet` feature of
+`fee-registry` so a deploying key cannot point the system at a personal
+collector. The lock is already wired for `cl8y`/`treasury`; the collector pin is
+the same pattern applied to `fee_collector` (and, optionally, a per-vault
+`fee_collector` validation).
 
 ## Existing CI Evidence
 

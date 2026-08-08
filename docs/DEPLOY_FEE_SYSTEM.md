@@ -23,6 +23,14 @@ treasury do not exist on a local chain.
 > `--features mainnet`** (`make fee-wasm MAINNET=1`); local test-a-net / E2E
 > builds stay featureless so they can use the dummy addresses. Build both and
 > confirm the checksum differs (lock is compiled in).
+>
+> **Not yet pinned: the fee-collector.** Its mainnet address does not exist until
+> the collector is deployed (its address is derived from deployer + code_id +
+> `InstantiateMsg` at instantiation). Once it is live, extend the `mainnet`
+> feature so `fee-registry` also pins `fee_collector` (reject any other value at
+> instantiate, refuse to re-point it in `update_config`), and optionally make
+> each vault reject a `fee_collector` that differs from the canonical one. The
+> same `NonCanonicalAddress` check applies — only the constant is missing.
 
 ## 1. Deployed addresses (Terra Classic mainnet)
 
