@@ -9,6 +9,12 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 library = []
+# Production-lock feature (off by default). When enabled, the vault's
+# `fee_collector` and `proxy` are verified against the canonical mainnet
+# addresses in `src/mainnet.rs`: instantiate REJECTS non-canonical values and
+# `update_config` refuses to re-point them. Canonical constants are `None`
+# until the fee-collector and swap-proxy are deployed to mainnet.
+mainnet = []
 
 [dependencies]
 cosmwasm-schema.workspace = true

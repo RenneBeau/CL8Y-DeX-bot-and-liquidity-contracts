@@ -71,4 +71,9 @@ pub enum ContractError {
     ArithmeticOutOfRange,
     #[error("unsupported grid vault migration source version")]
     UnsupportedMigrationSource,
+    #[error("non-canonical address for {field}; expected {expected}")]
+    NonCanonicalAddress {
+        field: &'static str,
+        expected: &'static str,
+    },
 }

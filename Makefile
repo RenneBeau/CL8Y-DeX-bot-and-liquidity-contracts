@@ -8,19 +8,22 @@ ci: test clippy
 test:
 	cargo +$(RUST_TOOLCHAIN) fmt --manifest-path rebalancer-system/Cargo.toml --all -- --check
 	cargo +$(RUST_TOOLCHAIN) test --locked --manifest-path rebalancer-system/Cargo.toml --all-targets
+	cargo +$(RUST_TOOLCHAIN) test --locked --manifest-path rebalancer-system/Cargo.toml --all-targets --features mainnet
 	cargo +$(RUST_TOOLCHAIN) fmt --manifest-path market-grid-system/Cargo.toml --all -- --check
 	cargo +$(RUST_TOOLCHAIN) test --locked --manifest-path market-grid-system/Cargo.toml --all-targets
+	cargo +$(RUST_TOOLCHAIN) test --locked --manifest-path market-grid-system/Cargo.toml --all-targets --features mainnet
 	cargo +$(RUST_TOOLCHAIN) fmt --manifest-path limit-grid-system/Cargo.toml --all -- --check
 	cargo +$(RUST_TOOLCHAIN) test --locked --manifest-path limit-grid-system/Cargo.toml --all-targets
+	cargo +$(RUST_TOOLCHAIN) test --locked --manifest-path limit-grid-system/Cargo.toml --all-targets --features mainnet
 	cargo +$(RUST_TOOLCHAIN) fmt --manifest-path fee-system/Cargo.toml --all -- --check
 	cargo +$(RUST_TOOLCHAIN) test --locked --manifest-path fee-system/Cargo.toml --all-targets
 	python3 -m unittest discover -s rebalancer-system/examples/keeper -p 'test_*.py'
 	python3 -m unittest discover -s grid-operator-system/services/grid-operator/tests -p 'test_*.py'
 
 clippy:
-	cargo +$(RUST_TOOLCHAIN) clippy --locked --manifest-path rebalancer-system/Cargo.toml --all-targets -- -D warnings
-	cargo +$(RUST_TOOLCHAIN) clippy --locked --manifest-path market-grid-system/Cargo.toml --all-targets -- -D warnings
-	cargo +$(RUST_TOOLCHAIN) clippy --locked --manifest-path limit-grid-system/Cargo.toml --all-targets -- -D warnings
+	cargo +$(RUST_TOOLCHAIN) clippy --locked --manifest-path rebalancer-system/Cargo.toml --all-targets --features mainnet -- -D warnings
+	cargo +$(RUST_TOOLCHAIN) clippy --locked --manifest-path market-grid-system/Cargo.toml --all-targets --features mainnet -- -D warnings
+	cargo +$(RUST_TOOLCHAIN) clippy --locked --manifest-path limit-grid-system/Cargo.toml --all-targets --features mainnet -- -D warnings
 	cargo +$(RUST_TOOLCHAIN) clippy --locked --manifest-path fee-system/Cargo.toml --all-targets --features mainnet -- -D warnings
 
 security:

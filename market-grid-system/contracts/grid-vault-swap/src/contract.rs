@@ -105,6 +105,11 @@ pub fn instantiate(
         .as_deref()
         .map(|address| deps.api.addr_validate(address))
         .transpose()?;
+    #[cfg(feature = "mainnet")]
+    {
+        crate::mainnet::assert_fee_collector_canonical_mainnet(fee_collector.as_ref())?;
+        crate::mainnet::assert_proxy_canonical_mainnet(proxy.as_ref())?;
+    }
     validate_risk_controls(
         max_trade_bps,
         max_execution_deviation_bps,
@@ -472,6 +477,23 @@ fn execute_update_config(
     assert_admin(&config, &info.sender)?;
     if PENDING_SWAP.may_load(deps.storage)?.is_some() {
         return Err(ContractError::RebalancePending);
+    }
+    #[cfg(feature = "mainnet")]
+    {
+        if let Some(value) = &fee_collector {
+            let parsed = match value.as_str() {
+                "" => None,
+                address => Some(deps.api.addr_validate(address)?),
+            };
+            crate::mainnet::assert_fee_collector_canonical_mainnet(parsed.as_ref())?;
+        }
+        if let Some(value) = &proxy {
+            let parsed = match value.as_str() {
+                "" => None,
+                address => Some(deps.api.addr_validate(address)?),
+            };
+            crate::mainnet::assert_proxy_canonical_mainnet(parsed.as_ref())?;
+        }
     }
     if let Some(value) = fee_registry {
         config.fee_registry = match value.as_str() {

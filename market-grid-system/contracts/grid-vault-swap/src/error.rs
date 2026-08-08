@@ -53,4 +53,9 @@ pub enum ContractError {
     Paused,
     #[error("contract is not paused")]
     NotPaused,
+    #[error("non-canonical address for {field}; expected {expected}")]
+    NonCanonicalAddress {
+        field: &'static str,
+        expected: &'static str,
+    },
 }

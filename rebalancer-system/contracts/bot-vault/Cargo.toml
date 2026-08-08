@@ -9,6 +9,12 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 library = []
+# Production-lock feature (off by default). When enabled, the vault's
+# `fee_collector` and `proxy` are verified against the canonical mainnet
+# addresses below: instantiate REJECTS a non-canonical value and the update
+# messages refuse to re-point them. Canonical constants are `None` until the
+# fee-collector and swap-proxy are deployed on mainnet, then filled in here.
+mainnet = []
 
 [dependencies]
 bot-types = { path = "../../packages/bot-types", version = "0.1.0" }

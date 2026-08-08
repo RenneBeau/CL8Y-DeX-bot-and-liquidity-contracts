@@ -80,6 +80,16 @@ pub fn instantiate(
         return Err(ContractError::InvalidGrid);
     }
     set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
+    let fee_registry = msg
+        .fee_registry
+        .map(|s| deps.api.addr_validate(&s))
+        .transpose()?;
+    let fee_collector = msg
+        .fee_collector
+        .map(|s| deps.api.addr_validate(&s))
+        .transpose()?;
+    #[cfg(feature = "mainnet")]
+    crate::mainnet::assert_fee_collector_canonical_mainnet(fee_collector.as_ref())?;
     CONFIG.save(
         deps.storage,
         &Config {
@@ -95,14 +105,8 @@ pub fn instantiate(
             max_grid_count: msg.max_grid_count,
             max_orders_per_reconcile: msg.max_orders_per_reconcile,
             max_active_orders_per_bot: msg.max_active_orders_per_bot,
-            fee_registry: msg
-                .fee_registry
-                .map(|s| deps.api.addr_validate(&s))
-                .transpose()?,
-            fee_collector: msg
-                .fee_collector
-                .map(|s| deps.api.addr_validate(&s))
-                .transpose()?,
+            fee_registry,
+            fee_collector,
         },
     )?;
     NEXT_BOT_ID.save(deps.storage, &1)?;

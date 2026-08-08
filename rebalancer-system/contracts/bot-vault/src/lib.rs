@@ -1,5 +1,7 @@
 pub mod contract;
 pub mod error;
+#[cfg(feature = "mainnet")]
+pub mod mainnet;
 pub mod msg;
 pub mod state;
 

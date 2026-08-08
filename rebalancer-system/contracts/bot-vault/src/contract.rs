@@ -129,6 +129,12 @@ pub fn instantiate(
         .as_deref()
         .map(|address| deps.api.addr_validate(address))
         .transpose()?;
+    let proxy = deps.api.addr_validate(&msg.proxy)?;
+    #[cfg(feature = "mainnet")]
+    {
+        crate::mainnet::assert_fee_collector_canonical_mainnet(fee_collector.as_ref())?;
+        crate::mainnet::assert_proxy_canonical_mainnet(&proxy)?;
+    }
     validate_risk_controls(
         max_trade_bps,
         max_execution_deviation_bps,
@@ -141,7 +147,7 @@ pub fn instantiate(
         admin: deps.api.addr_validate(&msg.admin)?,
         keeper: deps.api.addr_validate(&msg.keeper)?,
         liquidity_contract: None,
-        proxy: deps.api.addr_validate(&msg.proxy)?,
+        proxy,
         pair,
         asset_tokens,
         decimals: token_0.decimals,
@@ -1271,6 +1277,14 @@ fn execute_update_fee_config(
 ) -> Result<Response, ContractError> {
     let mut config = CONFIG.load(deps.storage)?;
     assert_admin(&config, &info.sender)?;
+    #[cfg(feature = "mainnet")]
+    if let Some(value) = &fee_collector {
+        let parsed = match value.as_str() {
+            "" => None,
+            address => Some(deps.api.addr_validate(address)?),
+        };
+        crate::mainnet::assert_fee_collector_canonical_mainnet(parsed.as_ref())?;
+    }
     if let Some(value) = fee_registry {
         config.fee_registry = match value.as_str() {
             "" => None,

@@ -17,20 +17,31 @@ treasury do not exist on a local chain.
 > - `fee-collector` pins `treasury` (its `Collect` payout target is
 >   `config.treasury`); instantiate REJECTS any other value and `update_config`
 >   refuses to re-point it.
+> - Each vault (`bot-vault`, `grid-vault-swap`, `grid-vault`) pins its
+>   `fee_collector`; `bot-vault` and `grid-vault-swap` additionally pin their
+>   `swap-proxy`. While the canonical constant is `None` every value is accepted;
+>   once the constant is filled in, instantiate REJECTS any other value (and,
+>   for `bot-vault` / `grid-vault-swap`, an absent collector) and the update
+>   messages refuse to re-point them.
 >
-> So a deploying key cannot spin up the fee system pointed at a fake CL8Y token
-> or a personal treasury. **Mainnet artifacts MUST be built with
-> `--features mainnet`** (`make fee-wasm MAINNET=1`); local test-a-net / E2E
-> builds stay featureless so they can use the dummy addresses. Build both and
-> confirm the checksum differs (lock is compiled in).
+> So a deploying key cannot spin up the fee system pointed at a fake CL8Y token,
+> a personal treasury, or a vault that pays its fees to a collector it controls.
+> **Mainnet artifacts MUST be built with `--features mainnet`** (`make fee-wasm
+> MAINNET=1` for fee-system; the three vaults are built with `--features
+> mainnet` in `make clippy`/`make test`, and their release artifacts for mainnet
+> must use the same flag); local test-a-net / E2E builds stay featureless so they
+> can use the dummy addresses. Build both and confirm the checksum differs (lock
+> is compiled in).
 >
-> **Not yet pinned: the fee-collector.** Its mainnet address does not exist until
-> the collector is deployed (its address is derived from deployer + code_id +
-> `InstantiateMsg` at instantiation). Once it is live, extend the `mainnet`
-> feature so `fee-registry` also pins `fee_collector` (reject any other value at
-> instantiate, refuse to re-point it in `update_config`), and optionally make
-> each vault reject a `fee_collector` that differs from the canonical one. The
-> same `NonCanonicalAddress` check applies — only the constant is missing.
+> **Awaiting deployment: the canonical vault addresses.** The `swap-proxy` and
+> `fee-collector` mainnet addresses do not exist until those contracts are
+> deployed (their addresses are derived from deployer + code_id +
+> `InstantiateMsg` at instantiation). Until then the vault constants are `None`:
+> `bot-vault/src/mainnet.rs` (`CANONICAL_SWAP_PROXY`, `CANONICAL_FEE_COLLECTOR`),
+> `market-grid-system/contracts/grid-vault-swap/src/mainnet.rs`, and
+> `limit-grid-system/contracts/grid-vault/src/mainnet.rs`. Once each is live, put
+> its address in the matching constant and rebuild with `--features mainnet` —
+> the same `NonCanonicalAddress` check applies, only the constant is missing.
 
 ## 1. Deployed addresses (Terra Classic mainnet)
 
@@ -94,11 +105,29 @@ POST {"update_fee_config":{
 }}
 ```
 
+While the canonical constants are `None` (mainnet staging) the update flow above
+is what wires fees; once each canonical address is filled into `mainnet.rs` the
+feature makes those values the **only** accepted ones and this message can no
+longer point a vault elsewhere.
+
+> **grid-vault (limit) has no fee update message.** `bot-vault` and
+> `grid-vault-swap` expose `update_fee_config` (and, for
+> `grid-vault-swap`, `update_config`); the limit `grid-vault` only sets
+> `fee_registry`/`fee_collector` at `instantiate` (its admin messages are
+> `update_keeper` / `update_pair_code`). Its mainnet-pinned collector is
+> therefore fixed for the contract's lifetime — redeploy if it must change.
+
 Fees are then charged to the **single operating user** at their CL8Y tier (mint
 `V − fee` LP to the user, `fee` LP to the fee-collector; see
 `docs/FEE_TIER_PROTOCOL.md` §5); the `fee-collector` realizes the accrued LP to
 the CMM `treasury` (via `RedeemShares` on the grids, or an external
 `bot-liquidity` `Withdraw` on the rebalancer).
+
+The `swap-proxy` (rebalancer router) is pinned by `bot-vault` and
+`grid-vault-swap` alongside the collector: those two contracts route their swaps
+through it, so the pin guarantees they can never be re-pointed at an
+attacker-deployed router. The limit `grid-vault` has no proxy field — it fills
+orders on the DEX directly.
 
 ## 5. Environments
 

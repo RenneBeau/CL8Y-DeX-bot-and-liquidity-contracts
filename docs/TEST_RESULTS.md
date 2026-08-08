@@ -363,6 +363,40 @@ dex helpers), `cargo clippy --locked --manifest-path rebalancer-system/Cargo.tom
 --all-targets -- -D warnings` clean, `cargo fmt --check` clean across all four
 workspaces, and `bash -n` clean on every `test-area/*.sh`.
 
+## Vault Address Lock — `mainnet` feature on the three vaults (2026-08-08)
+
+Following the swap-proxy slim-down, the compile-time `mainnet` lock is extended
+from the fee-system to the **three vaults**, so a deploying key cannot point a
+vault at a fee-collector (or swap router) it controls:
+
+- `bot-vault` (rebalancer): `src/mainnet.rs` pins `CANONICAL_FEE_COLLECTOR` and
+  `CANONICAL_SWAP_PROXY`; `instantiate` validates both and
+  `update_fee_config` refuses to re-point them; absent collector/proxy rejected.
+- `grid-vault-swap` (market-grid): `src/mainnet.rs` pins the same two; validated
+  in `instantiate` and `update_config` (proxy is optional, so the proxy assert
+  takes `Option<&Addr>`).
+- `grid-vault` (limit-grid): `src/mainnet.rs` pins `CANONICAL_FEE_COLLECTOR`
+  only (no proxy field, and no fee update message — the collector is fixed for
+  the contract's lifetime); validated in `instantiate`.
+
+All constants are `Option<&str> = None` until the fee-collector and swap-proxy
+are deployed to mainnet, so the lock is **inert while unset** (local/E2E
+dummy-address deployments keep working) and **active the moment it is filled**
+(rejects any non-canonical value and an absent collector). Each contract gains
+`ContractError::NonCanonicalAddress { field, expected }` and inline unit tests
+for the pin helper. `make test` and `make clippy` now build all three vault
+workspaces with `--features mainnet` in addition to the default config.
+
+Gate runs (feature-gated):
+
+| Command | Result |
+|---|---|
+| `cargo test --features mainnet` — `rebalancer-system` | PASS: 23 bot-vault tests |
+| `cargo test --features mainnet` — `market-grid-system` | PASS: 13 grid-vault-swap tests |
+| `cargo test --features mainnet` — `limit-grid-system` | PASS: 17 grid-vault tests |
+| `make test` (all workspaces, default + mainnet) | PASS: 245 Rust tests, exit 0 |
+| `make clippy` (all workspaces, `--features mainnet`, `-D warnings`) | PASS, exit 0 |
+
 ## Existing CI Evidence
 
 The baseline commit had retained source-quality, dependency-security, and
