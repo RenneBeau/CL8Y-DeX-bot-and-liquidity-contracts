@@ -135,8 +135,10 @@ version = "0.2.0"
 dependencies = [
  "base64ct",
  "bot-types",
+ "cl8y-bot-liquidity",
  "cl8y-dex",
  "cl8y-fee-registry",
+ "cl8y-swap-proxy",
  "cosmwasm-schema",
  "cosmwasm-std",
  "cw-multi-test",
@@ -159,7 +161,7 @@ dependencies = [
 
 [[package]]
 name = "cl8y-fee-registry"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cosmwasm-schema",
  "cosmwasm-std",

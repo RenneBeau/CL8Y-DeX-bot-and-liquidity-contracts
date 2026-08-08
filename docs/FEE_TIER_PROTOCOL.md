@@ -172,5 +172,12 @@ redeployment; routed swap-proxy 0.1.x and bot-liquidity 0.1.x must not be
 migrated. Only empty compatible proxy state, limit grid-vault 0.1.0 to 0.1.1,
 and the tested fee-system paths are migration candidates.
 
+The rebalancer ladder is covered in `cw-multi-test` by a full settlement flow
+using actual protocol contracts and stateful pair/factory models for no-holder
+and tiers 1 through 9. This proves the in-process contract path through
+NAV-priced collector mint and pro-rata withdrawal. It is not LocalTerra or
+on-chain execution; exact-candidate canonical LocalTerra fee E2E remains release
+evidence.
+
 Use [`DEPLOY_FEE_SYSTEM.md`](DEPLOY_FEE_SYSTEM.md) only after its unblock
 conditions are satisfied.

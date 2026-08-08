@@ -10,6 +10,11 @@ four, produce default and `mainnet` artifact sets, and emit per-workspace
 manifests. Release checks include tag ancestry and the dedicated canonical fee
 E2E job.
 
+`.github/release-policy.json` is the authoritative inventory and classifies each
+package/artifact as production or PoC. Limit-grid is artifact-only PoC. The
+machine validator checks Cargo membership and artifact flags and derives
+workspace/artifact counts from policy instead of duplicated workflow constants.
+
 Limit-grid remains in the artifact set as an abandoned **PoC** for reproducibility
 and research. Its artifacts are not approved production candidates and must not
 be deployed with economic funds.
@@ -27,8 +32,12 @@ verified.
 
 ## Intended Release Properties
 
-Releases are triggered only by annotated `v*` tags whose cryptographic signature
-GitHub verifies. The workflow checks required jobs for the tagged SHA, performs
+Releases are triggered only by annotated, signed, exact stable
+`vMAJOR.MINOR.PATCH` tags whose cryptographic signature GitHub verifies.
+Prereleases and numeric components with leading zeros are rejected. Every
+production package version must equal the tag; all current production packages,
+including fee-registry and fee-collector, are `0.2.0`. The workflow checks
+required jobs for the tagged SHA, performs
 double builds, compares Wasm digests, creates an SPDX JSON SBOM and GitHub
 Sigstore provenance, and publishes `SHA256SUMS`.
 
@@ -50,8 +59,15 @@ The current working-tree workflow is intended to:
    rebalancer deployment and re-register every `0.2.0` proxy route.
 
 The definitions implement these properties, but workflow presence is not run
-evidence. Package-version-to-tag consistency and narrowing/expiry of the
-`RUSTSEC-2024-0344` exception remain open release-policy items.
+evidence. Release-policy fixtures cover valid, version mismatch, malformed,
+prerelease, expired, wrong-package, wrong-version, and extra-advisory cases.
+
+`RUSTSEC-2024-0344` is scoped only to `curve25519-dalek` 3.2.0 in all four
+current lockfiles, transitively introduced through CosmWasm
+1.5.11/ed25519-zebra 3.1.0, and expires 2027-02-01 UTC. Policy fails on expiry,
+exception disappearance, package/version drift, or any extra vulnerability; no
+global `cargo audit --ignore` remains. The `RUSTSEC-2024-0388` derivative 2.2.0
+unmaintained notice is informational and is not a vulnerability exception.
 
 ## Pinned Inputs
 
@@ -83,13 +99,19 @@ manifests, but the primary validation did not run that target. Selected double
 builds reported elsewhere are not a claim that the complete release set was
 reproduced here.
 
+Release-policy fixture tests, release inventory validation, and live RustSec
+policy validation passed. `cargo deny` was reported passing by the implementation
+agent. Full release/reproducible Docker artifacts and a candidate tag workflow
+were not executed.
+
 Canonical fee-disabled and fee-enabled LocalTerra workflows are
 scheduled/manually dispatchable and must pass on the exact candidate SHA. The
 dedicated fee target/workflow was added but was not run locally in this working
 tree, so it is not current evidence.
 
 Market-grid `grid-vault-swap`, rebalancer `bot-vault`, `swap-proxy`, and
-`bot-liquidity` are version `0.2.0`. Pair provenance fields are required.
+`bot-liquidity`, fee-registry, and fee-collector are version `0.2.0`. Pair
+provenance fields are required.
 Market-grid and bot-vault 0.1.x require redeployment. A swap-proxy 0.1.x with any
 routes rejects migration and requires a fresh 0.2.0 proxy plus route
 re-registration; only empty compatible proxy state may migrate. Bot-liquidity
@@ -110,7 +132,7 @@ executed.
 4. Execute the contract-specific `0.2.0` redeployment plan, re-register routes,
    and retain factory/pair/code-ID evidence. Never migrate incompatible 0.1.x
    state; only the explicitly supported empty-proxy, limit 0.1.0-to-0.1.1, and
-   fee-system paths may use migration.
+   tested fee-system paths may use migration.
 5. Create and push an annotated signed tag matching the release package version.
 6. Review the complete `Signed release` evidence before publishing/deploying.
 7. Verify `SHA256SUMS` and provenance with `gh attestation verify`.

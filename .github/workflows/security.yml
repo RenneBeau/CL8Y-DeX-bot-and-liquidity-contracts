@@ -20,6 +20,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Test release and advisory policy
+        run: .github/scripts/tests/release-security-policy-test.sh
       - name: Install pinned scanners
         run: |
           mkdir -p evidence
@@ -29,12 +31,13 @@ jobs:
           cargo +stable audit --version | tee evidence/cargo-audit-version.txt
           cargo +stable deny --version | tee evidence/cargo-deny-version.txt
       - name: Scan workspaces
+        env:
+          AUDIT_EVIDENCE_DIR: evidence
         run: |
           mkdir -p evidence
           status=0
-          for workspace in rebalancer-system market-grid-system limit-grid-system fee-system; do
-            cargo +stable audit --file "$workspace/Cargo.lock" --ignore RUSTSEC-2024-0344 \
-              --json >"evidence/$workspace-audit.json" || status=1
+          .github/scripts/release-security-policy.sh audit || status=1
+          for workspace in $(.github/scripts/release-security-policy.sh workspaces); do
             cargo +stable deny --manifest-path "$workspace/Cargo.toml" --all-features check \
               2>&1 | tee "evidence/$workspace-deny.log" || status=1
           done

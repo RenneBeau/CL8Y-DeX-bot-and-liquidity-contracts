@@ -33,11 +33,9 @@ clippy:
 	$(MAINNET_TEST_ENV) cargo +$(RUST_TOOLCHAIN) clippy --locked --manifest-path fee-system/Cargo.toml --all-targets --features mainnet -- -D warnings
 
 security:
+	.github/scripts/tests/release-security-policy-test.sh
 	.github/scripts/install-security-tools.sh
-	cargo +stable audit --file rebalancer-system/Cargo.lock --ignore RUSTSEC-2024-0344
-	cargo +stable audit --file market-grid-system/Cargo.lock --ignore RUSTSEC-2024-0344
-	cargo +stable audit --file limit-grid-system/Cargo.lock --ignore RUSTSEC-2024-0344
-	cargo +stable audit --file fee-system/Cargo.lock --ignore RUSTSEC-2024-0344
+	.github/scripts/release-security-policy.sh audit
 	cargo +stable deny --manifest-path rebalancer-system/Cargo.toml --all-features check
 	cargo +stable deny --manifest-path market-grid-system/Cargo.toml --all-features check
 	cargo +stable deny --manifest-path limit-grid-system/Cargo.toml --all-features check
@@ -50,7 +48,8 @@ optimize:
 
 reproducible:
 	mkdir -p artifacts/release
-	@for workspace in rebalancer-system market-grid-system limit-grid-system fee-system; do \
+	.github/scripts/release-security-policy.sh inventory
+	@for workspace in `./.github/scripts/release-security-policy.sh workspaces`; do \
 		OPTIMIZER_IMAGE=$(OPTIMIZER_IMAGE) .github/scripts/reproducible-build.sh $$workspace artifacts/release default; \
 		OPTIMIZER_IMAGE=$(OPTIMIZER_IMAGE) .github/scripts/reproducible-build.sh $$workspace artifacts/release mainnet; \
 	done

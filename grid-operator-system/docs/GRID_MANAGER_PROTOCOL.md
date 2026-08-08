@@ -380,6 +380,7 @@ rollout.
 
 Production is additionally blocked by approved canonical build inputs,
 deployment verification, external pair semantics, unrun canonical fee E2E, and
-remaining audit findings. The manager propagates fee configuration only to
-future vaults; old fee-disabled vaults still need migration or redeployment. See
+independent review. H-05 is the sole partial repository audit finding. The
+manager propagates fee configuration only to future vaults; old fee-disabled
+vaults still need migration or redeployment. See
 `../../docs/DEPLOY_FEE_SYSTEM.md` and `../../RELEASE.md`.

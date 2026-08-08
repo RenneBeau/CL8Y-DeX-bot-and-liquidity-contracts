@@ -23,9 +23,10 @@ jobs:
       - name: Build each workspace twice
         run: |
           mkdir -p evidence artifacts/release
+          .github/scripts/release-security-policy.sh inventory
           SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)
           export SOURCE_DATE_EPOCH
-          for workspace in rebalancer-system market-grid-system limit-grid-system fee-system; do
+          for workspace in $(.github/scripts/release-security-policy.sh workspaces); do
             .github/scripts/reproducible-build.sh "$workspace" artifacts/release default \
               2>&1 | tee "evidence/$workspace-default-build.log"
             .github/scripts/reproducible-build.sh "$workspace" artifacts/release mainnet \

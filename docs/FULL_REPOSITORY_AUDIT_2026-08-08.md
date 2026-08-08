@@ -21,9 +21,9 @@ remediation update; production decision: **BLOCKED**.
 
 ## Limitations
 
-- After remediation, `make test`, `make clippy`, shell syntax validation,
-  `test-area/common-test.sh`, workflow YAML parsing, and an explicit missing
-  registry environment compile-failure check were reported successful on the
+- After remediation, `make test`, `make clippy`, release-policy fixture tests,
+  release inventory validation, live RustSec policy validation, shell syntax
+  validation, and workflow YAML parsing were reported successful on the
   uncommitted working tree. Python isolated-install, package-build, lint, type,
   and branch-coverage gates also passed. No LocalTerra fee E2E, production
   deployment, `0.2.0` redeployment, complete reproducible release-artifact run,
@@ -34,14 +34,15 @@ remediation update; production decision: **BLOCKED**.
 
 ## Executive Summary
 
-No Critical finding was confirmed. Of 38 findings, 35 are closed,
-documentation-corrected, or formally de-scoped in the working tree, and three
-are partial. No finding remains open. H-05 remains operationally partial because approved deployed production
-registry, collector, and proxy addresses do not exist. H-08 remains an evidence
-gap for deeper rebalancer real-registry full-flow execution on the current
-SHA. M-30 remains partial for package/tag version consistency and the
-narrow/expiring treatment of the RustSec exception. M-15 and M-32 are closed as
-formally accepted out of scope because limit-grid is abandoned as a production
+No Critical finding was confirmed. Of 38 findings, 37 are closed,
+documentation-corrected, or formally de-scoped in the working tree, and one is
+partial. No finding remains open. H-05 remains operationally partial because
+approved deployed production registry, collector, and proxy addresses and
+topology/whitelist evidence do not exist. H-08 is closed by genuine
+`cw-multi-test` real-registry full-settlement coverage. M-30 is closed by the
+authoritative release inventory, exact stable-tag/package-version enforcement,
+and package/version/lockfile-scoped expiring RustSec policy. M-15 and M-32 are
+closed as formally accepted out of scope because limit-grid is abandoned as a production
 venue and retained only as a PoC artifact; their underlying DEX semantics were
 not technically validated.
 
@@ -51,8 +52,8 @@ The contracts also contain meaningful strengths: pending settlement state and re
 
 **BLOCKED.** Do not publish production artifacts or accept economic funds until
 approved registry/collector/proxy addresses exist, proxy/pair external
-semantics are verified, remaining High/Medium findings are closed or formally
-accepted, canonical fee E2E runs on the exact candidate SHA, and an independent
+semantics are verified, H-05 is closed or formally accepted, canonical fee E2E
+runs on the exact candidate SHA, and an independent
 audit plus the `0.2.0` redeployment rehearsal completes.
 
 ## Severity Table
@@ -60,16 +61,16 @@ audit plus the `0.2.0` redeployment rehearsal completes.
 | Severity | Count | Disposition |
 |---|---:|---|
 | Critical | 0 | None confirmed |
-| High | 8 | 6 closed in working tree; 2 partially open |
-| Medium | 24 | 23 closed/de-scoped; 1 partial in working tree |
+| High | 8 | 7 closed in working tree; 1 partial |
+| Medium | 24 | 24 closed/de-scoped in working tree |
 | Low/Coverage | 6 | 6 closed/doc-corrected |
 | **Total** | **38** | Production remains blocked |
 
-Across all severities: 35 findings are closed/doc-corrected/de-scoped in the
-working tree and 3 are partial. None remains open. These are working-tree dispositions,
+Across all severities: 37 findings are closed/doc-corrected/de-scoped in the
+working tree and 1 is partial. None remains open. These are working-tree dispositions,
 not immutable release evidence.
 
-- **Partial:** H-05, H-08, M-30.
+- **Partial:** H-05.
 - **Open:** none.
 
 ## Findings
@@ -177,8 +178,19 @@ None confirmed.
 - **Remediation:** Add a real-registry full rebalancer swap/settlement test; keep
   documentation precise about direct-query versus full-flow evidence. Limit-grid
   coverage is PoC-only and no longer a production release criterion.
-- **Status:** **partially closed**. Documentation is corrected; deeper
-  real-registry rebalancer swap/settlement full-flow coverage remains open.
+- **Working-tree resolution:** `real_registry_ladder` now performs genuine
+  `cw-multi-test` settlement with actual CW20 CL8Y, the actual fee-registry's
+  canonical 180 bps ladder, actual bot-vault, bot-liquidity, and swap-proxy
+  contracts, and stateful external DEX pair/factory models. It exercises the
+  no-holder case and tiers 1 through 9 through rebalance, submessage, reply,
+  NAV-priced `MintTo`, and collector pro-rata withdrawal. Assertions cover
+  180/175/162/144/117/90/72/45/27/9 bps, tier/source, provenance, settled
+  balances, LP amount, collector balance, and redemption claim `<= F`. The
+  existing direct ladder-boundary test remains.
+- **Status:** **closed in working tree** as source/test coverage. This is a full
+  in-process multi-contract flow, not LocalTerra or on-chain E2E. Canonical
+  LocalTerra execution against the exact release candidate remains release
+  evidence rather than an open audit finding.
 
 ### Medium
 
@@ -445,11 +457,22 @@ assumption described above.
 - **Impact:** A valid signed tag can point outside the intended main lineage or publish artifacts whose package versions do not match the tag; fee dependencies are unscanned; a global ignored advisory may outlive a narrow justification.
 - **Evidence/reasoning:** Workflow checks signed annotated tag and exact SHA but not ancestry or `vX.Y.Z` consistency; security loops omit fee-system and ignore `RUSTSEC-2024-0344` without package/version-scoped enforcement.
 - **Remediation:** Require ancestry from protected release branch, clean/version-consistent manifests, fee-system audit/deny, and a documented expiring advisory exception constrained to affected package/version.
-- **Working-tree resolution:** Release now checks tag ancestry from `main`, and
-  fee-system is included in source/security/release requirements. Package-version
-  to tag consistency and narrowing/expiry of the global RustSec exception remain
-  unresolved.
-- **Status:** **partially closed**.
+- **Working-tree resolution:** `.github/release-policy.json` is the authoritative
+  four-workspace package/artifact inventory and classifies packages as production
+  or PoC; limit-grid remains artifact-only PoC. Release tags must be exact stable
+  `vMAJOR.MINOR.PATCH` values with no prerelease or leading zeros, and every
+  production package version must match the tag. Production packages are aligned
+  at `0.2.0`. Machine validation checks Cargo inventory and artifact flags and
+  derives workspace/artifact counts rather than trusting duplicated constants.
+  `RUSTSEC-2024-0344` is allowed only for `curve25519-dalek` 3.2.0 in all four
+  current lockfiles, transitively through CosmWasm 1.5.11/ed25519-zebra 3.1.0,
+  until 2027-02-01 UTC. Validation fails if the exception expires, disappears,
+  targets another package/version, or accompanies an extra vulnerability; the
+  former global `--ignore` is removed. Fixtures cover valid, mismatch, malformed,
+  prerelease, expired, wrong-package, wrong-version, and extra-advisory cases.
+  Tag ancestry from `main` and fee-system source/security gates remain enforced.
+- **Status:** **closed in working tree**. Exact-candidate release workflow and
+  artifact execution remains a release gate, not an open audit finding.
 
 #### M-31 - Market-grid pause freezes withdrawals
 
@@ -594,7 +617,9 @@ baseline findings; working-tree closure does not equal production evidence:
 - Corrects proxy claims: multiple vaults may share a pair, but production proxy
   deployment, pinning, provenance, and DEX whitelist remain prerequisites;
   limit-grid has no proxy.
-- Corrects ladder evidence: market-grid has a real-registry full rebalance; limit and rebalancer ladder tests are direct registry queries; rebalancer charge coverage uses mocked rates.
+- Corrects ladder evidence: rebalancer now has a genuine `cw-multi-test`
+  real-registry full settlement across no-holder and tiers 1 through 9, while
+  canonical LocalTerra/on-chain execution remains separate release evidence.
 - Separates historical local/E2E results from current-SHA evidence and marks the older rebalancer internal review as historical/superseded.
 - Corrects deployment/operations text for required liquidity code ID, manager
   fee propagation, old-vault migration/redeployment, Exit collector backing,
@@ -613,19 +638,16 @@ baseline findings; working-tree closure does not equal production evidence:
 2. Keep limit-grid explicitly labelled and distributed as PoC-only; do not
    promote its artifacts to production without reopening M-15 and M-32.
 3. Run complete exact-SHA release evidence: four-workspace default/mainnet
-   reproducible builds and manifests, security/source gates, canonical fee E2E,
-   and artifact inspection. Add package-version/tag consistency and narrow the
-   RustSec exception.
+   reproducible builds and manifests, security/source gates, canonical LocalTerra
+   fee E2E, and artifact inspection under the authoritative release policy.
 4. Redeploy market-grid 0.1.x and bot-vault 0.1.x. Replace any routed 0.1.x swap-proxy
    with a fresh 0.2.0 instance and re-register routes; migrate only an empty
    compatible proxy. Do not migrate bot-liquidity 0.1.x. Rehearse each supported
    migration from its frozen fixture.
-5. Add the still-missing real-registry rebalancer full-flow execution evidence
-   on the exact candidate SHA.
-6. Complete independent contract/operator/release audit, deployed CL8Y semantics
+5. Complete independent contract/operator/release audit, deployed CL8Y semantics
    verification, incident/rollback exercise, and limited-value canary planning.
-7. Reconsider production only after partial High/Medium findings are closed or
-   formally accepted with exact-SHA evidence and signed
+6. Reconsider production only after H-05 is closed or formally accepted with
+   exact-SHA evidence and signed
    deployment records.
 
 ## Verification Performed
@@ -637,6 +659,10 @@ baseline findings; working-tree closure does not equal production evidence:
   grid operator passed 71 tests.
 - `make clippy` passed on all four workspaces with `mainnet` and `-D warnings`.
 - `bash -n`, `test-area/common-test.sh`, and workflow YAML parsing passed.
+- Release-policy fixture tests and release inventory validation passed.
+- Live RustSec policy validation passed. `cargo deny` was reported passing by
+  the implementation agent; that report is not independently rerun evidence in
+  this documentation update.
 - Compilation with a missing `CL8Y_CANONICAL_FEE_REGISTRY` passed the expected
   negative check by failing.
 - Isolated sdist/wheel install, Ruff 0.12.10, MyPy 1.17.1, and the 70% branch

@@ -1,0 +1,45 @@
+{
+  "tag_policy": {
+    "format": "vMAJOR.MINOR.PATCH",
+    "prereleases": false
+  },
+  "workspaces": [
+    {
+      "path": "rebalancer-system",
+      "packages": [
+        {"name": "bot-types", "manifest": "packages/bot-types/Cargo.toml", "tier": "production", "artifact": false},
+        {"name": "cl8y-bot-liquidity", "manifest": "contracts/bot-liquidity/Cargo.toml", "tier": "production", "artifact": true},
+        {"name": "cl8y-bot-vault", "manifest": "contracts/bot-vault/Cargo.toml", "tier": "production", "artifact": true},
+        {"name": "cl8y-dex", "manifest": "packages/cl8y-dex/Cargo.toml", "tier": "production", "artifact": false},
+        {"name": "cl8y-swap-proxy", "manifest": "contracts/swap-proxy/Cargo.toml", "tier": "production", "artifact": true}
+      ]
+    },
+    {
+      "path": "market-grid-system",
+      "packages": [
+        {"name": "cl8y-grid-vault-swap", "manifest": "contracts/grid-vault-swap/Cargo.toml", "tier": "production", "artifact": true}
+      ]
+    },
+    {
+      "path": "limit-grid-system",
+      "packages": [
+        {"name": "cl8y-grid-manager", "manifest": "contracts/grid-manager/Cargo.toml", "tier": "poc", "artifact": true},
+        {"name": "cl8y-grid-vault", "manifest": "contracts/grid-vault/Cargo.toml", "tier": "poc", "artifact": true}
+      ]
+    },
+    {
+      "path": "fee-system",
+      "packages": [
+        {"name": "cl8y-fee-collector", "manifest": "contracts/fee-collector/Cargo.toml", "tier": "production", "artifact": true},
+        {"name": "cl8y-fee-registry", "manifest": "contracts/fee-registry/Cargo.toml", "tier": "production", "artifact": true}
+      ]
+    }
+  ],
+  "rustsec_exception": {
+    "advisory": "RUSTSEC-2024-0344",
+    "package": "curve25519-dalek",
+    "version": "3.2.0",
+    "expires_utc": "2027-02-01",
+    "reason": "CosmWasm 1.5.11 locks ed25519-zebra 3.1.0 to curve25519-dalek 3.2.0; the patched 4.x API is not compatible with this CosmWasm line."
+  }
+}

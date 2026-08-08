@@ -50,7 +50,11 @@ the final pinned artifact set passes step 7. If any bootstrap input changes,
 restart verification and record the new artifact/address relationship.
 
 Current release/reproducible definitions cover all four workspaces, default and
-mainnet artifact sets, and manifests. They still require approved environment
+mainnet artifact sets, and manifests. `.github/release-policy.json` is the
+authoritative inventory, classifies limit-grid as artifact-only PoC, and requires
+all production package versions to match an exact stable release tag. Current
+production packages, including fee-registry and fee-collector, are `0.2.0`.
+The definitions still require approved environment
 values and current-SHA execution evidence. Merely passing `make test` or `make
 clippy` does not prove that the complete released Wasm set was reproduced.
 
@@ -214,7 +218,8 @@ use this as an upgrade path for a 0.1.x market vault:
 Register the market-grid vault route on the canonical proxy before rebalancing.
 
 Market-grid `grid-vault-swap`, rebalancer `bot-vault`, `swap-proxy`, and
-`bot-liquidity` are `0.2.0`. The cutover policy is contract-specific:
+`bot-liquidity`, fee-registry, and fee-collector are `0.2.0`. The cutover policy
+is contract-specific:
 
 - redeploy market-grid 0.1.x and bot-vault 0.1.x;
 - replace a swap-proxy 0.1.x that contains any routes with a fresh 0.2.0 proxy,
@@ -287,3 +292,8 @@ Local dummy-address fee scripts are development evidence only. A dedicated
 `make local-fee-e2e` target and canonical workflow now exist, but the LocalTerra
 fee suite was not run in this working tree. The full reproducible release
 artifact set was also not run.
+
+The rebalancer's actual-contract `cw-multi-test` ladder test covers full
+settlement from rebalance through collector withdrawal for no-holder and tiers
+1 through 9. It is valuable source/test coverage but does not replace this
+runbook's exact-candidate LocalTerra/on-chain canary requirement.

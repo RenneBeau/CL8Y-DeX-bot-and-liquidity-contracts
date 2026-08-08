@@ -64,6 +64,14 @@ proxy state may migrate. `bot-liquidity` 0.1.x cannot derive a trusted admin and
 must not migrate. Limit `grid-vault` 0.1.0 to 0.1.1 remains supported. Existing
 fee-disabled limit vaults require an approved migration or redeployment.
 
+`.github/release-policy.json` is the authoritative package and artifact
+inventory. It requires exact stable `vMAJOR.MINOR.PATCH` tags, rejects
+prereleases and leading zeros, and requires every production package to match the
+tag. Current production packages, including fee-registry and fee-collector, are
+`0.2.0`; limit-grid remains artifact-only PoC. At the audit-finding level H-05 is
+the sole partial finding; independent audit, reproducible exact-candidate
+artifacts, and canonical LocalTerra fee E2E remain separate release gates.
+
 Do not deploy economic assets until the blockers in
 [`docs/DEPLOY_FEE_SYSTEM.md`](docs/DEPLOY_FEE_SYSTEM.md) and
 [`RELEASE.md`](RELEASE.md) are closed and independently verified. All contracts
@@ -79,8 +87,10 @@ make local-e2e
 
 The default `local-e2e` path runs without protocol-fee configuration. A separate
 `make local-fee-e2e` target and canonical fee E2E workflow now exist, but that
-full LocalTerra fee suite was not run in this working tree. Source verification
-passed, including 63 rebalancer keeper tests, 71 grid operator tests, and the
+full LocalTerra fee suite was not run in this working tree. Rebalancer source
+coverage does include a genuine `cw-multi-test` full settlement across the
+actual canonical fee ladder and actual protocol contracts; it is not on-chain
+LocalTerra evidence. Source verification passed, including 63 rebalancer keeper tests, 71 grid operator tests, and the
 70% Python branch-coverage gate; this is not independent audit evidence. See
 [`docs/TEST_RESULTS.md`](docs/TEST_RESULTS.md) for SHA-scoped evidence and
 [`test-area/README.md`](test-area/README.md) for exact suite scope.

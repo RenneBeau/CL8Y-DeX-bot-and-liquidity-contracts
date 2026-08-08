@@ -51,9 +51,9 @@ token-query failure itself grants no discount.
 
 The contracts are unaudited and production deployment is blocked pending
 approved registry/collector/proxy compile-time values, deployed proxy provenance
-and whitelisting, canonical fee E2E, the `0.2.0` redeployment, and remaining
-audit findings. Mainnet compilation fails if any required environment value is
-missing or empty. See
+and whitelisting, canonical fee E2E, the `0.2.0` redeployment, and independent
+review. H-05 is the sole partial repository audit finding. Mainnet compilation
+fails if any required environment value is missing or empty. See
 `../docs/DEPLOY_FEE_SYSTEM.md` and `../RELEASE.md`.
 
 ## Verify
@@ -66,6 +66,13 @@ cargo clippy --manifest-path rebalancer-system/Cargo.toml --all-targets -- -D wa
 make optimize
 make local-e2e
 ```
+
+`real_registry_ladder` provides genuine `cw-multi-test` full settlement with
+actual CW20 CL8Y, fee-registry, bot-vault, bot-liquidity, and swap-proxy
+contracts plus stateful pair/factory models. It covers no-holder and tiers 1
+through 9 through NAV-priced collector mint and pro-rata withdrawal. This is
+not LocalTerra/on-chain E2E; canonical exact-candidate LocalTerra evidence is
+still required for release.
 
 ## Documentation
 

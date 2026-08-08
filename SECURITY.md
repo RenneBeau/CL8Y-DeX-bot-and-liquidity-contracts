@@ -31,8 +31,10 @@ Key deployment requirements:
   proxy state. Never migrate bot-liquidity 0.1.x because no trusted admin can be
   derived. Limit grid-vault 0.1.0 to 0.1.1 remains supported.
 
-Dependency scanning ignores `RUSTSEC-2024-0344` only for the pinned CosmWasm
-1.5 host dependency. `curve25519-dalek` is absent from the
-`wasm32-unknown-unknown` contract graph, and the host path verifies public
-signatures without handling secret scalars. Reassess and remove this exception
-when upgrading the CosmWasm dependency family.
+Dependency policy allows `RUSTSEC-2024-0344` only for
+`curve25519-dalek` 3.2.0 in all four current lockfiles, transitively through
+CosmWasm 1.5.11/ed25519-zebra 3.1.0, and only until 2027-02-01 UTC. Validation
+fails on expiry, disappearance, package/version drift, or an extra vulnerability;
+there is no global `cargo audit --ignore`. `curve25519-dalek` is absent from the
+`wasm32-unknown-unknown` contract graph. The `RUSTSEC-2024-0388` derivative 2.2.0
+unmaintained warning is informational, not a vulnerability exception.

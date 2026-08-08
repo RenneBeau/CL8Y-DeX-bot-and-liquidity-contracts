@@ -4,8 +4,10 @@ This is an operational gate, not a claim of security. Every item must identify
 the exact release commit and retained evidence before funds are accepted.
 
 Current status: **BLOCKED**. Approved real registry/collector/proxy addresses do
-not exist, canonical fee E2E is unrun, and the `0.2.0` redeployment described
-below has not been executed.
+not exist, canonical exact-candidate LocalTerra fee E2E is unrun, and the `0.2.0`
+redeployment described below has not been executed. H-05 is the sole partial
+repository audit finding; independent audit and exact-candidate release evidence
+remain separate gates.
 
 ## Required Roles
 
@@ -24,6 +26,9 @@ in the private deployment record. Never commit signer identities or secrets here
 
 - Exact commit has successful source, dependency, reproducible-Wasm and LocalTerra
   E2E GitHub Actions checks.
+- Release policy accepts the exact stable tag, every production package version
+  matches it, inventory/artifact flags match Cargo, and the scoped RustSec policy
+  is unexpired and passes without an extra vulnerability.
 - Optimized Wasm hashes match retained CI artifacts.
 - An independent reviewer approved the complete diff from the prior release.
 - The contract-specific 0.2.0 cutover was rehearsed: bot-vault and bot-liquidity
@@ -125,3 +130,12 @@ chain Wasm-admin transfer are separate procedures.
 - CL8Y pair behavior, chain finality and standard CW20 semantics remain external
   trust assumptions.
 - Passing this checklist does not imply zero vulnerabilities.
+
+## Current Source Evidence
+
+The `real_registry_ladder` `cw-multi-test` exercises actual protocol contracts
+and stateful external pair/factory models from rebalance through reply,
+NAV-priced collector mint, and pro-rata withdrawal for no-holder and tiers 1
+through 9. Its exact ladder, provenance, settlement, LP, and claim-bound
+assertions close the source/test coverage gap. It does not satisfy the
+LocalTerra/on-chain item in the pre-deployment gate.

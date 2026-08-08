@@ -9,8 +9,9 @@ definition is not proof that it ran, and source tests are not a security audit.
 
 - Repository HEAD inspected for this documentation audit:
   `921859b7bcfa9e6e80ffb78672474874332dd03d`
-- Current uncommitted audit-fix working tree: `make test`, `make clippy`, shell
-  syntax validation, `test-area/common-test.sh`, workflow YAML parsing, and the
+- Current uncommitted audit-fix working tree: `make test`, `make clippy`, release
+  policy fixture tests, release inventory validation, live RustSec policy
+  validation, shell syntax validation, workflow YAML parsing, and the
   expected compile failure with missing `CL8Y_CANONICAL_FEE_REGISTRY` passed on
   2026-08-08. Isolated package installs/builds, pinned lint/type checks, and the
   Python branch-coverage gate also passed. These are working-tree results until
@@ -32,12 +33,18 @@ below preserve implementation chronology, including designs later superseded.
   governance storage ID `0` is a different concept.
 - Market-grid has a full rebalance flow using the real fee-registry ladder:
   `rebalance_uses_the_real_cl8y_ladder_for_every_tier`.
-- Limit-grid
-  `real_registry_detects_every_ladder_tier_for_the_bot_owner` and rebalancer
-  `real_registry_detects_every_ladder_tier_for_the_bot_admin_model` directly
-  query the real registry contract; they are not full fill/rebalance flows.
-- Rebalancer `charge_fee_applies_every_canonical_ladder_rate` exercises the real
-  charge path with mocked registry rates, not a real registry ladder query.
+- Limit-grid `real_registry_detects_every_ladder_tier_for_the_bot_owner`
+  directly queries the real registry contract; it is PoC coverage, not a full
+  fill flow.
+- Rebalancer `real_registry_ladder` now performs genuine `cw-multi-test` full
+  settlement with actual CW20 CL8Y, fee-registry canonical 180 ladder,
+  bot-vault, bot-liquidity, swap-proxy, and stateful external pair/factory
+  models. No-holder and tiers 1 through 9 traverse rebalance, submessage, reply,
+  NAV-priced `MintTo`, and collector pro-rata withdrawal. It asserts the exact
+  180/175/162/144/117/90/72/45/27/9 bps ladder, tier/source, provenance, settled
+  balances, LP amount, collector balance, and redemption claim `<= F`. The
+  direct ladder-boundary test is retained. This is in-process multi-contract
+  evidence, not LocalTerra/on-chain E2E.
 - Fee shares now convert economic fee `F` through NAV in all venues as
   `floor(F*S/(A-F))`; unit/integration regressions cover varied NAV and no
   immediate overclaim. Limit Exit, market lower-bound/ideal-offer/migration,
@@ -74,6 +81,11 @@ below preserve implementation chronology, including designs later superseded.
 - No evidence here establishes production readiness, current-mainnet proxy
   deployment/whitelisting, external pair semantics, completed `0.2.0`
   redeployment, or complete reproducible artifacts.
+- `.github/release-policy.json` is authoritative for production versus PoC
+  packages/artifacts. Exact stable tags and production package-version matching
+  are machine checked; current production packages are `0.2.0`. The scoped
+  `RUSTSEC-2024-0344` exception is limited to `curve25519-dalek` 3.2.0 in all
+  four lockfiles through 2027-02-01 UTC.
 
 Current working-tree gate totals from `make test`:
 
@@ -94,8 +106,14 @@ Current working-tree gate totals from `make test`:
 | `test-area/common-test.sh` | PASS |
 | GitHub workflow YAML parse | PASS |
 | Missing registry environment compile-failure check | PASS (compilation failed as required) |
+| Release policy fixture tests | PASS |
+| Release inventory validation | PASS |
+| Live RustSec policy | PASS |
+| `cargo deny` | PASS reported by implementation agent; not rerun for this documentation update |
 | Full canonical LocalTerra fee E2E | NOT RUN in this working tree |
 | Complete reproducible double build | NOT CLAIMED by primary validation |
+| Full release/reproducible Docker artifacts | NOT RUN |
+| Candidate tag workflow | NOT RUN |
 
 The Python suites intentionally invoke invalid CLI arguments in negative tests;
 printed `argparse` errors are expected while the suites still pass.
@@ -506,11 +524,9 @@ Gate runs (feature-gated):
 
 The earlier gap was real: the fee-registry's canonical CL8Y tier ladder was
 already tested in `fee-system/contracts/fee-registry/tests/audit_tiers.rs`, but
-the three vault workspaces only used local mock registries (fixed bps, byte
-parity, or hard-coded tier-9). To prove the vault-facing query shape against
-the DEX's actual ladder, each workspace now carries a targeted test that wires
-the **real** `cl8y-fee-registry` contract to a real mintable CW20 CL8Y token
-and resolves `EffectiveFee` at every canonical tier boundary and one wei above.
+the vault workspaces initially relied on local mock registries for application
+coverage. Targeted tests then wired the **real** `cl8y-fee-registry` contract to
+a real mintable CW20 CL8Y token and retained direct boundary coverage.
 
 - `market-grid-system/contracts/grid-vault-swap/tests/grid_vault_swap_integration.rs`:
   `real_registry_detects_every_ladder_tier_for_the_operating_user`
@@ -519,10 +535,9 @@ and resolves `EffectiveFee` at every canonical tier boundary and one wei above.
 - `rebalancer-system/contracts/bot-vault/tests/real_registry_ladder.rs`:
   `real_registry_detects_every_ladder_tier_for_the_bot_admin_model`
 
-These three tests use the vault-facing `EffectiveFee` query shape. Only the
-market-grid test below drives a full rebalance against the real registry.
-Limit-grid and rebalancer ladder-detection tests query the registry directly;
-they do not execute full reconcile/rebalance paths.
+The limit-grid and named rebalancer ladder-detection tests query the registry
+directly. Limit-grid remains PoC-only. Market-grid and the newer rebalancer test
+also drive full application flows against the real registry.
 
 Gate runs:
 
@@ -531,6 +546,7 @@ Gate runs:
 | `cargo test --manifest-path market-grid-system/Cargo.toml -p cl8y-grid-vault-swap real_registry_detects_every_ladder_tier_for_the_operating_user` | PASS |
 | `cargo test --manifest-path limit-grid-system/Cargo.toml -p cl8y-grid-vault real_registry_detects_every_ladder_tier_for_the_bot_owner` | PASS |
 | `cargo test --manifest-path rebalancer-system/Cargo.toml -p cl8y-bot-vault real_registry_detects_every_ladder_tier_for_the_bot_admin_model` | PASS |
+| `cargo test --manifest-path rebalancer-system/Cargo.toml -p cl8y-bot-vault real_registry_drives_every_user_rate_through_rebalance_and_redemption` | PASS through `make test` |
 | `cargo clippy --manifest-path market-grid-system/Cargo.toml -p cl8y-grid-vault-swap --tests -- -D warnings` | PASS |
 | `cargo clippy --manifest-path limit-grid-system/Cargo.toml -p cl8y-grid-vault --tests -- -D warnings` | PASS |
 | `cargo clippy --manifest-path rebalancer-system/Cargo.toml -p cl8y-bot-vault --tests -- -D warnings` | PASS |
@@ -546,17 +562,21 @@ the emitted `fee_bps` / `fee_tier` on `complete_rebalance` are asserted. This
 proves the live market-grid fee flow consumes the DEX ladder exactly as seeded
 in the fee-system.
 
-The rebalancer workspace also covers the charge application path across the
+The rebalancer workspace retains the direct charge application test across the
 same rates:
 
 - `charge_fee_applies_every_canonical_ladder_rate`
 
-This test uses internal pool/liquidity mocks and mocked registry rates; there is
-not a cw-multi-test rebalance harness for the whole bot-vault swap path. It
-exercises `charge_fee` for every canonical effective rate, verifies that only
-  the collector is minted. Current NAV conversion tests separately check
-  `floor(F*S/(A-F))`; this historical ladder test's rate-resolution scope should
-  not be read as NAV evidence.
+That older test uses mocked registry rates. The newer
+`real_registry_drives_every_user_rate_through_rebalance_and_redemption` test is
+the genuine `cw-multi-test` full harness: actual protocol contracts plus
+stateful external pair/factory models execute no-holder and tiers 1 through 9
+through rebalance, submessage, reply, NAV-priced `MintTo`, and collector
+pro-rata withdrawal. It asserts exact rates/tier/source, provenance, settlement
+balances, LP supply and collector balance, and redemption claim `<= F`.
+
+This remains in-process source/test evidence. It does not claim LocalTerra,
+signed-chain, or exact-release-candidate execution.
 
 Additional gate runs:
 
@@ -564,6 +584,7 @@ Additional gate runs:
 |---|---|
 | `cargo test --manifest-path market-grid-system/Cargo.toml -p cl8y-grid-vault-swap rebalance_uses_the_real_cl8y_ladder_for_every_tier` | PASS |
 | `cargo test --manifest-path rebalancer-system/Cargo.toml -p cl8y-bot-vault charge_fee_applies_every_canonical_ladder_rate` | PASS |
+| `cargo test --manifest-path rebalancer-system/Cargo.toml -p cl8y-bot-vault real_registry_drives_every_user_rate_through_rebalance_and_redemption` | PASS through `make test` |
 
 ## Historical CI Evidence
 

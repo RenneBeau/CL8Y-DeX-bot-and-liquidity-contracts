@@ -37,6 +37,10 @@ jobs:
           test "$(jq -r '.verification.verified' <<<"$tag")" = true
           test "$(jq -r '.object.sha' <<<"$tag")" = "$GITHUB_SHA"
           jq '.verification' <<<"$tag" | tee tag-verification.json
+      - name: Require tag, package, and artifact consistency
+        env:
+          TAG: ${{ github.ref_name }}
+        run: .github/scripts/release-security-policy.sh release "$TAG"
       - name: Require release tag on main
         run: |
           git fetch origin main
@@ -79,14 +83,16 @@ jobs:
           mkdir -p release evidence
           SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)
           export SOURCE_DATE_EPOCH
-          for workspace in rebalancer-system market-grid-system limit-grid-system fee-system; do
+          for workspace in $(.github/scripts/release-security-policy.sh workspaces); do
             .github/scripts/reproducible-build.sh "$workspace" release default \
               2>&1 | tee "evidence/$workspace-default-build.log"
             .github/scripts/reproducible-build.sh "$workspace" release mainnet \
               2>&1 | tee "evidence/$workspace-mainnet-build.log"
           done
-          test "$(find release -maxdepth 1 -name '*.wasm' | wc -l)" -eq 16
-          test "$(find release -maxdepth 1 -name '*-manifest.json' | wc -l)" -eq 8
+          artifacts=$(.github/scripts/release-security-policy.sh artifact-count)
+          workspaces=$(.github/scripts/release-security-policy.sh workspaces | wc -l)
+          test "$(find release -maxdepth 1 -name '*.wasm' | wc -l)" -eq "$((artifacts * 2))"
+          test "$(find release -maxdepth 1 -name '*-manifest.json' | wc -l)" -eq "$((workspaces * 2))"
       - name: Generate SBOM
         uses: anchore/sbom-action@55dc4ee22412511ee8c3142cbea40418e6cec693 # v0.17.8
         with:
