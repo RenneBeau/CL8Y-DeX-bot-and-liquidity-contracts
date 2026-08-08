@@ -397,6 +397,39 @@ Gate runs (feature-gated):
 | `make test` (all workspaces, default + mainnet) | PASS: 245 Rust tests, exit 0 |
 | `make clippy` (all workspaces, `--features mainnet`, `-D warnings`) | PASS, exit 0 |
 
+## Real CL8Y Ladder Detection In Vault Workspaces (2026-08-08)
+
+The earlier gap was real: the fee-registry's canonical CL8Y tier ladder was
+already tested in `fee-system/contracts/fee-registry/tests/audit_tiers.rs`, but
+the three vault workspaces only used local mock registries (fixed bps, byte
+parity, or hard-coded tier-9). To prove the vault-facing query shape against
+the DEX's actual ladder, each workspace now carries a targeted test that wires
+the **real** `cl8y-fee-registry` contract to a real mintable CW20 CL8Y token
+and resolves `EffectiveFee` at every canonical tier boundary and one wei above.
+
+- `market-grid-system/contracts/grid-vault-swap/tests/grid_vault_swap_integration.rs`:
+  `real_registry_detects_every_ladder_tier_for_the_operating_user`
+- `limit-grid-system/contracts/grid-vault/tests/grid_vault_integration.rs`:
+  `real_registry_detects_every_ladder_tier_for_the_bot_owner`
+- `rebalancer-system/contracts/bot-vault/tests/real_registry_ladder.rs`:
+  `real_registry_detects_every_ladder_tier_for_the_bot_admin_model`
+
+These tests use the same `EffectiveFee` query that the vaults issue on a fill /
+rebalance / reconcile path, so any future schema mismatch (`holding`, `source`,
+`tier_id`, etc.) between a vault and the real fee-registry will fail in the
+vault workspace rather than only in on-chain E2E.
+
+Gate runs:
+
+| Command | Result |
+|---|---|
+| `cargo test --manifest-path market-grid-system/Cargo.toml -p cl8y-grid-vault-swap real_registry_detects_every_ladder_tier_for_the_operating_user` | PASS |
+| `cargo test --manifest-path limit-grid-system/Cargo.toml -p cl8y-grid-vault real_registry_detects_every_ladder_tier_for_the_bot_owner` | PASS |
+| `cargo test --manifest-path rebalancer-system/Cargo.toml -p cl8y-bot-vault real_registry_detects_every_ladder_tier_for_the_bot_admin_model` | PASS |
+| `cargo clippy --manifest-path market-grid-system/Cargo.toml -p cl8y-grid-vault-swap --tests -- -D warnings` | PASS |
+| `cargo clippy --manifest-path limit-grid-system/Cargo.toml -p cl8y-grid-vault --tests -- -D warnings` | PASS |
+| `cargo clippy --manifest-path rebalancer-system/Cargo.toml -p cl8y-bot-vault --tests -- -D warnings` | PASS |
+
 ## Existing CI Evidence
 
 The baseline commit had retained source-quality, dependency-security, and

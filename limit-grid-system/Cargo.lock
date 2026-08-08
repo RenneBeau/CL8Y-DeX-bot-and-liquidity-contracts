@@ -92,6 +92,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
+name = "cl8y-fee-registry"
+version = "0.1.0"
+dependencies = [
+ "cosmwasm-schema",
+ "cosmwasm-std",
+ "cw-storage-plus",
+ "cw2",
+ "cw20",
+ "semver",
+ "thiserror",
+]
+
+[[package]]
 name = "cl8y-grid-manager"
 version = "0.1.0"
 dependencies = [
@@ -110,6 +123,7 @@ name = "cl8y-grid-vault"
 version = "0.1.1"
 dependencies = [
  "base64ct",
+ "cl8y-fee-registry",
  "cl8y-grid-manager",
  "cosmwasm-schema",
  "cosmwasm-std",
