@@ -9,6 +9,12 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 library = []
+## Enables the production lock: `cl8y` and `treasury` are pinned to the
+## canonical mainnet addresses compiled below and can never be re-pointed.
+## Use for reproducibility of the mainnet artifact only (`cargo build --release
+## --target wasm32-unknown-unknown --features mainnet`); leave off for local
+## test-a-net / E2E deployments which use dummy addresses.
+mainnet = []
 
 [dependencies]
 cosmwasm-schema.workspace = true

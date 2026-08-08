@@ -8,6 +8,22 @@ This file is the **source of truth for mainnet**. Local test-a-net runs must use
 the dummy addresses in `test-area/`, because the mainnet CL8Y token and CMM
 treasury do not exist on a local chain.
 
+> **Production-lock feature (`mainnet`).** The fee-registry and fee-collector
+> ship a Rust feature `mainnet` that pins the canonical addresses **at compile
+> time**:
+>
+> - `fee-registry` pins `cl8y` and `treasury` (docs §1); instantiate REJECTS any
+>   other value and `update_config` refuses to re-point them.
+> - `fee-collector` pins `treasury` (its `Collect` payout target is
+>   `config.treasury`); instantiate REJECTS any other value and `update_config`
+>   refuses to re-point it.
+>
+> So a deploying key cannot spin up the fee system pointed at a fake CL8Y token
+> or a personal treasury. **Mainnet artifacts MUST be built with
+> `--features mainnet`** (`make fee-wasm MAINNET=1`); local test-a-net / E2E
+> builds stay featureless so they can use the dummy addresses. Build both and
+> confirm the checksum differs (lock is compiled in).
+
 ## 1. Deployed addresses (Terra Classic mainnet)
 
 | Role | Address |

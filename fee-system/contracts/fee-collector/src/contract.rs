@@ -14,6 +14,14 @@ use crate::state::{Config, CONFIG, VAULT_SHARES};
 const CONTRACT_NAME: &str = "crates.io:cl8y-fee-collector";
 const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Canonical Terra Classic mainnet CMM treasury (docs/DEPLOY_FEE_SYSTEM.md §1).
+/// When the `mainnet` feature is enabled the collector's payout target is pinned
+/// at compile time: instantiate REJECTS any other `treasury` and `update_config`
+/// refuses to re-point it, so a deployer cannot redirect collected fees.
+#[cfg(feature = "mainnet")]
+pub const CANONICAL_TREASURY: &str =
+    "terra16j5u6ey7a84g40sr3gd94nzg5w5fm45046k9s2347qhfpwm5fr6sem3lr2";
+
 /// The collector never reads vault state directly; it delegates the redemption
 /// to the vault, which is the sole reader of its own shares and balances. The
 /// messages below must match the vault integration (grid-vault).
@@ -68,6 +76,15 @@ pub fn instantiate(
     info: MessageInfo,
     msg: InstantiateMsg,
 ) -> Result<Response, ContractError> {
+    #[cfg(feature = "mainnet")]
+    {
+        if msg.treasury != CANONICAL_TREASURY {
+            return Err(ContractError::NonCanonicalAddress {
+                field: "treasury",
+                expected: CANONICAL_TREASURY,
+            });
+        }
+    }
     let governance = deps.api.addr_validate(&msg.governance)?;
     let registry = deps.api.addr_validate(&msg.registry)?;
     let keeper = deps.api.addr_validate(&msg.keeper)?;
@@ -194,6 +211,19 @@ fn execute_update_config(
         return Err(ContractError::Unauthorized);
     }
     let mut config = config;
+    // The payout `treasury` is pinned to the canonical mainnet address when the
+    // `mainnet` feature is enabled; any attempt to re-point it is a hard error.
+    #[cfg(feature = "mainnet")]
+    {
+        if let Some(address) = &treasury {
+            if address != CANONICAL_TREASURY {
+                return Err(ContractError::NonCanonicalAddress {
+                    field: "treasury",
+                    expected: CANONICAL_TREASURY,
+                });
+            }
+        }
+    }
     if let Some(address) = governance {
         config.governance = deps.api.addr_validate(&address)?;
     }

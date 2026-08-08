@@ -1,3 +1,5 @@
+#![cfg(not(feature = "mainnet"))]
+
 use assert_matches::assert_matches;
 use cl8y_fee_collector::msg::{
     ConfigResponse, ExecuteMsg, InstantiateMsg, QueryMsg, VaultSharesResponse,

@@ -11,4 +11,12 @@ pub enum ContractError {
 
     #[error("Vault {vault} reported {shares} shares for the collector; nothing to collect")]
     NoEntitlement { vault: String, shares: u128 },
+
+    #[error(
+        "{field} is pinned to the canonical mainnet address {expected} and cannot be re-pointed"
+    )]
+    NonCanonicalAddress {
+        field: &'static str,
+        expected: &'static str,
+    },
 }

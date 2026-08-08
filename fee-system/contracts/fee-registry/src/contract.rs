@@ -17,6 +17,17 @@ const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const MAX_BPS: u16 = 10_000;
 
+/// Canonical Terra Classic mainnet addresses (docs/DEPLOY_FEE_SYSTEM.md §1,
+/// docs/FEE_TIER_PROTOCOL.md §0). When the `mainnet` feature is enabled these
+/// are pinned at compile time: instantiate REJECTS any other `cl8y`/`treasury`,
+/// so a malicious deployer cannot wire a fake CL8Y token or a personal treasury,
+/// and `update_config` refuses to re-point them.
+#[cfg(feature = "mainnet")]
+pub const CANONICAL_CL8Y: &str = "terra16wtml2q66g82fdkx66tap0qjkahqwp4lwq3ngtygacg5q0kzycgqvhpax3";
+#[cfg(feature = "mainnet")]
+pub const CANONICAL_TREASURY: &str =
+    "terra16j5u6ey7a84g40sr3gd94nzg5w5fm45046k9s2347qhfpwm5fr6sem3lr2";
+
 #[entry_point]
 pub fn instantiate(
     deps: DepsMut,
@@ -24,6 +35,21 @@ pub fn instantiate(
     info: MessageInfo,
     msg: InstantiateMsg,
 ) -> Result<Response, ContractError> {
+    #[cfg(feature = "mainnet")]
+    {
+        if msg.cl8y != CANONICAL_CL8Y {
+            return Err(ContractError::NonCanonicalAddress {
+                field: "cl8y",
+                expected: CANONICAL_CL8Y,
+            });
+        }
+        if msg.treasury != CANONICAL_TREASURY {
+            return Err(ContractError::NonCanonicalAddress {
+                field: "treasury",
+                expected: CANONICAL_TREASURY,
+            });
+        }
+    }
     let governance = deps.api.addr_validate(&msg.governance)?;
     let cl8y = deps.api.addr_validate(&msg.cl8y)?;
     let treasury = deps.api.addr_validate(&msg.treasury)?;
@@ -286,6 +312,28 @@ fn execute_update_config(
 ) -> Result<Response, ContractError> {
     assert_governance(&deps.as_ref(), &info)?;
     let mut config = CONFIG.load(deps.storage)?;
+    // `cl8y` and `treasury` are pinned to the canonical mainnet addresses when
+    // the `mainnet` feature is enabled; any attempt to re-point them is a
+    // hard error (the other config fields remain governance-updatable).
+    #[cfg(feature = "mainnet")]
+    {
+        if let Some(address) = &cl8y {
+            if address != CANONICAL_CL8Y {
+                return Err(ContractError::NonCanonicalAddress {
+                    field: "cl8y",
+                    expected: CANONICAL_CL8Y,
+                });
+            }
+        }
+        if let Some(address) = &treasury {
+            if address != CANONICAL_TREASURY {
+                return Err(ContractError::NonCanonicalAddress {
+                    field: "treasury",
+                    expected: CANONICAL_TREASURY,
+                });
+            }
+        }
+    }
     if let Some(address) = governance {
         config.governance = deps.api.addr_validate(&address)?;
     }

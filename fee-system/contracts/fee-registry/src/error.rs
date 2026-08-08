@@ -23,4 +23,12 @@ pub enum ContractError {
 
     #[error("Effective fee underflow")]
     FeeUnderflow,
+
+    #[error(
+        "{field} is pinned to the canonical mainnet address {expected} and cannot be re-pointed"
+    )]
+    NonCanonicalAddress {
+        field: &'static str,
+        expected: &'static str,
+    },
 }

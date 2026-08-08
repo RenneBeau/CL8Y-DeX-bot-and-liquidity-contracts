@@ -2,6 +2,8 @@
 //! logic were unknown. Covers every holder tier at its exact boundary and one raw
 //! unit below, the fee-bps arithmetic, reserved-tier rules, and base-fee edges.
 
+#![cfg(not(feature = "mainnet"))]
+
 use assert_matches::assert_matches;
 use cl8y_fee_registry::msg::{
     ConfigResponse, EffectiveFeeResponse, ExecuteMsg, InstantiateMsg, QueryMsg, TierEntry,
